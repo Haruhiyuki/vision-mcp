@@ -1,0 +1,660 @@
+// vision-mcp-helper (macOS)
+//
+// 长寿命 JSON-RPC sidecar：从 stdin 按行读 {"id","method","params"}，
+// 到 stdout 按行写 {"id","result"} 或 {"id","error"}。
+//
+// 把所有 OS 调用从 osascript 子进程改为进程内直接调用：
+//   - AXUIElement (ApplicationServices) 拿 AX 树（单 attribute query 微秒级）
+//   - CGEvent (CoreGraphics) 发送 鼠标/键盘
+//   - CGWindowList + CGDisplayCreateImage 截图
+//   - NSWorkspace 激活 app
+//   - NSPasteboard 中文/Unicode 粘贴
+//
+// 设计目标：每个 RPC 调用 < 50ms（osascript adapter 大约 500ms-5s）。
+
+import Foundation
+import AppKit
+import ApplicationServices
+import CoreGraphics
+import IOKit.graphics
+
+// ---------- JSON helpers ----------
+
+func jsonObject(_ obj: Any) -> String {
+    do {
+        let data = try JSONSerialization.data(withJSONObject: obj, options: [])
+        return String(data: data, encoding: .utf8) ?? "{}"
+    } catch {
+        return "{}"
+    }
+}
+
+func emit(_ obj: [String: Any]) {
+    let line = jsonObject(obj)
+    FileHandle.standardOutput.write(Data((line + "\n").utf8))
+}
+
+func emitResult(id: Any?, result: Any) {
+    var msg: [String: Any] = ["result": result]
+    if let id = id { msg["id"] = id }
+    emit(msg)
+}
+
+func emitError(id: Any?, message: String, code: String = "UNKNOWN") {
+    var msg: [String: Any] = ["error": message, "code": code]
+    if let id = id { msg["id"] = id }
+    emit(msg)
+}
+
+func toDict(_ any: Any?) -> [String: Any] {
+    return (any as? [String: Any]) ?? [:]
+}
+
+// ---------- Displays ----------
+
+func listDisplays() -> [[String: Any]] {
+    let screens = NSScreen.screens
+    var out: [[String: Any]] = []
+    for (i, s) in screens.enumerated() {
+        let f = s.frame
+        let v = s.visibleFrame
+        out.append([
+            "id": "display-\(i)",
+            "bounds": ["x": Int(f.origin.x), "y": Int(f.origin.y), "width": Int(f.size.width), "height": Int(f.size.height)],
+            "work_area": ["x": Int(v.origin.x), "y": Int(v.origin.y), "width": Int(v.size.width), "height": Int(v.size.height)],
+            "scale": s.backingScaleFactor,
+            "dpi_x": Int(72 * s.backingScaleFactor),
+            "dpi_y": Int(72 * s.backingScaleFactor),
+            "refresh_rate_hz": 60,
+            "is_primary": i == 0,
+            "is_virtual": false,
+            "native_handle": "\(i)"
+        ])
+    }
+    return out
+}
+
+// ---------- Windows via AX + CGWindowList ----------
+
+struct WindowDesc {
+    let pid: pid_t
+    let index: Int
+    let title: String
+    let processName: String
+    let bundleId: String?
+    let bounds: CGRect
+    let isMinimized: Bool
+    let isFullscreen: Bool
+    let isForeground: Bool
+}
+
+/// 用 NSWorkspace 拿所有运行 app（前台可见的），按 pid 用 AX 取窗口。
+func listWindowsCore(filter: [String: Any]?) -> [WindowDesc] {
+    var out: [WindowDesc] = []
+    let workspace = NSWorkspace.shared
+    let apps = workspace.runningApplications.filter {
+        $0.activationPolicy == .regular
+    }
+    let filterProc = filter?["process_name"] as? String
+    let filterBundle = filter?["bundle_id"] as? String
+    let filterTitle = filter?["title_regex"] as? String
+    let titleRegex: NSRegularExpression? = filterTitle.flatMap {
+        try? NSRegularExpression(pattern: $0)
+    }
+
+    for app in apps {
+        let name = app.localizedName ?? ""
+        let bundle = app.bundleIdentifier
+        if let f = filterProc, name != f { continue }
+        if let f = filterBundle, bundle != f { continue }
+        let pid = app.processIdentifier
+        let axApp = AXUIElementCreateApplication(pid)
+        var windowsValue: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue)
+        if err != .success { continue }
+        guard let windows = windowsValue as? [AXUIElement] else { continue }
+        for (i, w) in windows.enumerated() {
+            let title = (axStringAttr(w, kAXTitleAttribute) ?? "") as String
+            if let re = titleRegex {
+                let range = NSRange(location: 0, length: title.utf16.count)
+                if re.firstMatch(in: title, options: [], range: range) == nil { continue }
+            }
+            let pos = axPointAttr(w, kAXPositionAttribute) ?? .zero
+            let size = axSizeAttr(w, kAXSizeAttribute) ?? .zero
+            let bounds = CGRect(origin: pos, size: size)
+            let minimized = axBoolAttr(w, kAXMinimizedAttribute) ?? false
+            let fullscreen = axBoolAttr(w, "AXFullScreen") ?? false
+            let foreground = app.isActive
+            out.append(WindowDesc(
+                pid: pid, index: i, title: title, processName: name,
+                bundleId: bundle, bounds: bounds,
+                isMinimized: minimized, isFullscreen: fullscreen, isForeground: foreground))
+        }
+    }
+    return out
+}
+
+func toWindowInfo(_ w: WindowDesc) -> [String: Any] {
+    let b: [String: Any] = [
+        "x": Int(w.bounds.origin.x),
+        "y": Int(w.bounds.origin.y),
+        "width": Int(w.bounds.size.width),
+        "height": Int(w.bounds.size.height),
+    ]
+    var out: [String: Any] = [
+        "id": "\(w.pid):\(w.index)",
+        "title": w.title,
+        "process_name": w.processName,
+        "process_id": Int(w.pid),
+        "bounds": b,
+        "client_bounds": b,
+        "is_minimized": w.isMinimized,
+        "is_maximized": false,
+        "is_fullscreen": w.isFullscreen,
+        "is_foreground": w.isForeground,
+        "native_handle": "\(w.pid):\(w.index)",
+    ]
+    if let bid = w.bundleId { out["bundle_id"] = bid }
+    return out
+}
+
+// ---------- AX helpers ----------
+
+func axStringAttr(_ el: AXUIElement, _ attr: String) -> String? {
+    var v: CFTypeRef?
+    let err = AXUIElementCopyAttributeValue(el, attr as CFString, &v)
+    if err != .success { return nil }
+    return v as? String
+}
+
+func axBoolAttr(_ el: AXUIElement, _ attr: String) -> Bool? {
+    var v: CFTypeRef?
+    let err = AXUIElementCopyAttributeValue(el, attr as CFString, &v)
+    if err != .success { return nil }
+    return v as? Bool
+}
+
+func axPointAttr(_ el: AXUIElement, _ attr: String) -> CGPoint? {
+    var v: CFTypeRef?
+    let err = AXUIElementCopyAttributeValue(el, attr as CFString, &v)
+    if err != .success { return nil }
+    let axVal = v as! AXValue
+    var p = CGPoint.zero
+    if AXValueGetValue(axVal, .cgPoint, &p) { return p }
+    return nil
+}
+
+func axSizeAttr(_ el: AXUIElement, _ attr: String) -> CGSize? {
+    var v: CFTypeRef?
+    let err = AXUIElementCopyAttributeValue(el, attr as CFString, &v)
+    if err != .success { return nil }
+    let axVal = v as! AXValue
+    var s = CGSize.zero
+    if AXValueGetValue(axVal, .cgSize, &s) { return s }
+    return nil
+}
+
+func axChildren(_ el: AXUIElement) -> [AXUIElement] {
+    var v: CFTypeRef?
+    let err = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &v)
+    if err != .success { return [] }
+    return (v as? [AXUIElement]) ?? []
+}
+
+func findWindow(handle: String) -> (app: NSRunningApplication, win: AXUIElement, desc: WindowDesc)? {
+    let parts = handle.split(separator: ":")
+    guard parts.count == 2, let pid = pid_t(parts[0]), let idx = Int(parts[1]) else { return nil }
+    guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) else { return nil }
+    let axApp = AXUIElementCreateApplication(pid)
+    var windowsValue: CFTypeRef?
+    let err = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue)
+    if err != .success { return nil }
+    guard let windows = windowsValue as? [AXUIElement] else { return nil }
+
+    // 与 darwin-osascript 一致：优先 pid 内面积最大窗口，避免 popup 顶替 index 0。
+    var sorted = windows.enumerated().map { (i, w) -> (Int, AXUIElement, CGFloat) in
+        let s = axSizeAttr(w, kAXSizeAttribute) ?? .zero
+        return (i, w, s.width * s.height)
+    }
+    sorted.sort { $0.2 > $1.2 }
+    let chosen: AXUIElement
+    let chosenIdx: Int
+    if let pref = sorted.first(where: { $0.0 == idx }), pref.2 > 0 {
+        // 如果 idx 对应的窗口仍存在且非 popup（最大或 >50% 最大）
+        if pref.2 >= sorted.first!.2 * 0.5 {
+            chosenIdx = idx
+            chosen = pref.1
+        } else {
+            chosenIdx = sorted.first!.0
+            chosen = sorted.first!.1
+        }
+    } else if let first = sorted.first {
+        chosenIdx = first.0
+        chosen = first.1
+    } else {
+        return nil
+    }
+    let title = axStringAttr(chosen, kAXTitleAttribute) ?? ""
+    let pos = axPointAttr(chosen, kAXPositionAttribute) ?? .zero
+    let size = axSizeAttr(chosen, kAXSizeAttribute) ?? .zero
+    let bounds = CGRect(origin: pos, size: size)
+    let minimized = axBoolAttr(chosen, kAXMinimizedAttribute) ?? false
+    let fullscreen = axBoolAttr(chosen, "AXFullScreen") ?? false
+    let desc = WindowDesc(
+        pid: pid, index: chosenIdx, title: title,
+        processName: app.localizedName ?? "",
+        bundleId: app.bundleIdentifier,
+        bounds: bounds,
+        isMinimized: minimized,
+        isFullscreen: fullscreen,
+        isForeground: app.isActive
+    )
+    return (app, chosen, desc)
+}
+
+// ---------- AX tree dump ----------
+
+func dumpAXTree(handle: String, maxNodes: Int, maxDepth: Int) -> [[String: Any]] {
+    guard let (_, rootWin, _) = findWindow(handle: handle) else { return [] }
+    var out: [[String: Any]] = []
+    func visit(_ el: AXUIElement, depth: Int, path: String) {
+        if out.count >= maxNodes || depth > maxDepth { return }
+        let role = axStringAttr(el, kAXRoleAttribute) ?? "?"
+        let name = axStringAttr(el, kAXTitleAttribute)
+        let desc = axStringAttr(el, kAXRoleDescriptionAttribute)
+        let descAlt = axStringAttr(el, kAXDescriptionAttribute)
+        let pos = axPointAttr(el, kAXPositionAttribute)
+        let size = axSizeAttr(el, kAXSizeAttribute)
+        var node: [String: Any] = [
+            "role": role,
+            "depth": depth,
+            "path": path,
+        ]
+        if let n = name { node["name"] = n }
+        // 优先 AXDescription（语义描述，如"Scorpions Essentials"），否则 AXRoleDescription（如"按钮"）。
+        if let d = descAlt, !d.isEmpty {
+            node["desc"] = d
+        } else if let d = desc, !d.isEmpty {
+            node["desc"] = d
+        }
+        if let p = pos {
+            node["pos"] = [p.x, p.y]
+        }
+        if let s = size {
+            node["size"] = [s.width, s.height]
+        }
+        out.append(node)
+        let kids = axChildren(el)
+        let limit = min(kids.count, 60)
+        for i in 0..<limit {
+            if out.count >= maxNodes { break }
+            visit(kids[i], depth: depth + 1, path: "\(path)/\(role)[\(i)]")
+        }
+    }
+    visit(rootWin, depth: 0, path: "win[0]")
+    return out
+}
+
+// ---------- Input ----------
+
+func postClick(point: CGPoint, button: String, count: Int) {
+    let buttonNum: CGMouseButton
+    let downType: CGEventType
+    let upType: CGEventType
+    switch button {
+    case "right":
+        buttonNum = .right; downType = .rightMouseDown; upType = .rightMouseUp
+    case "middle":
+        buttonNum = .center; downType = .otherMouseDown; upType = .otherMouseUp
+    default:
+        buttonNum = .left; downType = .leftMouseDown; upType = .leftMouseUp
+    }
+    let src = CGEventSource(stateID: .hidSystemState)
+    // 先把鼠标移过去（部分应用要求 mouseMoved 才显示 hover）
+    if let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+        move.post(tap: .cghidEventTap)
+    }
+    for i in 0..<max(1, count) {
+        if let down = CGEvent(mouseEventSource: src, mouseType: downType, mouseCursorPosition: point, mouseButton: buttonNum) {
+            if i > 0 { down.setIntegerValueField(.mouseEventClickState, value: Int64(i + 1)) }
+            down.post(tap: .cghidEventTap)
+        }
+        if let up = CGEvent(mouseEventSource: src, mouseType: upType, mouseCursorPosition: point, mouseButton: buttonNum) {
+            if i > 0 { up.setIntegerValueField(.mouseEventClickState, value: Int64(i + 1)) }
+            up.post(tap: .cghidEventTap)
+        }
+        if i < count - 1 {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+}
+
+func postScroll(point: CGPoint, dx: Int, dy: Int) {
+    let src = CGEventSource(stateID: .hidSystemState)
+    if let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+        move.post(tap: .cghidEventTap)
+    }
+    // CGEventCreateScrollWheelEvent (line-based)：负值为向下滚
+    if let ev = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 2, wheel1: Int32(-dy), wheel2: Int32(-dx), wheel3: 0) {
+        ev.post(tap: .cghidEventTap)
+    }
+}
+
+func postDrag(from: CGPoint, to: CGPoint, steps: Int, durationMs: Int) {
+    let src = CGEventSource(stateID: .hidSystemState)
+    if let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: from, mouseButton: .left) {
+        down.post(tap: .cghidEventTap)
+    }
+    let sleepMs = max(1, durationMs / max(1, steps))
+    for i in 1...steps {
+        let t = CGFloat(i) / CGFloat(steps)
+        let p = CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t)
+        if let drag = CGEvent(mouseEventSource: src, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left) {
+            drag.post(tap: .cghidEventTap)
+        }
+        Thread.sleep(forTimeInterval: Double(sleepMs) / 1000.0)
+    }
+    if let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: to, mouseButton: .left) {
+        up.post(tap: .cghidEventTap)
+    }
+}
+
+// Key code map（macOS virtual key codes）
+let keyCodeMap: [String: CGKeyCode] = [
+    "return": 36, "enter": 36, "tab": 48, "space": 49, "escape": 53, "esc": 53,
+    "delete": 51, "backspace": 51, "forwarddelete": 117,
+    "up": 126, "down": 125, "left": 123, "right": 124,
+    "home": 115, "end": 119, "pageup": 116, "pagedown": 121,
+    "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97,
+    "f7": 98, "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111,
+    "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4,
+    "i": 34, "j": 38, "k": 40, "l": 37, "m": 46, "n": 45, "o": 31,
+    "p": 35, "q": 12, "r": 15, "s": 1, "t": 17, "u": 32, "v": 9,
+    "w": 13, "x": 7, "y": 16, "z": 6,
+    "0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22,
+    "7": 26, "8": 28, "9": 25,
+    "[": 33, "]": 30,
+]
+
+struct ModifierFlags {
+    var cmd = false; var shift = false; var alt = false; var ctrl = false
+    var mask: CGEventFlags {
+        var f: CGEventFlags = []
+        if cmd { f.insert(.maskCommand) }
+        if shift { f.insert(.maskShift) }
+        if alt { f.insert(.maskAlternate) }
+        if ctrl { f.insert(.maskControl) }
+        return f
+    }
+}
+
+func parseCombo(_ combo: String) -> (ModifierFlags, String) {
+    var mods = ModifierFlags()
+    let parts = combo.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
+    guard let key = parts.last else { return (mods, "") }
+    for p in parts.dropLast() {
+        switch p.lowercased() {
+        case "cmd", "command", "meta": mods.cmd = true
+        case "shift": mods.shift = true
+        case "alt", "option": mods.alt = true
+        case "ctrl", "control": mods.ctrl = true
+        default: break
+        }
+    }
+    return (mods, key)
+}
+
+func postKey(combo: String) {
+    let (mods, key) = parseCombo(combo)
+    guard let code = keyCodeMap[key.lowercased()] else {
+        // 不在表里时 fallback：把 key 当字符串通过 keystroke 输入（用 paste 更稳但 single char 走 keystroke）
+        postPaste(text: key)
+        return
+    }
+    let src = CGEventSource(stateID: .hidSystemState)
+    if let down = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: true) {
+        down.flags = mods.mask
+        down.post(tap: .cghidEventTap)
+    }
+    if let up = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: false) {
+        up.flags = mods.mask
+        up.post(tap: .cghidEventTap)
+    }
+}
+
+/// 通过 NSPasteboard + Cmd+V 输入文本（支持中文 / Unicode）。
+func postPaste(text: String) {
+    let pb = NSPasteboard.general
+    let oldString = pb.string(forType: .string)
+    pb.clearContents()
+    pb.setString(text, forType: .string)
+    usleep(50_000)
+    // Cmd+V
+    let src = CGEventSource(stateID: .hidSystemState)
+    let v: CGKeyCode = 9
+    if let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true) {
+        down.flags = .maskCommand
+        down.post(tap: .cghidEventTap)
+    }
+    if let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false) {
+        up.flags = .maskCommand
+        up.post(tap: .cghidEventTap)
+    }
+    usleep(150_000)
+    pb.clearContents()
+    if let oldString = oldString {
+        pb.setString(oldString, forType: .string)
+    }
+}
+
+func clearInput() {
+    // Cmd+A → Delete
+    let src = CGEventSource(stateID: .hidSystemState)
+    let a: CGKeyCode = 0
+    if let down = CGEvent(keyboardEventSource: src, virtualKey: a, keyDown: true) {
+        down.flags = .maskCommand
+        down.post(tap: .cghidEventTap)
+    }
+    if let up = CGEvent(keyboardEventSource: src, virtualKey: a, keyDown: false) {
+        up.flags = .maskCommand
+        up.post(tap: .cghidEventTap)
+    }
+    usleep(40_000)
+    let del: CGKeyCode = 51
+    if let d = CGEvent(keyboardEventSource: src, virtualKey: del, keyDown: true) { d.post(tap: .cghidEventTap) }
+    if let u = CGEvent(keyboardEventSource: src, virtualKey: del, keyDown: false) { u.post(tap: .cghidEventTap) }
+    usleep(40_000)
+}
+
+// ---------- Activate / move / restore ----------
+
+func activate(pid: pid_t) {
+    if let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) {
+        app.activate(options: [.activateAllWindows])
+    }
+}
+
+func moveWindow(handle: String, rect: CGRect) -> [String: Any]? {
+    guard let (_, axWin, _) = findWindow(handle: handle) else { return nil }
+    // 取消最小化
+    if axBoolAttr(axWin, kAXMinimizedAttribute) == true {
+        AXUIElementSetAttributeValue(axWin, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+    }
+    var pos = CGPoint(x: rect.origin.x, y: rect.origin.y)
+    var size = CGSize(width: rect.size.width, height: rect.size.height)
+    let posVal = AXValueCreate(.cgPoint, &pos)!
+    let sizeVal = AXValueCreate(.cgSize, &size)!
+    AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, posVal)
+    AXUIElementSetAttributeValue(axWin, kAXSizeAttribute as CFString, sizeVal)
+    // activate
+    let pid = pid_t(handle.split(separator: ":").first!)!
+    activate(pid: pid)
+    // 等一拍让窗口稳定
+    usleep(120_000)
+    if let (_, _, desc) = findWindow(handle: handle) {
+        return toWindowInfo(desc)
+    }
+    return nil
+}
+
+// ---------- Capture ----------
+
+/// 截图：macOS 15+ 弃用了 CGWindowListCreateImage，统一用 /usr/sbin/screencapture
+/// 子进程。子进程 fork 约 ~300ms。后续可切到 ScreenCaptureKit（需要 async/Stream API）。
+func capture(rect: CGRect) -> Data? {
+    let tmp = NSTemporaryDirectory() + "vision-mcp-\(UUID().uuidString).png"
+    let task = Process()
+    task.launchPath = "/usr/sbin/screencapture"
+    task.arguments = [
+        "-x",
+        "-t", "png",
+        "-R", "\(Int(rect.origin.x)),\(Int(rect.origin.y)),\(Int(rect.size.width)),\(Int(rect.size.height))",
+        tmp,
+    ]
+    do {
+        try task.run()
+        task.waitUntilExit()
+    } catch {
+        return nil
+    }
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    return try? Data(contentsOf: URL(fileURLWithPath: tmp))
+}
+
+// ---------- RPC dispatch ----------
+
+func handle(method: String, params: [String: Any]) -> Any {
+    switch method {
+    case "version":
+        return ["version": "0.1", "platform": "macos"]
+    case "capsule.list_displays":
+        return listDisplays()
+    case "capsule.ensure_workspace_display":
+        return listDisplays().first ?? [:]
+    case "capsule.ensure_virtual_display":
+        return listDisplays().first ?? [:]
+    case "window.list":
+        let filter = params["filter"] as? [String: Any]
+        return listWindowsCore(filter: filter).map(toWindowInfo)
+    case "window.get":
+        guard let handle = params["handle"] as? String else { return ["error": "handle required"] }
+        if let (_, _, desc) = findWindow(handle: handle) {
+            return toWindowInfo(desc)
+        }
+        return ["error": "window not found"]
+    case "window.move":
+        guard let handle = params["handle"] as? String,
+              let rectDict = params["rect"] as? [String: Any],
+              let x = (rectDict["x"] as? NSNumber)?.doubleValue,
+              let y = (rectDict["y"] as? NSNumber)?.doubleValue,
+              let w = (rectDict["width"] as? NSNumber)?.doubleValue,
+              let h = (rectDict["height"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
+        let r = CGRect(x: x, y: y, width: w, height: h)
+        return moveWindow(handle: handle, rect: r) ?? ["error": "move failed"]
+    case "window.restore":
+        guard let handle = params["handle"] as? String,
+              let snapshot = params["snapshot"] as? [String: Any],
+              let placement = snapshot["placement"] as? [String: Any],
+              let bounds = placement["bounds"] as? [String: Any],
+              let x = (bounds["x"] as? NSNumber)?.doubleValue,
+              let y = (bounds["y"] as? NSNumber)?.doubleValue,
+              let w = (bounds["width"] as? NSNumber)?.doubleValue,
+              let h = (bounds["height"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
+        return moveWindow(handle: handle, rect: CGRect(x: x, y: y, width: w, height: h)) ?? ["error": "restore failed"]
+    case "window.activate":
+        guard let handle = params["handle"] as? String,
+              let pid = pid_t(handle.split(separator: ":").first.map(String.init) ?? "") else { return ["error": "bad handle"] }
+        activate(pid: pid)
+        return ["ok": true]
+    case "ax.dump":
+        guard let handle = params["handle"] as? String else { return ["error": "handle required"] }
+        let maxNodes = (params["max_nodes"] as? NSNumber)?.intValue ?? 500
+        let maxDepth = (params["max_depth"] as? NSNumber)?.intValue ?? 6
+        return dumpAXTree(handle: handle, maxNodes: maxNodes, maxDepth: maxDepth)
+    case "capture.rect":
+        guard let r = params["rect"] as? [String: Any],
+              let x = (r["x"] as? NSNumber)?.doubleValue,
+              let y = (r["y"] as? NSNumber)?.doubleValue,
+              let w = (r["width"] as? NSNumber)?.doubleValue,
+              let h = (r["height"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
+        guard let png = capture(rect: CGRect(x: x, y: y, width: w, height: h)) else { return ["error": "capture failed"] }
+        return [
+            "png_base64": png.base64EncodedString(),
+            "width": Int(w),
+            "height": Int(h),
+        ]
+    case "input.click":
+        guard let p = params["point"] as? [String: Any],
+              let x = (p["x"] as? NSNumber)?.doubleValue,
+              let y = (p["y"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
+        let btn = (params["button"] as? String) ?? "left"
+        let cnt = (params["click_count"] as? NSNumber)?.intValue ?? 1
+        postClick(point: CGPoint(x: x, y: y), button: btn, count: cnt)
+        return ["ok": true]
+    case "input.type":
+        guard let text = params["text"] as? String else { return ["error": "text required"] }
+        let clearFirst = (params["clear_first"] as? Bool) ?? false
+        if clearFirst { clearInput() }
+        postPaste(text: text)
+        return ["ok": true]
+    case "input.key":
+        guard let combo = params["combo"] as? String else { return ["error": "combo required"] }
+        postKey(combo: combo)
+        return ["ok": true]
+    case "input.scroll":
+        guard let p = params["point"] as? [String: Any],
+              let x = (p["x"] as? NSNumber)?.doubleValue,
+              let y = (p["y"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
+        let dx = (params["dx_px"] as? NSNumber)?.intValue ?? 0
+        let dy = (params["dy_px"] as? NSNumber)?.intValue ?? 0
+        postScroll(point: CGPoint(x: x, y: y), dx: dx, dy: dy)
+        return ["ok": true]
+    case "input.drag":
+        guard let from = params["from"] as? [String: Any],
+              let fx = (from["x"] as? NSNumber)?.doubleValue,
+              let fy = (from["y"] as? NSNumber)?.doubleValue,
+              let to = params["to_point_px"] as? [String: Any],
+              let tx = (to["x"] as? NSNumber)?.doubleValue,
+              let ty = (to["y"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
+        let steps = (params["steps"] as? NSNumber)?.intValue ?? 20
+        let dur = (params["duration_ms"] as? NSNumber)?.intValue ?? 200
+        postDrag(from: CGPoint(x: fx, y: fy), to: CGPoint(x: tx, y: ty), steps: steps, durationMs: dur)
+        return ["ok": true]
+    case "input.subscribe":
+        // 暂不支持
+        return ["ok": true]
+    default:
+        return ["error": "unknown method: \(method)"]
+    }
+}
+
+// ---------- main loop: line-by-line stdin ----------
+
+let stdin = FileHandle.standardInput
+var buffer = Data()
+while true {
+    let chunk = stdin.availableData
+    if chunk.isEmpty {
+        // 上游关闭
+        exit(0)
+    }
+    buffer.append(chunk)
+    while let nl = buffer.firstIndex(of: 0x0a) {
+        let line = buffer.subdata(in: 0..<nl)
+        buffer.removeSubrange(0..<(nl + 1))
+        if line.isEmpty { continue }
+        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let method = obj["method"] as? String else {
+            emitError(id: nil, message: "bad request", code: "BAD_REQUEST")
+            continue
+        }
+        let id = obj["id"]
+        let params = toDict(obj["params"])
+        let result = handle(method: method, params: params)
+        if let dict = result as? [String: Any], let err = dict["error"] as? String {
+            emitError(id: id, message: err)
+        } else {
+            emitResult(id: id, result: result)
+        }
+    }
+}

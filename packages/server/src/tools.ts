@@ -14,6 +14,80 @@ import {
   Patch as PatchSchema,
   hasErrors,
 } from "@vision-mcp/core";
+import type { AccessibilityNode, Frame } from "@vision-mcp/core";
+
+function isInteractiveCandidate(n: AccessibilityNode): boolean {
+  const r = n.role ?? "";
+  if (
+    /(AXButton|AXTextField|AXSearchField|AXPopUpButton|AXMenuItem|AXTab|AXLink|AXSlider|AXCheckBox|AXRadioButton|AXList)/.test(
+      r,
+    )
+  )
+    return true;
+  if (r === "AXCell" && (n.description || n.name) && n.description !== "单元格") return true;
+  return false;
+}
+
+/**
+ * 极简 PNG 编码：8-bit RGBA，无压缩 fallback。
+ * Frame 是从 capsule.capture 来的 RGBA buffer。
+ */
+async function encodeFramePng(frame: Frame): Promise<Uint8Array> {
+  const zlib = await import("node:zlib");
+  const { width_px: width, height_px: height, pixels } = frame;
+  const sig = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdrData = Buffer.alloc(13);
+  ihdrData.writeUInt32BE(width, 0);
+  ihdrData.writeUInt32BE(height, 4);
+  ihdrData[8] = 8; // bit depth
+  ihdrData[9] = 6; // color type RGBA
+  ihdrData[10] = 0;
+  ihdrData[11] = 0;
+  ihdrData[12] = 0;
+  const ihdr = chunk("IHDR", ihdrData);
+  // 加上每行 filter 字节（0 = None）
+  const stride = width * 4;
+  const filtered = Buffer.alloc(height * (stride + 1));
+  for (let y = 0; y < height; y++) {
+    filtered[y * (stride + 1)] = 0;
+    Buffer.from(pixels.buffer, pixels.byteOffset + y * stride, stride).copy(
+      filtered,
+      y * (stride + 1) + 1,
+    );
+  }
+  const idatData = zlib.deflateSync(filtered);
+  const idat = chunk("IDAT", idatData);
+  const iend = chunk("IEND", Buffer.alloc(0));
+  return Buffer.concat([sig, ihdr, idat, iend]);
+}
+
+function chunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const typeBuf = Buffer.from(type, "ascii");
+  const body = Buffer.concat([typeBuf, data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body) >>> 0, 0);
+  return Buffer.concat([len, body, crc]);
+}
+
+const CRC_TABLE: number[] = (() => {
+  const t: number[] = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t.push(c >>> 0);
+  }
+  return t;
+})();
+
+function crc32(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
 import type { ServerContext } from "./context.js";
 import {
   ensureBuilder,
@@ -244,6 +318,197 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             { geometry: geom },
             geom.ok ? "geometry OK" : `violations: ${geom.violations.join("; ")}`,
           );
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "capsule.raise",
+    {
+      title: "把窗口拉回前台",
+      description: "macOS 焦点切换是异步的；agent 在 type/key 前可主动调用。",
+      inputSchema: { app_id: z.string() },
+    },
+    async ({ app_id }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          const capsule = await ensureCapsule(ctx, app);
+          await capsule.raise();
+          return StructuredOk({ ok: true }, "raised");
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  // ---------- agent-friendly raw operations + snapshot ----------
+
+  server.registerTool(
+    "vision_map.snapshot",
+    {
+      title: "返回当前 capsule 的截图 + AX 候选 + 已知 state 匹配",
+      description:
+        "Agent 主导建图的核心工具：一次拿到 PNG（base64）、可交互节点列表、与 map.states 的最佳匹配。",
+      inputSchema: {
+        app_id: z.string(),
+        include_image: z.boolean().default(true),
+        include_ax: z.boolean().default(true),
+        max_candidates: z.number().int().min(1).max(500).default(80),
+      },
+    },
+    async ({ app_id, include_image, include_ax, max_candidates }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          const rt = await ensureRuntime(ctx, app);
+          const { state, insights } = await rt.detectState();
+          const status = await (await ensureCapsule(ctx, app)).status();
+          let image_base64: string | undefined;
+          if (include_image) {
+            const { Buffer } = await import("node:buffer");
+            const png = await encodeFramePng(insights.frame);
+            image_base64 = Buffer.from(png).toString("base64");
+          }
+          const candidates = include_ax
+            ? insights.accessibility
+                .filter((n) => isInteractiveCandidate(n))
+                .slice(0, max_candidates)
+                .map((n) => ({
+                  role: n.role,
+                  name: n.name,
+                  description: n.description,
+                  bbox_norm: n.bbox_norm.map((v) => Number(v.toFixed(4))),
+                  id: n.id,
+                }))
+            : [];
+          return StructuredOk(
+            {
+              state_match: state,
+              window: status.attached_window,
+              geometry: status.geometry,
+              candidates,
+              candidates_total: insights.accessibility.length,
+              image_base64,
+              image_mime: image_base64 ? "image/png" : undefined,
+              visual_hash: insights.visual_hash,
+            },
+            `state=${state?.state_id ?? "none"} candidates=${candidates.length}/${insights.accessibility.length}`,
+          );
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.click_at",
+    {
+      title: "在 capsule 内按归一化坐标 click（建图原始动作）",
+      description:
+        "Agent 看完 snapshot 后直接传 [x, y] norm 触发 click，不需要预先定义 control。",
+      inputSchema: {
+        app_id: z.string(),
+        point_norm: z.tuple([z.number().min(0).max(1.5), z.number().min(0).max(1.5)]),
+        button: z.enum(["left", "right", "middle"]).optional(),
+        click_count: z.number().int().min(1).max(3).optional(),
+      },
+    },
+    async ({ app_id, point_norm, button, click_count }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          const capsule = await ensureCapsule(ctx, app);
+          const geom = await capsule.validateGeometry();
+          const cr = geom.client_rect_px;
+          const pt = {
+            x: Math.round(cr.x + point_norm[0] * cr.width),
+            y: Math.round(cr.y + point_norm[1] * cr.height),
+          };
+          await capsule.raise().catch(() => {});
+          await capsule.adapter.click(pt, { button, click_count });
+          return StructuredOk(
+            { point_screen: pt, point_norm },
+            `clicked ${button ?? "left"} x${click_count ?? 1} @ (${pt.x},${pt.y})`,
+          );
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.type_text",
+    {
+      title: "在当前焦点 type 文本（支持中文，走粘贴）",
+      inputSchema: {
+        app_id: z.string(),
+        text: z.string(),
+        clear_first: z.boolean().default(false),
+      },
+    },
+    async ({ app_id, text, clear_first }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          const capsule = await ensureCapsule(ctx, app);
+          await capsule.raise().catch(() => {});
+          await capsule.adapter.typeText({ text, clear_first });
+          return StructuredOk({ ok: true, length: text.length });
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.press_key",
+    {
+      title: "按下键盘组合（如 return / cmd+f / Escape）",
+      inputSchema: { app_id: z.string(), combo: z.string() },
+    },
+    async ({ app_id, combo }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          const capsule = await ensureCapsule(ctx, app);
+          await capsule.raise().catch(() => {});
+          await capsule.adapter.pressKey({ combo });
+          return StructuredOk({ ok: true, combo });
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.scroll",
+    {
+      title: "在归一化点滚动",
+      inputSchema: {
+        app_id: z.string(),
+        point_norm: z.tuple([z.number().min(0).max(1.5), z.number().min(0).max(1.5)]),
+        dx_px: z.number().default(0),
+        dy_px: z.number().default(0),
+      },
+    },
+    async ({ app_id, point_norm, dx_px, dy_px }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          const capsule = await ensureCapsule(ctx, app);
+          const geom = await capsule.validateGeometry();
+          const cr = geom.client_rect_px;
+          await capsule.adapter.scroll(
+            {
+              x: Math.round(cr.x + point_norm[0] * cr.width),
+              y: Math.round(cr.y + point_norm[1] * cr.height),
+            },
+            { dx_px, dy_px },
+          );
+          return StructuredOk({ ok: true });
         });
       } catch (err) {
         return errorResult(err);

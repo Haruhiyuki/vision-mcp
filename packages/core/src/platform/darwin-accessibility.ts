@@ -6,6 +6,7 @@ import type {
 } from "../locator/types.js";
 import type { RectPx } from "../capsule/types.js";
 import type { DarwinOsascriptAdapter } from "./darwin-osascript.js";
+import type { DarwinHelperAdapter, RawAxNode } from "./darwin-helper.js";
 
 const execFileP = promisify(execFile);
 
@@ -28,10 +29,12 @@ export class DarwinAccessibilityProvider implements AccessibilityProvider {
   private readonly ttl: number;
 
   /**
-   * adapter：用于在 snapshot 时实时拿当前窗口的 client_bounds。
+   * adapter：可为 osascript 或 swift helper adapter。
+   * - helper 路径：使用 adapter.dumpAxTree（毫秒级）
+   * - osascript 路径：每次 spawn JXA（~10s）
    */
   constructor(
-    private readonly adapter: DarwinOsascriptAdapter,
+    private readonly adapter: DarwinOsascriptAdapter | DarwinHelperAdapter,
     options: DarwinAccessibilityOptions = {},
   ) {
     this.ttl = options.disable_cache ? 0 : options.cache_ttl_ms ?? 1500;
@@ -71,6 +74,24 @@ export class DarwinAccessibilityProvider implements AccessibilityProvider {
       return [];
     }
     if (!clientRect || clientRect.width <= 0 || clientRect.height <= 0) return [];
+
+    // 优先用 helper.dumpAxTree（毫秒级），否则 osascript 兜底
+    const dumpAxTree = (this.adapter as DarwinHelperAdapter).dumpAxTree;
+    if (typeof dumpAxTree === "function") {
+      try {
+        const raw = await (this.adapter as DarwinHelperAdapter).dumpAxTree(
+          windowHandle,
+          500,
+          6,
+        );
+        return raw
+          .map((n) => normalizeHelper(n, clientRect!))
+          .filter((n): n is AccessibilityNode => n !== null);
+      } catch {
+        // fall through
+      }
+    }
+
     const script = AX_DUMP_SCRIPT.replace("__PID__", String(pid));
     const { stdout } = await execFileP(
       "/usr/bin/osascript",
@@ -87,6 +108,30 @@ export class DarwinAccessibilityProvider implements AccessibilityProvider {
       .map((n) => normalize(n, clientRect))
       .filter((n): n is AccessibilityNode => n !== null);
   }
+}
+
+function normalizeHelper(raw: RawAxNode, clientRect: RectPx): AccessibilityNode | null {
+  if (!raw.pos || !raw.size) return null;
+  const [x, y] = raw.pos;
+  const [w, h] = raw.size;
+  if (w <= 0 || h <= 0) return null;
+  const nx = (x - clientRect.x) / clientRect.width;
+  const ny = (y - clientRect.y) / clientRect.height;
+  const nw = w / clientRect.width;
+  const nh = h / clientRect.height;
+  if (nx + nw < 0 || ny + nh < 0 || nx > 1.2 || ny > 1.2) return null;
+  return {
+    id: raw.path,
+    role: raw.role,
+    name: raw.name ?? undefined,
+    description: raw.desc ?? undefined,
+    automation_id: undefined,
+    class_name: undefined,
+    bbox_norm: [clamp(nx), clamp(ny), clamp(nw), clamp(nh)],
+    enabled: true,
+    visible: true,
+    children: undefined,
+  };
 }
 
 interface RawNode {

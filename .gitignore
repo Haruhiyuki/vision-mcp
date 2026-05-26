@@ -16,5 +16,6 @@ examples/.traces/
 apps/.traces/
 apps/*/.explore*/
 apps/*/.record/
+apps/*/.discover/
 .explore/
 

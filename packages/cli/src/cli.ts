@@ -8,6 +8,7 @@ import {
   CallbackApprovalResolver,
   createPlatformAdapter,
   DarwinAccessibilityProvider,
+  DarwinHelperAdapter,
   DarwinOsascriptAdapter,
   dumpMap,
   ERROR_CODES,
@@ -21,6 +22,11 @@ import {
   saveMap,
   writePatch,
 } from "@vision-mcp/core";
+import type { PlatformAdapter } from "@vision-mcp/core";
+
+function isDarwinAdapter(a: PlatformAdapter): a is DarwinOsascriptAdapter | DarwinHelperAdapter {
+  return a instanceof DarwinOsascriptAdapter || a instanceof DarwinHelperAdapter;
+}
 import {
   createServerContext,
   createVisionMcpServer,
@@ -80,6 +86,8 @@ function usage(): string {
     "       绑定 capsule 后截图 + dump AX 树到目录，便于人类审阅与建图",
     "  record <app_id> --plan <plan.json> [--out <dir>]",
     "       按计划脚本逐步操作，每步前后都截图+dump AX，建图前预先摸清所有页面",
+    "  discover <app_id> [--out <dir>] [--max-clicks 20] [--max-depth 2]",
+    "       自动 BFS 探索 UI 拓扑：每个可交互节点 click → 截图比较 → 自动找返回路径 → 生成 draft map",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -127,6 +135,9 @@ async function main() {
         return;
       case "record":
         await cmdRecord(args);
+        return;
+      case "discover":
+        await cmdDiscover(args);
         return;
       case "serve":
         await cmdServe(args);
@@ -244,9 +255,9 @@ async function openAppRuntime(
   const traceDir = path.join(appsRoot(args), ".traces", appId);
   const trace = new FileTraceStore(traceDir);
   await trace.ensure();
-  // 在 macOS 上自动注入 accessibility provider，让 detect_state / locator 拿到 AX 节点
+  // 在 macOS 上自动注入 accessibility provider（helper 或 osascript adapter 都支持）
   const providers: import("@vision-mcp/core").LocatorProviders = {};
-  if (adapter instanceof DarwinOsascriptAdapter) {
+  if (isDarwinAdapter(adapter)) {
     providers.accessibility = new DarwinAccessibilityProvider(adapter);
   }
   // 默认 auto-attach：用户运行 `vision-mcp run apple-music --action ...` 时不应被迫
@@ -469,7 +480,7 @@ async function cmdExplore(args: ParsedArgs) {
   );
   // 如果是 darwin，dump AX
   let axNodes: unknown[] = [];
-  if (adapter.platform === "macos" && status.attached_window && adapter instanceof DarwinOsascriptAdapter) {
+  if (status.attached_window && isDarwinAdapter(adapter)) {
     const provider = new DarwinAccessibilityProvider(adapter);
     axNodes = await provider.snapshot(status.attached_window.native_handle);
     await fs.writeFile(path.join(outDir, "ax.json"), JSON.stringify(axNodes, null, 2));
@@ -552,8 +563,7 @@ async function cmdRecord(args: ParsedArgs) {
   await capsule.migrate(display.id);
   await new Promise((r) => setTimeout(r, 500));
 
-  const provider =
-    adapter instanceof DarwinOsascriptAdapter ? new DarwinAccessibilityProvider(adapter) : undefined;
+  const provider = isDarwinAdapter(adapter) ? new DarwinAccessibilityProvider(adapter) : undefined;
 
   const summary: Array<{ label: string; out_dir: string; ax_count: number; key_nodes: unknown }> = [];
 
@@ -660,6 +670,58 @@ async function cmdRecord(args: ParsedArgs) {
   }
 
   console.log(JSON.stringify({ out_root: outRoot, steps: summary }, null, 2));
+  await adapter.dispose?.();
+}
+
+async function cmdDiscover(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("discover 需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  const outDir = String(
+    args.flags.out ?? path.join(appsRoot(args), appId, ".discover", String(Date.now())),
+  );
+  await fs.mkdir(outDir, { recursive: true });
+  const adapter = await createPlatformAdapter({
+    platform: (args.flags.platform as never) ?? "auto",
+  });
+  const { Capsule, DarwinAccessibilityProvider, Discoverer } = await import("@vision-mcp/core");
+  const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
+  const display = await capsule.ensureDisplay({
+    geometry: loaded.effective.visual_box.display,
+    mode: loaded.effective.visual_box.mode,
+    fallbacks: loaded.effective.visual_box.fallbacks,
+  });
+  if (loaded.effective.visual_box.target_window) {
+    await capsule.attach({ target: loaded.effective.visual_box.target_window });
+  }
+  await capsule.migrate(display.id);
+  await new Promise((r) => setTimeout(r, 500));
+
+  if (!isDarwinAdapter(adapter)) {
+    throw new Error("discover 当前仅在 macOS 上实现");
+  }
+  const provider = new DarwinAccessibilityProvider(adapter);
+  const discoverer = new Discoverer(capsule, adapter, provider, {
+    out_dir: outDir,
+    max_clicks: Number(args.flags["max-clicks"] ?? 12),
+    max_depth: Number(args.flags["max-depth"] ?? 2),
+    click_wait_ms: Number(args.flags["click-wait-ms"] ?? 1500),
+    on_progress: (msg) => console.error(`[discover] ${msg}`),
+  });
+  const result = await discoverer.run();
+  console.log(
+    JSON.stringify(
+      {
+        out_dir: outDir,
+        pages: result.pages.length,
+        transitions: result.transitions.length,
+        page_ids: result.pages.map((p) => p.id),
+      },
+      null,
+      2,
+    ),
+  );
   await adapter.dispose?.();
 }
 

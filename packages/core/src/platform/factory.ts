@@ -4,6 +4,7 @@ import { MockPlatformAdapter } from "./mock.js";
 import { WindowsPlatformAdapter } from "./windows.js";
 import { MacosPlatformAdapter } from "./macos.js";
 import { DarwinOsascriptAdapter } from "./darwin-osascript.js";
+import { DarwinHelperAdapter } from "./darwin-helper.js";
 
 export type PlatformName = "windows" | "macos" | "macos-osascript" | "macos-helper" | "mock" | "auto";
 
@@ -37,16 +38,25 @@ export async function createPlatformAdapter(
       return await WindowsPlatformAdapter.create({ helperPath: opts.helperPath });
     }
     if (resolved === "macos-helper") {
-      return await MacosPlatformAdapter.create({ helperPath: opts.helperPath });
+      return await DarwinHelperAdapter.create({ helperPath: opts.helperPath });
     }
     if (resolved === "macos" || resolved === "macos-osascript") {
-      // macOS 默认走 osascript 适配器：无须额外 helper，开箱可用。
-      // 若用户显式设置 VISION_MCP_PREFER_HELPER=1 或传入 helperPath，则走 JSON-RPC sidecar。
-      const wantsHelper =
-        process.env.VISION_MCP_PREFER_HELPER === "1" ||
-        (resolved === "macos" && !!opts.helperPath);
-      if (wantsHelper) {
-        return await MacosPlatformAdapter.create({ helperPath: opts.helperPath });
+      // macOS 默认顺序：
+      //   1. 用户显式 osascript（VISION_MCP_FORCE_OSASCRIPT=1 或 resolved=macos-osascript）→ osascript
+      //   2. swift helper 可用（自动检测 native/macos/vision-mcp-helper） → DarwinHelperAdapter（快 500x）
+      //   3. 兜底 osascript（无 helper 编译时）
+      const forceOsascript =
+        resolved === "macos-osascript" ||
+        process.env.VISION_MCP_FORCE_OSASCRIPT === "1";
+      if (!forceOsascript) {
+        try {
+          return await DarwinHelperAdapter.create({ helperPath: opts.helperPath });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[vision-mcp] swift helper 不可用 (${(err as Error).message})，降级 osascript adapter`,
+          );
+        }
       }
       return new DarwinOsascriptAdapter();
     }
