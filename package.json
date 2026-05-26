@@ -1,0 +1,30 @@
+{
+  "name": "vision-mcp-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vision-MCP: 基于视觉胶囊的自适应 GUI 操作地图（monorepo）",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "clean": "rimraf packages/*/dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b packages/core packages/server packages/cli",
+    "lint": "echo 'lint placeholder'",
+    "cli": "node packages/cli/dist/index.js",
+    "server": "node packages/server/dist/index.js",
+    "schema:export": "node packages/core/dist/scripts/export-schema.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "Apache-2.0"
+}

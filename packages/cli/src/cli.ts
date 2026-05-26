@@ -1,0 +1,426 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import {
+  VisionMap,
+  applyPatches,
+  Capsule,
+  CallbackApprovalResolver,
+  createPlatformAdapter,
+  dumpMap,
+  ERROR_CODES,
+  FileTraceStore,
+  formatIssues,
+  hasErrors,
+  isVisionMcpError,
+  lintMap,
+  loadMap,
+  RuntimeExecutor,
+  saveMap,
+  writePatch,
+} from "@vision-mcp/core";
+import {
+  createServerContext,
+  createVisionMcpServer,
+  runStdio,
+} from "@vision-mcp/server";
+
+interface ParsedArgs {
+  command: string;
+  positional: string[];
+  flags: Record<string, string | boolean>;
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+  const [command, ...rest] = argv;
+  const positional: string[] = [];
+  const flags: Record<string, string | boolean> = {};
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a.startsWith("--")) {
+      const key = a.slice(2);
+      const next = rest[i + 1];
+      if (next === undefined || next.startsWith("--")) {
+        flags[key] = true;
+      } else {
+        flags[key] = next;
+        i++;
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  return { command: command ?? "help", positional, flags };
+}
+
+function usage(): string {
+  return [
+    "vision-mcp <command> [...args] [--flags]",
+    "",
+    "命令：",
+    "  init <app_id> --name <human-name> [--platform windows|macos|any] [--width 1280] [--height 800]",
+    "       在当前目录的 apps/<app_id>/vision-mcp.yaml 创建骨架",
+    "  validate <app_id>",
+    "       lint vision-mcp.yaml + 已应用 patches",
+    "  describe <app_id>",
+    "       打印 app 摘要",
+    "  build <app_id> [--platform mock|auto] [--mock-window]",
+    "       绑定 capsule，捕获当前 state 并把控件写入 baseline",
+    "  run <app_id> --action <action_id> [--params '{\"text\":\"...\"}'] [--approve-all]",
+    "       通过 runtime 执行单个 action",
+    "  workflow <app_id> --id <workflow_id> [--inputs '{\"key\":\"...\"}'] [--approve-all]",
+    "       运行 workflow",
+    "  repair <app_id> [--max-level 3]",
+    "       触发 repair L0-Lmax 自动修复",
+    "  trace <app_id> [--session <id>] [--limit 100]",
+    "       打印最近 trace 事件",
+    "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
+    "       启动 MCP server (stdio)",
+    "  schema export [--out ./schema]",
+    "       导出 vision-mcp.schema.json / vision-mcp-patch.schema.json",
+    "",
+    "环境变量：VISION_MCP_APPS_ROOT, VISION_MCP_TRACE_DIR, VISION_MCP_NATIVE_HELPER, VISION_MCP_PLATFORM, VISION_MCP_FALLBACK_MOCK=1",
+  ].join("\n");
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  try {
+    switch (args.command) {
+      case "help":
+      case "-h":
+      case "--help":
+        console.log(usage());
+        return;
+      case "init":
+        await cmdInit(args);
+        return;
+      case "validate":
+        await cmdValidate(args);
+        return;
+      case "describe":
+        await cmdDescribe(args);
+        return;
+      case "build":
+        await cmdBuild(args);
+        return;
+      case "run":
+        await cmdRun(args);
+        return;
+      case "workflow":
+        await cmdWorkflow(args);
+        return;
+      case "repair":
+        await cmdRepair(args);
+        return;
+      case "trace":
+        await cmdTrace(args);
+        return;
+      case "serve":
+        await cmdServe(args);
+        return;
+      case "schema":
+        await cmdSchema(args);
+        return;
+      default:
+        console.error(`unknown command: ${args.command}\n\n${usage()}`);
+        process.exit(2);
+    }
+  } catch (err) {
+    if (isVisionMcpError(err)) {
+      console.error(`[${err.code}] ${err.message}`);
+      if (err.details) console.error(JSON.stringify(err.details, null, 2));
+    } else {
+      console.error(err);
+    }
+    process.exit(1);
+  }
+}
+
+function appsRoot(args: ParsedArgs): string {
+  return String(
+    args.flags["apps-root"] ?? process.env.VISION_MCP_APPS_ROOT ?? path.join(process.cwd(), "apps"),
+  );
+}
+
+async function cmdInit(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("init 需要 <app_id>");
+  const name = String(args.flags.name ?? appId);
+  const platform = String(args.flags.platform ?? "any") as "windows" | "macos" | "any";
+  const width = Number(args.flags.width ?? 1280);
+  const height = Number(args.flags.height ?? 800);
+  const dir = path.join(appsRoot(args), appId);
+  await fs.mkdir(dir, { recursive: true });
+  const mapPath = path.join(dir, "vision-mcp.yaml");
+  const map = VisionMap.parse({
+    version: "0.1",
+    app: { id: appId, name, platform },
+    visual_box: {
+      id: `${appId}-capsule`,
+      mode: platform === "macos" ? "real_window" : "same_session_virtual_display",
+      platform,
+      coordinate_space: "normalized_client_rect",
+      display: { width_px: width, height_px: height },
+      contract: { require_client_size_px: [width, height] },
+    },
+  });
+  await saveMap(mapPath, map);
+  console.log(`wrote ${mapPath}`);
+}
+
+async function cmdValidate(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("validate 需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const result = await loadMap(mapPath);
+  const issues = lintMap(result.effective);
+  if (issues.length === 0) {
+    console.log(`OK: ${mapPath}（${result.patches.length} patches）`);
+    return;
+  }
+  console.log(formatIssues(issues));
+  if (hasErrors(issues)) process.exit(1);
+}
+
+async function cmdDescribe(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("describe 需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const result = await loadMap(mapPath);
+  const summary = {
+    app_id: result.effective.app.id,
+    name: result.effective.app.name,
+    platform: result.effective.app.platform,
+    visual_box: result.effective.visual_box.id,
+    mode: result.effective.visual_box.mode,
+    states: result.effective.states.map((s) => ({
+      id: s.id,
+      kind: s.kind,
+      controls: s.controls.length,
+    })),
+    workflows: result.effective.workflows.map((w) => ({
+      id: w.id,
+      steps: w.steps.length,
+    })),
+    patches: result.patches.length,
+  };
+  console.log(JSON.stringify(summary, null, 2));
+}
+
+interface OpenAppOptions {
+  approveAll?: boolean;
+  fallbackMock?: boolean;
+  platform?: "auto" | "windows" | "macos" | "mock";
+}
+
+async function openAppRuntime(
+  appId: string,
+  args: ParsedArgs,
+  opts: OpenAppOptions = {},
+) {
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  const adapter = await createPlatformAdapter({
+    platform: opts.platform ?? "auto",
+    fallbackToMock: opts.fallbackMock ?? Boolean(args.flags["fallback-mock"]),
+    helperPath: process.env.VISION_MCP_NATIVE_HELPER,
+  });
+  const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
+  const traceDir = path.join(appsRoot(args), ".traces", appId);
+  const trace = new FileTraceStore(traceDir);
+  await trace.ensure();
+  const runtime = new RuntimeExecutor({
+    map: loaded.effective,
+    mapBaseDir: loaded.baseDir,
+    capsule,
+    providers: {},
+    trace,
+    approval: opts.approveAll
+      ? new CallbackApprovalResolver(async () => "granted")
+      : new CallbackApprovalResolver(askApprovalViaStdin),
+    onPatch: async (patch) => {
+      await writePatch(loaded.baseDir, patch);
+      loaded.patches.push(patch);
+      loaded.effective = applyPatches(loaded.baseline, loaded.patches);
+    },
+  });
+  return { runtime, capsule, loaded, trace, adapter };
+}
+
+async function cmdBuild(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("build 需要 <app_id>");
+  const { capsule, loaded } = await openAppRuntime(appId, args, {
+    fallbackMock: true,
+    platform: args.flags.platform === "mock" ? "mock" : "auto",
+  });
+  if (args.flags["mock-window"]) {
+    const { MockPlatformAdapter } = await import("@vision-mcp/core");
+    if (capsule.adapter instanceof MockPlatformAdapter) {
+      capsule.adapter.addWindow({
+        title: "Mock Capsule Window",
+        process_name: loaded.effective.app.id + ".mock",
+        bounds: {
+          x: 0,
+          y: 0,
+          width: loaded.effective.visual_box.display.width_px,
+          height: loaded.effective.visual_box.display.height_px,
+        },
+        is_foreground: true,
+      });
+    }
+  }
+  const display = await capsule.ensureDisplay({
+    geometry: loaded.effective.visual_box.display,
+    mode: loaded.effective.visual_box.mode,
+    fallbacks: loaded.effective.visual_box.fallbacks,
+  });
+  if (loaded.effective.visual_box.target_window) {
+    await capsule.attach({ target: loaded.effective.visual_box.target_window });
+  } else {
+    // 对 mock：用任意窗口
+    const wins = await capsule.adapter.listWindows();
+    if (wins.length) {
+      await capsule.attach({ target: { title_regex: wins[0].title.slice(0, 4) } });
+    }
+  }
+  await capsule.migrate(display.id);
+  const { MapBuilder } = await import("@vision-mcp/core");
+  const builder = new MapBuilder({
+    app: loaded.effective.app,
+    visualBoxId: loaded.effective.visual_box.id,
+    capsule,
+    providers: {},
+    outDir: loaded.baseDir,
+  });
+  const captured = await builder.captureCurrent({
+    id: String(args.flags["state"] ?? "auto_capture"),
+    description: "auto captured via cli build",
+  });
+  const state = builder.appendStateFromCapture(captured);
+  await saveMap(loaded.baselinePath, builder.current());
+  console.log(
+    `wrote ${loaded.baselinePath}: state=${state.id} controls=${state.controls.length} anchors=${state.anchors.length}`,
+  );
+}
+
+async function cmdRun(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("run 需要 <app_id>");
+  const actionId = String(args.flags.action ?? "");
+  if (!actionId) throw new Error("run 需要 --action <action_id>");
+  const params = args.flags.params ? JSON.parse(String(args.flags.params)) : {};
+  const { runtime, capsule } = await openAppRuntime(appId, args, {
+    approveAll: Boolean(args.flags["approve-all"]),
+    fallbackMock: true,
+  });
+  const result = await runtime.performAction(actionId, params);
+  console.log(JSON.stringify(result, null, 2));
+  await capsule.adapter.dispose?.();
+}
+
+async function cmdWorkflow(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("workflow 需要 <app_id>");
+  const wfId = String(args.flags.id ?? "");
+  if (!wfId) throw new Error("workflow 需要 --id <workflow_id>");
+  const inputs = args.flags.inputs ? JSON.parse(String(args.flags.inputs)) : {};
+  const { runtime, capsule } = await openAppRuntime(appId, args, {
+    approveAll: Boolean(args.flags["approve-all"]),
+    fallbackMock: true,
+  });
+  const result = await runtime.runWorkflow(wfId, inputs);
+  console.log(JSON.stringify(result, null, 2));
+  await capsule.adapter.dispose?.();
+}
+
+async function cmdRepair(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("repair 需要 <app_id>");
+  const max = Number(args.flags["max-level"] ?? 3);
+  const { runtime, capsule } = await openAppRuntime(appId, args, { fallbackMock: true });
+  const r = await runtime.repairAttempt(max);
+  console.log(JSON.stringify(r, null, 2));
+  await capsule.adapter.dispose?.();
+}
+
+async function cmdTrace(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("trace 需要 <app_id>");
+  const dir = path.join(appsRoot(args), ".traces", appId);
+  const trace = new FileTraceStore(dir);
+  await trace.ensure();
+  const sessions = await trace.listSessions();
+  const limit = Number(args.flags.limit ?? 100);
+  const sessionId = args.flags.session ? String(args.flags.session) : undefined;
+  const events = await trace.query({ sessionId, limit });
+  console.log(
+    JSON.stringify(
+      {
+        sessions: sessions.slice(-5),
+        events,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+async function cmdServe(args: ParsedArgs) {
+  const ctx = await createServerContext({
+    appsRoot: appsRoot(args),
+    traceDir: args.flags["trace-dir"]
+      ? String(args.flags["trace-dir"])
+      : path.join(appsRoot(args), ".traces"),
+    platformOptions: {
+      platform: (args.flags.platform as never) ?? "auto",
+      fallbackToMock: Boolean(args.flags["fallback-mock"]),
+      helperPath: process.env.VISION_MCP_NATIVE_HELPER,
+    },
+  });
+  const server = createVisionMcpServer(ctx);
+  await runStdio(server);
+}
+
+async function cmdSchema(args: ParsedArgs) {
+  const sub = args.positional[0] ?? "export";
+  if (sub !== "export") throw new Error("schema 子命令仅支持 export");
+  const out = String(args.flags.out ?? path.join(process.cwd(), "schema"));
+  await fs.mkdir(out, { recursive: true });
+  const { zodToJsonSchema } = await import("zod-to-json-schema");
+  const { VisionMap, Patch } = await import("@vision-mcp/core");
+  await fs.writeFile(
+    path.join(out, "vision-mcp.schema.json"),
+    JSON.stringify(zodToJsonSchema(VisionMap, { name: "VisionMap" }), null, 2),
+  );
+  await fs.writeFile(
+    path.join(out, "vision-mcp-patch.schema.json"),
+    JSON.stringify(zodToJsonSchema(Patch, { name: "Patch" }), null, 2),
+  );
+  console.log(`wrote schemas to ${out}`);
+}
+
+function askApprovalViaStdin(req: import("@vision-mcp/core").ApprovalRequest): Promise<"granted" | "denied" | "expired"> {
+  return new Promise((resolve) => {
+    process.stderr.write(
+      `\n[审批] ${req.action_id} (${req.risk_level}) — ${req.message}\n输入 y/n 后回车：`,
+    );
+    process.stdin.setEncoding("utf8");
+    const onData = (chunk: string) => {
+      const ans = chunk.trim().toLowerCase();
+      process.stdin.off("data", onData);
+      resolve(ans === "y" || ans === "yes" ? "granted" : "denied");
+    };
+    process.stdin.on("data", onData);
+    setTimeout(() => {
+      process.stdin.off("data", onData);
+      resolve("expired");
+    }, 60_000);
+  });
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

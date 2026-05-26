@@ -1,0 +1,318 @@
+version: "0.1"
+app:
+  id: example-erp
+  name: Example ERP
+  platform: windows
+  build: "2026.05"
+  launch_hint: attach_after_launch
+  description: 演示企业资源管理 (ERP) 系统的发票录入流程
+visual_box:
+  id: erp-capsule-1
+  mode: same_session_virtual_display
+  platform: windows
+  display:
+    width_px: 1280
+    height_px: 800
+    scale: 1.0
+    dpi_x: 96
+    dpi_y: 96
+    refresh_rate_hz: 60
+  target_window:
+    process_name: erp.exe
+    title_regex: ".*ERP.*"
+  coordinate_space: normalized_client_rect
+  contract:
+    require_same_display: true
+    require_client_size_px: [1280, 800]
+    tolerate_client_size_delta_px: 2
+    require_unminimized: true
+    require_foreground_for_input: true
+    validate_before_each_action: true
+  fallbacks:
+    - real_window
+states:
+  - id: login
+    description: 登录页
+    kind: page
+    anchors:
+      - type: ocr_text
+        text: 用户名
+        match: contains
+        min_confidence: 0.85
+      - type: ocr_text
+        text: 密码
+        match: contains
+        min_confidence: 0.85
+    match_policy: all_anchors
+    controls:
+      - id: username
+        role: textbox
+        label: 用户名
+        action_types: [type, click]
+        locator_priority:
+          - type: accessibility
+            role: textbox
+            automation_id: txtUserName
+          - type: nearby_text
+            text: 用户名
+            direction: right
+            max_distance_norm: 0.15
+          - type: bbox_norm
+            value: [0.42, 0.40, 0.25, 0.05]
+        visual:
+          bbox_norm: [0.42, 0.40, 0.25, 0.05]
+          center_norm: [0.545, 0.425]
+        risk_level: safe
+      - id: password
+        role: textbox
+        label: 密码
+        action_types: [type, click]
+        locator_priority:
+          - type: accessibility
+            role: textbox
+            automation_id: txtPassword
+          - type: nearby_text
+            text: 密码
+            direction: right
+            max_distance_norm: 0.15
+          - type: bbox_norm
+            value: [0.42, 0.48, 0.25, 0.05]
+        visual:
+          bbox_norm: [0.42, 0.48, 0.25, 0.05]
+          center_norm: [0.545, 0.505]
+        risk_level: safe
+      - id: submit
+        role: button
+        label: 登录
+        action_types: [click]
+        locator_priority:
+          - type: accessibility
+            role: button
+            name: 登录
+          - type: ocr_text
+            text: 登录
+            match: exact
+          - type: bbox_norm
+            value: [0.50, 0.57, 0.12, 0.05]
+        visual:
+          bbox_norm: [0.50, 0.57, 0.12, 0.05]
+          center_norm: [0.56, 0.595]
+        postcondition:
+          any:
+            - type: state_should_be
+              state_id: dashboard
+            - type: text_should_appear
+              text: 工作台
+              timeout_ms: 4000
+        risk_level: requires_confirmation
+        approval_required: true
+  - id: dashboard
+    description: 登录后的工作台
+    kind: page
+    anchors:
+      - type: ocr_text
+        text: 工作台
+      - type: ocr_text
+        text: 待办
+    controls:
+      - id: nav_invoice
+        role: menu_item
+        label: 发票
+        action_types: [click]
+        locator_priority:
+          - type: accessibility
+            role: menu_item
+            name: 发票
+          - type: ocr_text
+            text: 发票
+            match: contains
+          - type: bbox_norm
+            value: [0.05, 0.15, 0.10, 0.05]
+        visual:
+          bbox_norm: [0.05, 0.15, 0.10, 0.05]
+          center_norm: [0.1, 0.175]
+        postcondition:
+          type: state_should_be
+          state_id: invoice.editor
+  - id: invoice.editor
+    description: 发票编辑页
+    kind: page
+    anchors:
+      - type: ocr_text
+        text: 发票信息
+        match: contains
+        min_confidence: 0.85
+      - type: accessibility
+        role: window
+        name_regex: ".*发票.*"
+    controls:
+      - id: customer_name
+        role: textbox
+        label: 客户名称
+        action_types: [type]
+        locator_priority:
+          - type: accessibility
+            automation_id: txtCustomerName
+          - type: nearby_text
+            text: 客户名称
+            direction: right
+            max_distance_norm: 0.2
+          - type: bbox_norm
+            value: [0.32, 0.30, 0.40, 0.05]
+        visual:
+          bbox_norm: [0.32, 0.30, 0.40, 0.05]
+      - id: amount
+        role: textbox
+        label: 金额
+        action_types: [type]
+        locator_priority:
+          - type: accessibility
+            automation_id: txtAmount
+          - type: nearby_text
+            text: 金额
+            direction: right
+            max_distance_norm: 0.15
+          - type: bbox_norm
+            value: [0.32, 0.40, 0.20, 0.05]
+        visual:
+          bbox_norm: [0.32, 0.40, 0.20, 0.05]
+      - id: submit
+        role: button
+        label: 提交
+        action_types: [click]
+        locator_priority:
+          - type: accessibility
+            role: button
+            name: 提交
+          - type: ocr_text
+            text: 提交
+            match: exact
+          - type: image_patch
+            file: patches/invoice_submit.png
+            min_similarity: 0.9
+          - type: bbox_norm
+            value: [0.72, 0.81, 0.08, 0.04]
+        visual:
+          bbox_norm: [0.72, 0.81, 0.08, 0.04]
+          center_norm: [0.76, 0.83]
+        precondition:
+          type: state_should_be
+          state_id: invoice.editor
+        postcondition:
+          any:
+            - type: text_should_appear
+              text: 提交成功
+              timeout_ms: 5000
+            - type: state_should_be
+              state_id: invoice.detail
+        risk_level: requires_confirmation
+        approval_required: true
+  - id: invoice.detail
+    description: 提交后的发票详情
+    kind: page
+    anchors:
+      - type: ocr_text
+        text: 发票编号
+      - type: ocr_text
+        text: 提交成功
+        match: contains
+    controls: []
+transitions:
+  - from: login
+    action_id: login.submit
+    to: dashboard
+    verify:
+      - type: text_appears
+        text: 工作台
+        timeout_ms: 4000
+  - from: dashboard
+    action_id: dashboard.nav_invoice
+    to: invoice.editor
+    verify:
+      - type: state_should_be
+        state_id: invoice.editor
+  - from: invoice.editor
+    action_id: invoice.editor.submit
+    to: invoice.detail
+    verify:
+      - type: text_appears
+        text: 提交成功
+        timeout_ms: 5000
+workflows:
+  - id: login_and_create_invoice
+    description: 登录后创建一张发票
+    inputs:
+      - name: username
+        type: string
+      - name: password
+        type: secret
+      - name: customer_name
+        type: string
+      - name: amount
+        type: string
+    steps:
+      - action_id: login.username
+        params:
+          text: "{{username}}"
+      - action_id: login.password
+        params:
+          text: "{{password}}"
+      - action_id: login.submit
+        approval_required: true
+        on_failure: ask_user
+      - action_id: dashboard.nav_invoice
+      - action_id: invoice.editor.customer_name
+        params:
+          text: "{{customer_name}}"
+      - action_id: invoice.editor.amount
+        params:
+          text: "{{amount}}"
+      - action_id: invoice.editor.submit
+        approval_required: true
+        on_failure: ask_user
+    timeout_ms: 180000
+repair_policy:
+  max_auto_repair_level: 3
+  geometry:
+    tolerate_client_size_delta_px: 2
+    tolerate_origin_change: true
+    require_same_dpi: true
+  state:
+    min_anchor_score: 0.86
+    min_ocr_similarity: 0.88
+    min_visual_similarity: 0.82
+  control_relocation:
+    confidence_threshold: 0.92
+    max_bbox_shift_norm: 0.08
+  destructive_actions:
+    auto_repair_before_action: false
+    require_user_confirmation: true
+safety_policy:
+  forbidden_action_categories:
+    - payment
+    - destructive
+    - external_communication
+    - permission_change
+    - captcha
+  require_approval_for_risk_levels:
+    - requires_confirmation
+    - destructive
+  redaction_patterns:
+    - "(?<=密码[:：])\\\\S+"
+    - "\\\\b\\\\d{16,19}\\\\b"
+  allow_cloud_vlm: false
+  audit_log_retention_days: 30
+input_lease_policy:
+  default_lease_ms: 5000
+  break_on_user_input: true
+  break_hotkey: Esc Esc
+  require_revalidate_after_break: true
+metadata:
+  created_at: 2026-05-26T08:00:00.000Z
+  created_by: vision-mcp-design-team
+  tags:
+    - example
+    - windows
+    - erp
+  notes: 设计文档 §19.1 的扩展版示例
+  builder_version: "0.1"

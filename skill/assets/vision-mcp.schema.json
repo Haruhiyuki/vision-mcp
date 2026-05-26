@@ -1,0 +1,1290 @@
+{
+  "$ref": "#/definitions/VisionMap",
+  "definitions": {
+    "VisionMap": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "default": "0.1"
+        },
+        "app": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.\\-]*$"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "platform": {
+              "type": "string",
+              "enum": [
+                "windows",
+                "macos",
+                "any"
+              ]
+            },
+            "build": {
+              "type": "string"
+            },
+            "launch_hint": {
+              "type": "string",
+              "enum": [
+                "attach_after_launch",
+                "launch_then_attach",
+                "auto_launch"
+              ],
+              "default": "attach_after_launch"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "platform"
+          ],
+          "additionalProperties": false
+        },
+        "visual_box": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "same_session_virtual_display",
+                "real_window",
+                "existing_display",
+                "third_party_virtual_display"
+              ]
+            },
+            "platform": {
+              "$ref": "#/definitions/VisionMap/properties/app/properties/platform",
+              "default": "any"
+            },
+            "display": {
+              "type": "object",
+              "properties": {
+                "width_px": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
+                },
+                "height_px": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
+                },
+                "scale": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 1
+                },
+                "dpi_x": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 96
+                },
+                "dpi_y": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 96
+                },
+                "refresh_rate_hz": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 60
+                }
+              },
+              "required": [
+                "width_px",
+                "height_px"
+              ],
+              "additionalProperties": false
+            },
+            "target_window": {
+              "type": "object",
+              "properties": {
+                "process_name": {
+                  "type": "string"
+                },
+                "title_regex": {
+                  "type": "string"
+                },
+                "class_name": {
+                  "type": "string"
+                },
+                "bundle_id": {
+                  "type": "string",
+                  "description": "macOS bundle id"
+                }
+              },
+              "additionalProperties": false
+            },
+            "coordinate_space": {
+              "type": "string",
+              "enum": [
+                "normalized_client_rect",
+                "normalized_window_rect",
+                "normalized_display_rect"
+              ],
+              "default": "normalized_client_rect"
+            },
+            "contract": {
+              "type": "object",
+              "properties": {
+                "require_same_display": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "require_client_size_px": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                "tolerate_client_size_delta_px": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 2
+                },
+                "require_unminimized": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "require_foreground_for_input": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "validate_before_each_action": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "fallbacks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/VisionMap/properties/visual_box/properties/mode"
+              },
+              "default": []
+            }
+          },
+          "required": [
+            "id",
+            "mode",
+            "display"
+          ],
+          "additionalProperties": false
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.\\-]*$"
+              },
+              "description": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "page",
+                  "modal",
+                  "menu",
+                  "tooltip",
+                  "dialog",
+                  "system_modal"
+                ],
+                "default": "page"
+              },
+              "anchors": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "ocr_text"
+                        },
+                        "text": {
+                          "type": "string"
+                        },
+                        "min_confidence": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1,
+                          "default": 0.85
+                        },
+                        "match": {
+                          "type": "string",
+                          "enum": [
+                            "exact",
+                            "contains",
+                            "regex"
+                          ],
+                          "default": "contains"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "accessibility"
+                        },
+                        "role": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "name_regex": {
+                          "type": "string"
+                        },
+                        "automation_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "window_title"
+                        },
+                        "pattern": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "pattern"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "visual_hash"
+                        },
+                        "hash": {
+                          "type": "string"
+                        },
+                        "min_similarity": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1,
+                          "default": 0.82
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "hash"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "minItems": 1,
+                "description": "状态识别锚点；任一锚点命中即可，但应优先多锚点全命中"
+              },
+              "match_policy": {
+                "type": "string",
+                "enum": [
+                  "any_anchor",
+                  "all_anchors",
+                  "score"
+                ],
+                "default": "any_anchor"
+              },
+              "controls": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.\\-]*$"
+                    },
+                    "role": {
+                      "type": "string",
+                      "description": "button | textbox | combobox | list_item | menu_item | tab | link | image | container 等"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "action_types": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "click",
+                          "double_click",
+                          "right_click",
+                          "hover",
+                          "type",
+                          "key",
+                          "scroll",
+                          "drag",
+                          "drop",
+                          "wait",
+                          "noop"
+                        ]
+                      },
+                      "minItems": 1,
+                      "description": "控件支持的动作类型；首项为默认动作"
+                    },
+                    "locator_priority": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "accessibility"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "name_regex": {
+                                "type": "string"
+                              },
+                              "role": {
+                                "type": "string"
+                              },
+                              "automation_id": {
+                                "type": "string"
+                              },
+                              "class_name": {
+                                "type": "string"
+                              },
+                              "description": {
+                                "type": "string"
+                              },
+                              "index": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "type"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "ocr_text"
+                              },
+                              "text": {
+                                "type": "string"
+                              },
+                              "match": {
+                                "type": "string",
+                                "enum": [
+                                  "exact",
+                                  "contains",
+                                  "regex"
+                                ],
+                                "default": "contains"
+                              },
+                              "min_confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                                "default": 0.8
+                              },
+                              "search_region": {
+                                "type": "array",
+                                "minItems": 4,
+                                "maxItems": 4,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.5
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.5
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.5
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.5
+                                  }
+                                ],
+                                "description": "[x, y, w, h] 归一化坐标，相对 capsule client rect"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "text"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "nearby_text"
+                              },
+                              "text": {
+                                "type": "string"
+                              },
+                              "direction": {
+                                "type": "string",
+                                "enum": [
+                                  "left",
+                                  "right",
+                                  "above",
+                                  "below",
+                                  "any"
+                                ],
+                                "default": "any"
+                              },
+                              "max_distance_norm": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                                "default": 0.2
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "text"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "image_patch"
+                              },
+                              "file": {
+                                "type": "string",
+                                "description": "相对 map 根目录的 patch 图像路径"
+                              },
+                              "hash": {
+                                "type": "string",
+                                "description": "可选 dHash/pHash，用于快速预筛"
+                              },
+                              "min_similarity": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                                "default": 0.85
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "file"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "bbox_norm"
+                              },
+                              "value": {
+                                "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/locator_priority/items/anyOf/1/properties/search_region"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "vlm"
+                              },
+                              "prompt": {
+                                "type": "string"
+                              },
+                              "hint_bbox_norm": {
+                                "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/locator_priority/items/anyOf/1/properties/search_region",
+                                "description": "[x, y, w, h] 归一化坐标，相对 capsule client rect"
+                              },
+                              "cost_budget_usd": {
+                                "type": "number",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "prompt"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "minItems": 1,
+                      "description": "从结构化到坐标兜底的多 locator 列表，按优先级排序"
+                    },
+                    "visual": {
+                      "type": "object",
+                      "properties": {
+                        "bbox_norm": {
+                          "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/locator_priority/items/anyOf/1/properties/search_region",
+                          "description": "[x, y, w, h] 归一化坐标，相对 capsule client rect"
+                        },
+                        "center_norm": {
+                          "type": "array",
+                          "minItems": 2,
+                          "maxItems": 2,
+                          "items": [
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1.5
+                            },
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1.5
+                            }
+                          ],
+                          "description": "[x, y] 归一化坐标点"
+                        },
+                        "patch_file": {
+                          "type": "string",
+                          "description": "控件局部截图路径，相对 map 根目录"
+                        },
+                        "patch_hash": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "precondition": {
+                      "anyOf": [
+                        {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "state_should_be"
+                                },
+                                "state_id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "state_id"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "text_should_appear"
+                                },
+                                "text": {
+                                  "type": "string"
+                                },
+                                "timeout_ms": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "default": 3000
+                                },
+                                "match": {
+                                  "type": "string",
+                                  "enum": [
+                                    "exact",
+                                    "contains",
+                                    "regex"
+                                  ],
+                                  "default": "contains"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "text"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "text_should_disappear"
+                                },
+                                "text": {
+                                  "type": "string"
+                                },
+                                "timeout_ms": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "default": 3000
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "text"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "window_title_should_match"
+                                },
+                                "pattern": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "pattern"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "modal_should_close"
+                                },
+                                "modal_id": {
+                                  "type": "string"
+                                },
+                                "timeout_ms": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "default": 3000
+                                }
+                              },
+                              "required": [
+                                "type"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "control_should_exist"
+                                },
+                                "control_id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "control_id"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "control_should_not_exist"
+                                },
+                                "control_id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "control_id"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "visual_similar_should_be"
+                                },
+                                "state_id": {
+                                  "type": "string"
+                                },
+                                "min_similarity": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1,
+                                  "default": 0.82
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "state_id"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "all": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/precondition/anyOf/0"
+                              }
+                            },
+                            "any": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/precondition/anyOf/0"
+                              }
+                            },
+                            "not": {
+                              "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/precondition/anyOf/0"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "postcondition": {
+                      "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/precondition"
+                    },
+                    "risk_level": {
+                      "type": "string",
+                      "enum": [
+                        "safe",
+                        "requires_confirmation",
+                        "destructive"
+                      ],
+                      "default": "safe"
+                    },
+                    "approval_required": {
+                      "type": "boolean",
+                      "default": false
+                    },
+                    "notes": {
+                      "type": "string"
+                    },
+                    "metadata": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "role",
+                    "action_types",
+                    "locator_priority"
+                  ],
+                  "additionalProperties": false
+                },
+                "default": []
+              },
+              "parent_state_id": {
+                "type": "string"
+              },
+              "variants": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "notes": {
+                "type": "string"
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "id",
+              "anchors"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "action_id": {
+                "type": "string",
+                "description": "形如 state_id.control_id，或 workflow 内自定义 id"
+              },
+              "to": {
+                "type": "string"
+              },
+              "verify": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "text_appears"
+                        },
+                        "text": {
+                          "type": "string"
+                        },
+                        "timeout_ms": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "default": 3000
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "state_should_be"
+                        },
+                        "state_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "state_id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "window_title_should_match"
+                        },
+                        "pattern": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "pattern"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "default": []
+              },
+              "notes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "action_id",
+              "to"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "workflows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.\\-]*$"
+              },
+              "description": {
+                "type": "string"
+              },
+              "inputs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "string",
+                        "number",
+                        "boolean",
+                        "secret"
+                      ],
+                      "default": "string"
+                    },
+                    "required": {
+                      "type": "boolean",
+                      "default": true
+                    },
+                    "default": {},
+                    "description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "additionalProperties": false
+                },
+                "default": []
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "action_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "params": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    },
+                    "approval_required": {
+                      "type": "boolean",
+                      "default": false
+                    },
+                    "retry": {
+                      "type": "object",
+                      "properties": {
+                        "max_attempts": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 5,
+                          "default": 2
+                        },
+                        "delay_ms": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "default": 500
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "on_failure": {
+                      "type": "string",
+                      "enum": [
+                        "abort",
+                        "skip",
+                        "repair",
+                        "ask_user"
+                      ],
+                      "default": "repair"
+                    },
+                    "notes": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action_id"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "default": 120000
+              },
+              "notes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "steps"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "repair_policy": {
+          "type": "object",
+          "properties": {
+            "max_auto_repair_level": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 6,
+              "default": 3
+            },
+            "geometry": {
+              "type": "object",
+              "properties": {
+                "tolerate_client_size_delta_px": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 2
+                },
+                "tolerate_origin_change": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "require_same_dpi": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "state": {
+              "type": "object",
+              "properties": {
+                "min_anchor_score": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.86
+                },
+                "min_ocr_similarity": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.88
+                },
+                "min_visual_similarity": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.82
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "control_relocation": {
+              "type": "object",
+              "properties": {
+                "confidence_threshold": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.92
+                },
+                "max_bbox_shift_norm": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.08
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "destructive_actions": {
+              "type": "object",
+              "properties": {
+                "auto_repair_before_action": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "require_user_confirmation": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "safety_policy": {
+          "type": "object",
+          "properties": {
+            "forbidden_action_categories": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "payment",
+                "destructive",
+                "external_communication",
+                "permission_change",
+                "captcha"
+              ]
+            },
+            "require_approval_for_risk_levels": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "requires_confirmation",
+                  "destructive"
+                ]
+              },
+              "default": [
+                "requires_confirmation",
+                "destructive"
+              ]
+            },
+            "redaction_patterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "allow_cloud_vlm": {
+              "type": "boolean",
+              "default": false
+            },
+            "audit_log_retention_days": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 30
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "input_lease_policy": {
+          "type": "object",
+          "properties": {
+            "default_lease_ms": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 5000
+            },
+            "break_on_user_input": {
+              "type": "boolean",
+              "default": true
+            },
+            "break_hotkey": {
+              "type": "string",
+              "default": "Esc Esc"
+            },
+            "require_revalidate_after_break": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "created_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "created_by": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "notes": {
+              "type": "string"
+            },
+            "builder_version": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        }
+      },
+      "required": [
+        "app",
+        "visual_box"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

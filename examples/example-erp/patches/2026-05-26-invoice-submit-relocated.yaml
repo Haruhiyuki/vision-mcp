@@ -1,0 +1,13 @@
+kind: control_bbox
+id: 2026-05-26-invoice-submit-relocated
+trust: session_only
+created_at: 2026-05-26T10:15:00.000Z
+created_by: runtime-repair
+confidence: 0.94
+requires_review: false
+reason: ocr_text + nearby_text 命中“提交”按钮，bbox 漂移 0.02 norm
+state_id: invoice.editor
+control_id: submit
+old_bbox_norm: [0.72, 0.81, 0.08, 0.04]
+new_bbox_norm: [0.74, 0.82, 0.08, 0.04]
+method: ocr_text + nearby_text

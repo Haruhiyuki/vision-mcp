@@ -1,0 +1,31 @@
+{
+  "name": "@vision-mcp/server",
+  "version": "0.1.0",
+  "description": "Vision-MCP MCP Server：暴露 capsule.* / vision_map.* tools 与 vision-mcp:// resources",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "vision-mcp-server": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist *.tsbuildinfo",
+    "start": "node dist/bin.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@vision-mcp/core": "0.1.0",
+    "zod": "^3.24.1"
+  }
+}

@@ -1,0 +1,16 @@
+{"id":"evt-1","session_id":"sess-001","kind":"session_started","ts":"2026-05-26T10:10:00.000Z","message":"start example-erp run","detail":{"map":"example-erp","mode":"same_session_virtual_display"}}
+{"id":"evt-2","session_id":"sess-001","kind":"capsule_attached","ts":"2026-05-26T10:10:01.234Z","message":"attached window erp.exe","detail":{"title":"Example ERP - 主窗口","process_id":12888}}
+{"id":"evt-3","session_id":"sess-001","kind":"capsule_migrated","ts":"2026-05-26T10:10:01.789Z","message":"migrated to capsule display VISION_CAPSULE_1","detail":{"display_id":"VISION_CAPSULE_1","rect":{"x":100,"y":100,"width":1280,"height":800}}}
+{"id":"evt-4","session_id":"sess-001","kind":"state_detected","ts":"2026-05-26T10:10:02.111Z","message":"matched state login (score=0.92)","state_id":"login"}
+{"id":"evt-5","session_id":"sess-001","kind":"action_started","ts":"2026-05-26T10:10:02.567Z","message":"perform login.username","action_id":"login.username","control_id":"username","state_id":"login"}
+{"id":"evt-6","session_id":"sess-001","kind":"action_succeeded","ts":"2026-05-26T10:10:03.012Z","message":"login.username OK","action_id":"login.username","bbox_norm":[0.42,0.40,0.25,0.05]}
+{"id":"evt-7","session_id":"sess-001","kind":"action_started","ts":"2026-05-26T10:10:03.300Z","message":"perform login.submit","action_id":"login.submit","control_id":"submit","state_id":"login"}
+{"id":"evt-8","session_id":"sess-001","kind":"approval_requested","ts":"2026-05-26T10:10:03.350Z","message":"等待人类批准 login.submit","action_id":"login.submit"}
+{"id":"evt-9","session_id":"sess-001","kind":"approval_granted","ts":"2026-05-26T10:10:04.812Z","message":"granted by user","action_id":"login.submit"}
+{"id":"evt-10","session_id":"sess-001","kind":"action_succeeded","ts":"2026-05-26T10:10:05.450Z","message":"login.submit OK → dashboard","action_id":"login.submit","state_id":"dashboard"}
+{"id":"evt-11","session_id":"sess-001","kind":"action_started","ts":"2026-05-26T10:10:06.100Z","message":"perform invoice.editor.submit","action_id":"invoice.editor.submit","state_id":"invoice.editor","control_id":"submit"}
+{"id":"evt-12","session_id":"sess-001","kind":"postcondition_failed","ts":"2026-05-26T10:10:09.220Z","message":"text_should_appear=\"提交成功\" 未在 5000ms 内出现","action_id":"invoice.editor.submit"}
+{"id":"evt-13","session_id":"sess-001","kind":"repair_attempted","ts":"2026-05-26T10:10:09.340Z","message":"L3 relocate via ocr_text + nearby_text","action_id":"invoice.editor.submit"}
+{"id":"evt-14","session_id":"sess-001","kind":"repair_succeeded","ts":"2026-05-26T10:10:09.610Z","message":"wrote patch 2026-05-26-invoice-submit-relocated (confidence=0.94)","action_id":"invoice.editor.submit"}
+{"id":"evt-15","session_id":"sess-001","kind":"action_succeeded","ts":"2026-05-26T10:10:10.050Z","message":"invoice.editor.submit OK → invoice.detail","action_id":"invoice.editor.submit","state_id":"invoice.detail"}
+{"id":"evt-16","session_id":"sess-001","kind":"session_ended","ts":"2026-05-26T10:10:11.000Z","message":"workflow login_and_create_invoice succeeded"}

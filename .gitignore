@@ -1,0 +1,17 @@
+node_modules
+dist
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+coverage
+.vitest
+.vscode/settings.json
+.idea
+*.log
+trace.db
+trace.db-journal
+.vision-mcp/runtime-cache
+examples/.traces/
+apps/.traces/
+
