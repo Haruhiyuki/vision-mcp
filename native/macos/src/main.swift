@@ -260,18 +260,35 @@ func dumpAXTree(handle: String, maxNodes: Int, maxDepth: Int) -> [[String: Any]]
     func visit(_ el: AXUIElement, depth: Int, path: String) {
         if out.count >= maxNodes || depth > maxDepth { return }
         let role = axStringAttr(el, kAXRoleAttribute) ?? "?"
-        let name = axStringAttr(el, kAXTitleAttribute)
+        var name = axStringAttr(el, kAXTitleAttribute)
         let desc = axStringAttr(el, kAXRoleDescriptionAttribute)
         let descAlt = axStringAttr(el, kAXDescriptionAttribute)
         let pos = axPointAttr(el, kAXPositionAttribute)
         let size = axSizeAttr(el, kAXSizeAttribute)
+
+        // 对容器型节点（AXCell / AXRow / AXButton）如果自身 AXTitle 为空，
+        // 用 children 中第一个 AXStaticText 的 AXValue 作为 name。这让 sidebar
+        // "主页 / 搜索 / 新发现" 等条目对 agent 可见（否则 name=null desc="单元格"）。
+        if (name == nil || name?.isEmpty == true) && (role == "AXCell" || role == "AXRow" || role == "AXButton") {
+            let kids = axChildren(el)
+            for k in kids.prefix(8) {
+                let kRole = axStringAttr(k, kAXRoleAttribute) ?? ""
+                if kRole == "AXStaticText" {
+                    if let v = axStringAttr(k, kAXValueAttribute), !v.isEmpty {
+                        name = v; break
+                    }
+                    if let t = axStringAttr(k, kAXTitleAttribute), !t.isEmpty {
+                        name = t; break
+                    }
+                }
+            }
+        }
         var node: [String: Any] = [
             "role": role,
             "depth": depth,
             "path": path,
         ]
-        if let n = name { node["name"] = n }
-        // 优先 AXDescription（语义描述，如"Scorpions Essentials"），否则 AXRoleDescription（如"按钮"）。
+        if let n = name, !n.isEmpty { node["name"] = n }
         if let d = descAlt, !d.isEmpty {
             node["desc"] = d
         } else if let d = desc, !d.isEmpty {

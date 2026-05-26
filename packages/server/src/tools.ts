@@ -24,7 +24,9 @@ function isInteractiveCandidate(n: AccessibilityNode): boolean {
     )
   )
     return true;
-  if (r === "AXCell" && (n.description || n.name) && n.description !== "单元格") return true;
+  // AXCell：sidebar cell name="主页"/"搜索" desc="单元格"；搜索结果 cell name=null desc="张学友"
+  // 只要 name 或 description 任一非空即视为可点。
+  if (r === "AXCell" && (n.name || n.description)) return true;
   return false;
 }
 

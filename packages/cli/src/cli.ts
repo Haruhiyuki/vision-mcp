@@ -88,6 +88,14 @@ function usage(): string {
     "       按计划脚本逐步操作，每步前后都截图+dump AX，建图前预先摸清所有页面",
     "  discover <app_id> [--out <dir>] [--max-clicks 20] [--max-depth 2]",
     "       自动 BFS 探索 UI 拓扑：每个可交互节点 click → 截图比较 → 自动找返回路径 → 生成 draft map",
+    "  snapshot <app_id> [--out frame.png] [--no-image] [--max-candidates 60]",
+    "       Agent 视角：一次拿截图 + AX 候选 + state match。等同于 MCP tool vision_map.snapshot",
+    "  click <app_id> --norm <x,y> [--button left|right|middle] [--count 1]",
+    "       直接 click 归一化坐标。等同于 MCP tool vision_map.click_at",
+    "  type <app_id> --text <s> [--clear-first]",
+    "       直接 type 文本（支持中文）。等同于 MCP tool vision_map.type_text",
+    "  key <app_id> --combo <combo>",
+    "       直接发键盘组合（return / cmd+f / Escape）。等同于 MCP tool vision_map.press_key",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -138,6 +146,18 @@ async function main() {
         return;
       case "discover":
         await cmdDiscover(args);
+        return;
+      case "snapshot":
+        await cmdSnapshot(args);
+        return;
+      case "click":
+        await cmdRawClick(args);
+        return;
+      case "type":
+        await cmdRawType(args);
+        return;
+      case "key":
+        await cmdRawKey(args);
         return;
       case "serve":
         await cmdServe(args);
@@ -722,6 +742,123 @@ async function cmdDiscover(args: ParsedArgs) {
       2,
     ),
   );
+  await adapter.dispose?.();
+}
+
+// ---- agent-friendly raw subcommands（与 MCP tools 等价）-------------------
+
+async function openCapsuleForRaw(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  const adapter = await createPlatformAdapter({ platform: (args.flags.platform as never) ?? "auto" });
+  const { Capsule } = await import("@vision-mcp/core");
+  const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
+  const display = await capsule.ensureDisplay({
+    geometry: loaded.effective.visual_box.display,
+    mode: loaded.effective.visual_box.mode,
+  });
+  if (loaded.effective.visual_box.target_window) {
+    await capsule.attach({ target: loaded.effective.visual_box.target_window });
+    if (!args.flags["no-migrate"]) {
+      await capsule.migrate(display.id);
+    }
+  }
+  return { adapter, capsule, loaded };
+}
+
+async function cmdSnapshot(args: ParsedArgs) {
+  const { adapter, capsule, loaded } = await openCapsuleForRaw(args);
+  const { LocatorResolver } = await import("@vision-mcp/core");
+  const provider = isDarwinAdapter(adapter) ? new DarwinAccessibilityProvider(adapter) : undefined;
+  const resolver = new LocatorResolver(provider ? { accessibility: provider } : {});
+  const frame = await capsule.capture();
+  const insights = await resolver.analyze(frame);
+  const status = await capsule.status();
+  if (status.attached_window) {
+    insights.window_title = status.attached_window.title;
+    await resolver.setAccessibility(insights, status.attached_window.native_handle);
+  }
+  const stateMatch = resolver.detectState(loaded.effective, insights);
+  const maxCands = Number(args.flags["max-candidates"] ?? 60);
+  const candidates = insights.accessibility
+    .filter((n) => {
+      const r = n.role ?? "";
+      return /(AXButton|AXTextField|AXSearchField|AXPopUpButton|AXMenuItem|AXTab|AXLink|AXSlider|AXCheckBox|AXRadioButton|AXList)/.test(r)
+        || (r === "AXCell" && (n.name || n.description));
+    })
+    .slice(0, maxCands)
+    .map((n) => ({
+      role: n.role,
+      name: n.name,
+      description: n.description,
+      bbox: n.bbox_norm.map((v) => Number(v.toFixed(3))),
+    }));
+  const outPath = args.flags.out ? String(args.flags.out) : undefined;
+  if (outPath && !args.flags["no-image"]) {
+    // 直接 screencapture rect 写 PNG（不走 frame.pixels 编码省内存）
+    const cr = status.geometry?.client_rect_px;
+    if (cr) {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execFileP = promisify(execFile);
+      await execFileP("/usr/sbin/screencapture", [
+        "-x", "-t", "png", "-R",
+        `${cr.x},${cr.y},${cr.width},${cr.height}`,
+        outPath,
+      ]).catch(() => {});
+    }
+  }
+  console.log(JSON.stringify({
+    window: status.attached_window?.title,
+    geometry_ok: status.geometry?.ok,
+    state_match: stateMatch,
+    candidates_total: insights.accessibility.length,
+    candidates,
+    visual_hash: insights.visual_hash,
+    image_saved_to: outPath,
+  }, null, 2));
+  await adapter.dispose?.();
+}
+
+async function cmdRawClick(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const normStr = String(args.flags.norm ?? "");
+  const [nxs, nys] = normStr.split(",");
+  const nx = Number(nxs), ny = Number(nys);
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw new Error("--norm 形式：x,y（归一化 0-1）");
+  const button = (args.flags.button as never) ?? "left";
+  const count = Number(args.flags.count ?? 1);
+  await capsule.raise().catch(() => {});
+  const geom = await capsule.validateGeometry();
+  const cr = geom.client_rect_px;
+  const pt = {
+    x: Math.round(cr.x + nx * cr.width),
+    y: Math.round(cr.y + ny * cr.height),
+  };
+  await adapter.click(pt, { button, click_count: count });
+  console.log(JSON.stringify({ ok: true, point: pt, point_norm: [nx, ny] }));
+  await adapter.dispose?.();
+}
+
+async function cmdRawType(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const text = String(args.flags.text ?? "");
+  if (!text) throw new Error("type 需要 --text");
+  await capsule.raise().catch(() => {});
+  await adapter.typeText({ text, clear_first: Boolean(args.flags["clear-first"]) });
+  console.log(JSON.stringify({ ok: true, length: text.length }));
+  await adapter.dispose?.();
+}
+
+async function cmdRawKey(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const combo = String(args.flags.combo ?? "");
+  if (!combo) throw new Error("key 需要 --combo");
+  await capsule.raise().catch(() => {});
+  await adapter.pressKey({ combo });
+  console.log(JSON.stringify({ ok: true, combo }));
   await adapter.dispose?.();
 }
 
