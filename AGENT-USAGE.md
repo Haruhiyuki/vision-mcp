@@ -2,7 +2,12 @@
 
 > 本文档面向 MCP host 中的 agent（Claude / Cursor / Codex 等）。介绍如何用 vision-mcp 提供的 tools「像人一样使用桌面软件」。
 >
-> 核心理念：**agent 在环（agent-in-the-loop）**。Vision-mcp 不是黑盒自动化脚本，而是让 agent 看截图 + 看结构化候选 → 做视觉判断 → 调用原子工具 → 把判断结果写进 vision-mcp map。
+> 核心理念：**agent-in-the-loop + 视觉为主**。Vision-mcp 不是黑盒自动化脚本，而是让 agent **看截图** → 视觉判断 → click 估计坐标 → 再看截图验证。AX 数据是**校准辅助**，不是首选——很多桌面 app（游戏、Electron、自绘 UI、跨平台框架）根本不暴露 AX，但截图永远存在。
+>
+> **正确的优先级**：
+> 1. 第一选择 — 视觉：snapshot 返回的 PNG，agent 用自己的视觉能力识别元素、估坐标。
+> 2. 第二选择 — AX 校准：如果是有 accessibility 的原生 app（Apple Music / Finder / Safari 等），snapshot 也返回 AX candidates 帮你精确化 bbox。
+> 3. 第三选择 — 失败重试：click 一次没生效？snapshot 再看，调坐标重试。这是"像人一样"的本质。
 
 ## 1. 工具总览（按使用频率排序）
 
@@ -96,38 +101,48 @@ events = vision_map.export_trace(app_id)
 
 ## 3. Apple Music 真实演示
 
-这是仓库自带的演示（`apps/apple-music/vision-mcp.yaml`）。Agent 完成"播放一首张学友的歌"的完整步骤：
+### 3.1 视觉 + AX 双轨流程（推荐）
 
 ```bash
-# 1. snapshot 看主页
-vision-mcp snapshot apple-music --out /tmp/home.png --max-candidates 30
-# 截图显示主页 + AX 候选中能看到 sidebar 'name="搜索"' bbox=[0.014, 0.065, 0.141, 0.04]
+# 1. snapshot 看主页：返回 image_base64 + AX 候选
+vision-mcp snapshot apple-music --out /tmp/home.png
+# Agent 用视觉直接看 home.png：sidebar 有"搜索/主页/新发现/广播"
+# AX 候选给精确 bbox：name="搜索" bbox=[0.014, 0.065, 0.141, 0.04]
+# 取 bbox 中心 (0.085, 0.085) → click
 
-# 2. agent 看 AX：sidebar 搜索 cell center ≈ (0.085, 0.085)
 vision-mcp click apple-music --norm "0.085,0.085"
+vision-mcp snapshot apple-music --out /tmp/v.png       # 看是否进搜索页
 
-# 3. snapshot 验证进入搜索页（state_match=music.search）
-vision-mcp snapshot apple-music --out /tmp/search.png
-# 看到 AXTextField desc="搜索文本栏" bbox=[0.318, 0.009, 0.326, 0.048] → 中心 (0.481, 0.033)
-
-# 4. click 搜索框 + type 中文
-vision-mcp click apple-music --norm "0.481,0.033"
+vision-mcp click apple-music --norm "0.481,0.033"      # AX 给的搜索框中心
 vision-mcp type apple-music --text "张学友" --clear-first
 vision-mcp key apple-music --combo return
+vision-mcp snapshot apple-music --out /tmp/results.png # 验证结果页
 
-# 5. snapshot 验证搜索结果页（state_match=music.search_results）
-vision-mcp snapshot apple-music --out /tmp/results.png
-# 候选中能看到 AXCell desc="偷心" bbox=[0.341, 0.134, 0.131, 0.087] → 中心 (0.407, 0.178)
-
-# 6. 双击「偷心」播放
+# AX 给 AXCell desc="偷心" bbox=[0.341, 0.134, 0.131, 0.087] → 中心 (0.407, 0.178)
 vision-mcp click apple-music --norm "0.407,0.178" --count 2
-
-# 7. 1 秒后 snapshot 验证
-vision-mcp snapshot apple-music --out /tmp/playing.png
-# 底部播放栏显示 "偷心 - 张学友 - 偷心"
 ```
 
-**实测时间（macOS 26，含 swift native helper）：每条命令 < 2s，全流程约 15 秒**。
+**实测时间：每条命令 < 2s，全流程约 15 秒**（macOS 26 + swift native helper）。
+
+### 3.2 **纯视觉**流程（AX 不可用时也能工作）
+
+某些 app（游戏、自绘 UI）不暴露 AX，必须靠视觉。这里展示同样目的的纯视觉路径——**只看截图估坐标**：
+
+```bash
+vision-mcp snapshot apple-music --out /tmp/v1.png      # 只看 v1.png，不解析 AX
+# Agent 看图：sidebar 左侧第 7 项是"艺人"，估计中心 ≈ (0.085, 0.305)
+vision-mcp click apple-music --norm "0.085,0.305"
+vision-mcp snapshot apple-music --out /tmp/v2.png      # 验证：艺人页打开了
+
+# 如果 click 没生效（cell 密集时常见）：调坐标重试
+vision-mcp click apple-music --norm "0.085,0.31"
+vision-mcp snapshot apple-music --out /tmp/v3.png
+```
+
+**实测过程中真实发现的坑**：
+- Sidebar 4 个紧邻 cell 每个仅 32px 高 → norm 0.04，人眼估计经常偏 1-2 cells。
+- Apple Music 在搜索激活状态下，sidebar 的"主页"cell 即使 click 命中位置也不响应（应用层逻辑）。
+- → 在这种边缘情况下，AX 校准 + 视觉验证 双轨流程比纯视觉/纯 AX 都稳健。
 
 ## 4. 重要细节 / 避坑
 

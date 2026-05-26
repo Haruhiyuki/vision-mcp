@@ -795,9 +795,9 @@ async function cmdSnapshot(args: ParsedArgs) {
       description: n.description,
       bbox: n.bbox_norm.map((v) => Number(v.toFixed(3))),
     }));
+  // --out 写 PNG 总是生效（--no-image 只是不在 JSON 里返回 base64）
   const outPath = args.flags.out ? String(args.flags.out) : undefined;
-  if (outPath && !args.flags["no-image"]) {
-    // 直接 screencapture rect 写 PNG（不走 frame.pixels 编码省内存）
+  if (outPath) {
     const cr = status.geometry?.client_rect_px;
     if (cr) {
       const { execFile } = await import("node:child_process");
