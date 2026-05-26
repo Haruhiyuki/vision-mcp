@@ -14,4 +14,7 @@ trace.db-journal
 .vision-mcp/runtime-cache
 examples/.traces/
 apps/.traces/
+apps/*/.explore*/
+apps/*/.record/
+.explore/
 

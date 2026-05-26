@@ -57,6 +57,7 @@ export class RuntimeExecutor {
     const insights = await this.resolver.analyze(frame);
     const status = await this.opts.capsule.status();
     if (status.attached_window) {
+      insights.window_title = status.attached_window.title;
       await this.resolver.setAccessibility(insights, status.attached_window.native_handle);
     }
     const state = this.resolver.detectState(this.opts.map, insights);
@@ -113,7 +114,23 @@ export class RuntimeExecutor {
     const events: TraceEventBase[] = [];
 
     // 1. 几何契约校验
-    const geom = await this.opts.capsule.validateGeometry();
+    let geom = await this.opts.capsule.validateGeometry();
+    if (
+      !geom.ok &&
+      geom.violations.length > 0 &&
+      geom.violations.every((v) => v.includes("前台") || v.toLowerCase().includes("foreground"))
+    ) {
+      // 仅 foreground 不达标：自动 raise 再校验一次（不写 patch，无副作用）
+      events.push(
+        await this.appendTrace({
+          kind: "warning",
+          message: "窗口不在前台，自动 raise 后重试",
+          detail: { violations: geom.violations },
+        }),
+      );
+      await this.opts.capsule.raise().catch(() => {});
+      geom = await this.opts.capsule.validateGeometry();
+    }
     if (!geom.ok) {
       events.push(
         await this.appendTrace({
@@ -233,43 +250,49 @@ export class RuntimeExecutor {
         }),
       );
 
-      // 5. locator 解析
-      try {
-        match = await this.resolver.resolveControl(
-          this.opts.map,
-          ctx.state,
-          ctx.control,
-          insights,
-          this.opts.mapBaseDir,
-        );
-      } catch (err) {
-        // 尝试 L3 relocation
-        const relocated = await this.repair.relocateControl({
-          state: ctx.state,
-          control: ctx.control,
-          insights,
-        });
-        if (relocated.match) {
-          match = relocated.match;
-          if (relocated.patch) {
-            patches.push(relocated.patch);
-            events.push(
-              await this.appendTrace({
-                kind: "repair_succeeded",
-                message: `L3 relocation：${relocated.message}`,
-                detail: { patch: relocated.patch },
-              }),
-            );
+      // 5. locator 解析（仅在需要屏幕坐标的动作上执行）
+      const needsLocator = !["key", "wait", "noop"].includes(ctx.actionType);
+      if (needsLocator) {
+        try {
+          match = await this.resolver.resolveControl(
+            this.opts.map,
+            ctx.state,
+            ctx.control,
+            insights,
+            this.opts.mapBaseDir,
+          );
+        } catch (err) {
+          // 尝试 L3 relocation
+          const relocated = await this.repair.relocateControl({
+            state: ctx.state,
+            control: ctx.control,
+            insights,
+          });
+          if (relocated.match) {
+            match = relocated.match;
+            if (relocated.patch) {
+              patches.push(relocated.patch);
+              events.push(
+                await this.appendTrace({
+                  kind: "repair_succeeded",
+                  message: `L3 relocation：${relocated.message}`,
+                  detail: { patch: relocated.patch },
+                }),
+              );
+            }
+          } else {
+            throw err;
           }
-        } else {
-          throw err;
         }
+        if (match) this.recentControls.push(match);
       }
-
-      this.recentControls.push(match);
 
       // 6. 执行动作
       await this.dispatch(ctx, match);
+      // 动作完成后失效 AX 缓存：postcondition 必须看到新页面
+      if (this.opts.providers.accessibility?.invalidate) {
+        this.opts.providers.accessibility.invalidate();
+      }
 
       // 7. 等待 postcondition
       if (ctx.control.postcondition) {
@@ -278,13 +301,19 @@ export class RuntimeExecutor {
           async () => {
             const frame = await this.opts.capsule.capture();
             const ins = await this.resolver.analyze(frame);
+            const st = await this.opts.capsule.status();
+            if (st.attached_window) {
+              ins.window_title = st.attached_window.title;
+              // 关键：wait 的 refresh 必须重填 AX，否则 AX-based anchor 永远不命中
+              await this.resolver.setAccessibility(ins, st.attached_window.native_handle);
+            }
             const detected2 = this.resolver.detectState(this.opts.map, ins);
             stateAfter = detected2;
             return {
               map: this.opts.map,
               state_match: detected2,
               insights: ins,
-              window_title: (await this.opts.capsule.status()).attached_window?.title,
+              window_title: st.attached_window?.title,
               recent_controls: this.recentControls,
             };
           },
@@ -408,12 +437,21 @@ export class RuntimeExecutor {
     return result;
   }
 
-  private async dispatch(ctx: ActionContext, match: LocatorMatch): Promise<void> {
+  private async dispatch(ctx: ActionContext, match: LocatorMatch | null): Promise<void> {
     const adapter = this.opts.capsule.adapter;
+    // 为 type/key 等键盘输入主动 raise 一次：lease 验证到这里可能已隔了几秒，
+    // 在 macOS 上焦点会被其他 osascript 调用临时打断。
+    if (["type", "key"].includes(ctx.actionType)) {
+      await this.opts.capsule.raise().catch(() => {});
+    }
     const geom = await this.opts.capsule.validateGeometry();
     const clientRect = geom.client_rect_px;
-    const center = denormalizePoint(match.center_norm, clientRect);
-    const targetRect = denormalizeBBox(match.bbox_norm, clientRect);
+    // 对 key/wait/noop 而言不需要 match；坐标用窗口中心兜底
+    const fallbackCenter: [number, number] = [0.5, 0.5];
+    const center = denormalizePoint(match?.center_norm ?? fallbackCenter, clientRect);
+    const targetRect = match
+      ? denormalizeBBox(match.bbox_norm, clientRect)
+      : { x: center.x, y: center.y, width: 1, height: 1 };
     switch (ctx.actionType) {
       case "click":
         return adapter.click(center, {
@@ -429,9 +467,11 @@ export class RuntimeExecutor {
         return adapter.drag(center, { to_point_px: center, steps: 1 });
       case "type":
         await adapter.click(center);
+        await new Promise((r) => setTimeout(r, 120));
         return adapter.typeText({
           text: String(ctx.params.text ?? ""),
-          per_char_delay_ms: 10,
+          per_char_delay_ms: ctx.params.per_char_delay_ms ?? 0,
+          clear_first: ctx.params.clear_first ?? false,
         });
       case "key":
         return adapter.pressKey({ combo: String(ctx.params.combo ?? "") });

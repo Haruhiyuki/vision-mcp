@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { VisionMcpError } from "../errors.js";
 import type {
   ContractRules,
@@ -54,6 +55,8 @@ export interface PlatformAdapter {
   onUserInput(cb: () => void): () => void;
   /** 可选：监听窗口位置/尺寸变化。 */
   onWindowChanged?(handle: string, cb: () => void): () => void;
+  /** 可选：把窗口对应的 app/进程拉到前台。runtime 在仅缺 foreground 时会自动调用。 */
+  raiseWindow?(handle: string): Promise<void>;
   /** 卸载/重置；在测试场景下用于复位 mock。 */
   dispose?(): Promise<void>;
 }
@@ -271,7 +274,26 @@ export class Capsule implements ICapsule {
   async acquireLease(durationMs?: number): Promise<InputLeaseHandle> {
     return this.leaseMgr.acquire(
       {
-        validate: () => this.validateGeometry(),
+        validate: async () => {
+          let g = await this.validateGeometry();
+          // 仅 foreground 不达标时多次 raise + 验证（macOS 焦点切换异步）
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (g.ok) break;
+            if (
+              g.violations.length === 0 ||
+              !g.violations.every(
+                (v) => v.includes("前台") || v.toLowerCase().includes("foreground"),
+              )
+            ) {
+              break;
+            }
+            await this.raise().catch(() => {});
+            // 给焦点切换更多时间，每次重试延长
+            await sleep(300 + attempt * 300);
+            g = await this.validateGeometry();
+          }
+          return g;
+        },
         onUserTakeover: (cb) => this.platform.onUserInput(cb),
         emit: (e) => this.emit(e),
       },
@@ -281,6 +303,16 @@ export class Capsule implements ICapsule {
 
   breakLease(reason: string): void {
     this.leaseMgr.break(reason);
+  }
+
+  /**
+   * 把当前 attach 的窗口拉到前台。若 adapter 未实现 raiseWindow，则 no-op。
+   * Runtime / CLI 在 lease 失败且仅缺 foreground 时会自动调用此方法。
+   */
+  async raise(): Promise<void> {
+    if (this.window && this.platform.raiseWindow) {
+      await this.platform.raiseWindow(this.window.native_handle);
+    }
   }
 
   /**

@@ -32,6 +32,8 @@ export interface FrameInsights {
   accessibility: AccessibilityNode[];
   /** 64-bit perceptual hash 字符串，用于 visual similarity。 */
   visual_hash?: string;
+  /** 来自 capsule.status() 的窗口标题，用于 window_title anchor。 */
+  window_title?: string;
 }
 
 export interface OcrProvider {
@@ -43,6 +45,11 @@ export interface AccessibilityProvider {
    * 返回当前窗口的 accessibility 树。坐标应已归一化到 frame 的 client rect。
    */
   snapshot(windowHandle: string): Promise<AccessibilityNode[]>;
+  /**
+   * 失效内部缓存。Runtime 在每次 dispatch 完成后调用，确保 postcondition / 下一次
+   * locator 解析看到新页面而不是上一次 click 前的 AX。
+   */
+  invalidate?(windowHandle?: string): void;
 }
 
 export interface VisualHashProvider {

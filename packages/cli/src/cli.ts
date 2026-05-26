@@ -7,6 +7,8 @@ import {
   Capsule,
   CallbackApprovalResolver,
   createPlatformAdapter,
+  DarwinAccessibilityProvider,
+  DarwinOsascriptAdapter,
   dumpMap,
   ERROR_CODES,
   FileTraceStore,
@@ -74,6 +76,10 @@ function usage(): string {
     "       触发 repair L0-Lmax 自动修复",
     "  trace <app_id> [--session <id>] [--limit 100]",
     "       打印最近 trace 事件",
+    "  explore <app_id> [--out <dir>] [--no-migrate]",
+    "       绑定 capsule 后截图 + dump AX 树到目录，便于人类审阅与建图",
+    "  record <app_id> --plan <plan.json> [--out <dir>]",
+    "       按计划脚本逐步操作，每步前后都截图+dump AX，建图前预先摸清所有页面",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -115,6 +121,12 @@ async function main() {
         return;
       case "trace":
         await cmdTrace(args);
+        return;
+      case "explore":
+        await cmdExplore(args);
+        return;
+      case "record":
+        await cmdRecord(args);
         return;
       case "serve":
         await cmdServe(args);
@@ -212,6 +224,8 @@ interface OpenAppOptions {
   approveAll?: boolean;
   fallbackMock?: boolean;
   platform?: "auto" | "windows" | "macos" | "mock";
+  /** 默认 true：在创建 runtime 之前，自动 ensureDisplay + attach + migrate。 */
+  autoAttach?: boolean;
 }
 
 async function openAppRuntime(
@@ -230,11 +244,34 @@ async function openAppRuntime(
   const traceDir = path.join(appsRoot(args), ".traces", appId);
   const trace = new FileTraceStore(traceDir);
   await trace.ensure();
+  // 在 macOS 上自动注入 accessibility provider，让 detect_state / locator 拿到 AX 节点
+  const providers: import("@vision-mcp/core").LocatorProviders = {};
+  if (adapter instanceof DarwinOsascriptAdapter) {
+    providers.accessibility = new DarwinAccessibilityProvider(adapter);
+  }
+  // 默认 auto-attach：用户运行 `vision-mcp run apple-music --action ...` 时不应被迫
+  // 先手动 attach。如不需要，可显式传 autoAttach=false。
+  if ((opts.autoAttach ?? true) && loaded.effective.visual_box.target_window) {
+    const display = await capsule.ensureDisplay({
+      geometry: loaded.effective.visual_box.display,
+      mode: loaded.effective.visual_box.mode,
+      fallbacks: loaded.effective.visual_box.fallbacks,
+    });
+    try {
+      await capsule.attach({ target: loaded.effective.visual_box.target_window });
+      await capsule.migrate(display.id);
+    } catch (err) {
+      console.error(
+        `[vision-mcp] auto-attach 失败：${(err as Error).message}。可手动调用 'vision-mcp explore <app>' 检查窗口是否打开。`,
+      );
+      throw err;
+    }
+  }
   const runtime = new RuntimeExecutor({
     map: loaded.effective,
     mapBaseDir: loaded.baseDir,
     capsule,
-    providers: {},
+    providers,
     trace,
     approval: opts.approveAll
       ? new CallbackApprovalResolver(async () => "granted")
@@ -365,6 +402,265 @@ async function cmdTrace(args: ParsedArgs) {
       2,
     ),
   );
+}
+
+async function cmdExplore(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("explore 需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  const outDir = String(args.flags.out ?? path.join(appsRoot(args), appId, ".explore"));
+  await fs.mkdir(outDir, { recursive: true });
+  const adapter = await createPlatformAdapter({
+    platform: (args.flags.platform as never) ?? "auto",
+    fallbackToMock: Boolean(args.flags["fallback-mock"]),
+  });
+  const { Capsule, DarwinAccessibilityProvider, DarwinOsascriptAdapter } = await import(
+    "@vision-mcp/core"
+  );
+  const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
+  const display = await capsule.ensureDisplay({
+    geometry: loaded.effective.visual_box.display,
+    mode: loaded.effective.visual_box.mode,
+    fallbacks: loaded.effective.visual_box.fallbacks,
+  });
+  if (loaded.effective.visual_box.target_window) {
+    await capsule.attach({ target: loaded.effective.visual_box.target_window });
+  }
+  if (!args.flags["no-migrate"]) {
+    await capsule.migrate(display.id);
+  }
+  await new Promise((r) => setTimeout(r, 600));
+  const status = await capsule.status();
+  const frame = await capsule.capture();
+  // 也单独 screencapture 出一份 PNG 便于人类肉眼审阅
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileP = promisify(execFile);
+  const pngPath = path.join(outDir, "frame.png");
+  const cr = status.geometry?.client_rect_px;
+  if (cr && adapter.platform === "macos") {
+    await execFileP("/usr/sbin/screencapture", [
+      "-x",
+      "-t",
+      "png",
+      "-R",
+      `${cr.x},${cr.y},${cr.width},${cr.height}`,
+      pngPath,
+    ]).catch(() => {});
+  }
+  const metaPath = path.join(outDir, "meta.json");
+  await fs.writeFile(
+    metaPath,
+    JSON.stringify(
+      {
+        app_id: appId,
+        status,
+        frame: {
+          width_px: frame.width_px,
+          height_px: frame.height_px,
+          captured_at: frame.captured_at,
+          source: frame.source,
+        },
+      },
+      null,
+      2,
+    ),
+  );
+  // 如果是 darwin，dump AX
+  let axNodes: unknown[] = [];
+  if (adapter.platform === "macos" && status.attached_window && adapter instanceof DarwinOsascriptAdapter) {
+    const provider = new DarwinAccessibilityProvider(adapter);
+    axNodes = await provider.snapshot(status.attached_window.native_handle);
+    await fs.writeFile(path.join(outDir, "ax.json"), JSON.stringify(axNodes, null, 2));
+  }
+  // 输出汇总
+  console.log(
+    JSON.stringify(
+      {
+        out_dir: outDir,
+        frame_path: pngPath,
+        meta_path: metaPath,
+        ax_node_count: axNodes.length,
+        attached_window: status.attached_window?.title,
+      },
+      null,
+      2,
+    ),
+  );
+  await adapter.dispose?.();
+}
+
+/**
+ * `vision-mcp record <app_id> --plan plan.json`
+ *
+ * plan.json 形式：
+ * {
+ *   "name": "apple-music-search-play",
+ *   "steps": [
+ *     { "label": "home" },                                       // 初始状态：仅 dump 当前页
+ *     { "label": "after-sidebar-search", "click_norm": [0.085, 0.085] },
+ *     { "label": "after-type", "type": "张学友", "clear_first": true,
+ *       "click_norm": [0.481, 0.033], "click_first": true },
+ *     { "label": "after-return", "key": "return" },
+ *     { "label": "after-play",  "double_click_norm": [0.341, 0.134], "wait_ms": 2000 }
+ *   ]
+ * }
+ *
+ * 每步执行后会在 out/<label>/{frame.png, ax.json, meta.json} 输出，
+ * 同时打印一份汇总，便于用户照着写 vision-mcp.yaml。
+ */
+async function cmdRecord(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("record 需要 <app_id>");
+  const planFile = String(args.flags.plan ?? "");
+  if (!planFile) throw new Error("record 需要 --plan <plan.json>");
+  const plan = JSON.parse(await fs.readFile(planFile, "utf8")) as {
+    name?: string;
+    steps: Array<{
+      label: string;
+      click_norm?: [number, number];
+      double_click_norm?: [number, number];
+      click_first?: boolean;
+      type?: string;
+      clear_first?: boolean;
+      key?: string;
+      wait_ms?: number;
+      raise?: boolean;
+    }>;
+  };
+  const outRoot = String(
+    args.flags.out ?? path.join(appsRoot(args), appId, ".record", plan.name ?? Date.now().toString()),
+  );
+  await fs.mkdir(outRoot, { recursive: true });
+
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  const adapter = await createPlatformAdapter({
+    platform: (args.flags.platform as never) ?? "auto",
+  });
+  const { Capsule, DarwinAccessibilityProvider } = await import("@vision-mcp/core");
+  const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
+  const display = await capsule.ensureDisplay({
+    geometry: loaded.effective.visual_box.display,
+    mode: loaded.effective.visual_box.mode,
+    fallbacks: loaded.effective.visual_box.fallbacks,
+  });
+  if (loaded.effective.visual_box.target_window) {
+    await capsule.attach({ target: loaded.effective.visual_box.target_window });
+  }
+  await capsule.migrate(display.id);
+  await new Promise((r) => setTimeout(r, 500));
+
+  const provider =
+    adapter instanceof DarwinOsascriptAdapter ? new DarwinAccessibilityProvider(adapter) : undefined;
+
+  const summary: Array<{ label: string; out_dir: string; ax_count: number; key_nodes: unknown }> = [];
+
+  async function dumpStep(label: string): Promise<void> {
+    const dir = path.join(outRoot, label.replace(/[^a-zA-Z0-9_.\-]/g, "_"));
+    await fs.mkdir(dir, { recursive: true });
+    const status = await capsule.status();
+    const cr = status.geometry?.client_rect_px;
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileP = promisify(execFile);
+    if (cr && adapter.platform === "macos") {
+      await execFileP("/usr/sbin/screencapture", [
+        "-x",
+        "-t",
+        "png",
+        "-R",
+        `${cr.x},${cr.y},${cr.width},${cr.height}`,
+        path.join(dir, "frame.png"),
+      ]).catch(() => {});
+    }
+    let axNodes: import("@vision-mcp/core").AccessibilityNode[] = [];
+    if (provider && status.attached_window) {
+      provider.invalidate(status.attached_window.native_handle);
+      axNodes = await provider.snapshot(status.attached_window.native_handle);
+      await fs.writeFile(path.join(dir, "ax.json"), JSON.stringify(axNodes, null, 2));
+    }
+    // 精简到关键候选：可交互节点 + 顶部独有节点
+    const keys = axNodes
+      .filter((n) =>
+        /(AXButton|AXTextField|AXSearchField|AXPopUpButton|AXCell|AXRow|AXList|AXRadioButton|AXSlider|AXMenuItem|AXLink|AXHeading)/.test(
+          n.role ?? "",
+        ),
+      )
+      .map((n) => ({
+        role: n.role,
+        name: n.name,
+        description: n.description,
+        bbox: n.bbox_norm.map((v) => Number(v.toFixed(3))),
+      }));
+    await fs.writeFile(
+      path.join(dir, "interactive.json"),
+      JSON.stringify(keys, null, 2),
+    );
+    await fs.writeFile(
+      path.join(dir, "meta.json"),
+      JSON.stringify(
+        {
+          label,
+          attached_window: status.attached_window,
+          geometry_ok: status.geometry?.ok,
+        },
+        null,
+        2,
+      ),
+    );
+    summary.push({ label, out_dir: dir, ax_count: axNodes.length, key_nodes: keys.length });
+  }
+
+  // 第一步：dump 当前页（home）
+  await dumpStep(plan.steps[0]?.label ?? "step-0");
+
+  for (let i = 0; i < plan.steps.length; i++) {
+    const step = plan.steps[i];
+    if (i === 0) continue; // already dumped
+    const status = await capsule.status();
+    const cr = status.geometry?.client_rect_px;
+    if (!cr) throw new Error("client_rect missing");
+    if (step.raise !== false) await capsule.raise().catch(() => {});
+    if (step.click_first && step.click_norm) {
+      const pt = {
+        x: Math.round(cr.x + step.click_norm[0] * cr.width),
+        y: Math.round(cr.y + step.click_norm[1] * cr.height),
+      };
+      await adapter.click(pt);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (step.click_norm && !step.click_first) {
+      const pt = {
+        x: Math.round(cr.x + step.click_norm[0] * cr.width),
+        y: Math.round(cr.y + step.click_norm[1] * cr.height),
+      };
+      await adapter.click(pt);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (step.double_click_norm) {
+      const pt = {
+        x: Math.round(cr.x + step.double_click_norm[0] * cr.width),
+        y: Math.round(cr.y + step.double_click_norm[1] * cr.height),
+      };
+      await adapter.click(pt, { click_count: 2 });
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (step.type !== undefined) {
+      await adapter.typeText({ text: step.type, clear_first: step.clear_first ?? false });
+    }
+    if (step.key) {
+      await adapter.pressKey({ combo: step.key });
+    }
+    if (step.wait_ms) {
+      await new Promise((r) => setTimeout(r, step.wait_ms));
+    }
+    await dumpStep(step.label);
+  }
+
+  console.log(JSON.stringify({ out_root: outRoot, steps: summary }, null, 2));
+  await adapter.dispose?.();
 }
 
 async function cmdServe(args: ParsedArgs) {

@@ -43,6 +43,10 @@ export interface ActionParams {
   /** 覆盖默认 click 选项。 */
   modifiers?: ReadonlyArray<"ctrl" | "shift" | "alt" | "meta">;
   click_count?: number;
+  /** type 动作时是否先 Cmd+A → Delete 清空当前输入。 */
+  clear_first?: boolean;
+  /** type 动作的逐字延迟（毫秒）；0 或未设走粘贴。 */
+  per_char_delay_ms?: number;
 }
 
 export interface ActionContext {

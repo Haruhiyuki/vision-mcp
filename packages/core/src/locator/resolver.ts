@@ -87,8 +87,17 @@ export class LocatorResolver {
             score += 1;
           }
         } else if (anchor.type === "window_title") {
-          // window title 由 capsule status 提供；如果 frame.metadata 含 title 则匹配。
-          score += 0;
+          if (insights.window_title) {
+            try {
+              const re = new RegExp(anchor.pattern);
+              if (re.test(insights.window_title)) {
+                matched.push(anchor);
+                score += 1;
+              }
+            } catch {
+              // 非法正则不算命中
+            }
+          }
         } else if (anchor.type === "visual_hash") {
           if (
             insights.visual_hash &&
@@ -109,7 +118,12 @@ export class LocatorResolver {
             : score / Math.max(weights, 1) >= Math.min(minOcr, minVis);
       if (!passes) continue;
       const normalized = score / Math.max(weights, 1);
-      if (!best || normalized > best.score) {
+      if (
+        !best ||
+        normalized > best.score ||
+        // 同 score 时选 anchors 命中数量更多的（更具体的状态优先）
+        (normalized === best.score && matched.length > best.matched_anchors.length)
+      ) {
         best = { state_id: state.id, score: normalized, matched_anchors: matched };
       }
     }
@@ -294,6 +308,8 @@ function matchAccessibility(
     role: anchor.role,
     name: anchor.name,
     name_regex: anchor.name_regex,
+    description: anchor.description,
+    description_regex: anchor.description_regex,
     automation_id: anchor.automation_id,
   });
 }
@@ -305,6 +321,10 @@ function findAccessibilityNode(
     role?: string;
     name?: string;
     name_regex?: string;
+    name_not?: string;
+    description?: string;
+    description_regex?: string;
+    description_not?: string;
     automation_id?: string;
     class_name?: string;
     index?: number;
@@ -317,7 +337,11 @@ function findAccessibilityNode(
       } else if (q.automation_id && n.automation_id !== q.automation_id) {
       } else if (q.class_name && n.class_name !== q.class_name) {
       } else if (q.name && n.name !== q.name) {
+      } else if (q.name_not && n.name === q.name_not) {
       } else if (q.name_regex && (!n.name || !new RegExp(q.name_regex).test(n.name))) {
+      } else if (q.description && n.description !== q.description) {
+      } else if (q.description_not && n.description === q.description_not) {
+      } else if (q.description_regex && (!n.description || !new RegExp(q.description_regex).test(n.description))) {
       } else {
         matches.push(n);
       }

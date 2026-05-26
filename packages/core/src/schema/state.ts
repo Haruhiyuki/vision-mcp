@@ -13,6 +13,8 @@ const StateAnchor = z.discriminatedUnion("type", [
     role: z.string().optional(),
     name: z.string().optional(),
     name_regex: z.string().optional(),
+    description: z.string().optional(),
+    description_regex: z.string().optional(),
     automation_id: z.string().optional(),
   }),
   z.object({

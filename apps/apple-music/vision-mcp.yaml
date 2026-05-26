@@ -1,0 +1,231 @@
+version: "0.1"
+app:
+  id: apple-music
+  name: Apple Music
+  platform: macos
+  launch_hint: attach_after_launch
+  description: macOS Apple Music。通过 GUI 操作搜索 + 点击列表完成播放。
+visual_box:
+  id: apple-music-capsule
+  mode: real_window
+  platform: macos
+  display:
+    width_px: 1280
+    height_px: 800
+    scale: 2.0
+    dpi_x: 144
+    dpi_y: 144
+    refresh_rate_hz: 60
+  target_window:
+    bundle_id: com.apple.Music
+    title_regex: ".+"
+  coordinate_space: normalized_client_rect
+  contract:
+    require_same_display: true
+    require_client_size_px: [1280, 800]
+    tolerate_client_size_delta_px: 12
+    require_unminimized: true
+    require_foreground_for_input: true
+    validate_before_each_action: true
+  fallbacks:
+    - existing_display
+states:
+  - id: music.home
+    description: Apple Music 主页
+    kind: page
+    anchors:
+      - type: accessibility
+        role: AXHeading
+        description: 主页
+      - type: accessibility
+        role: AXList
+        description: 主页
+    match_policy: any_anchor
+    controls:
+      - id: sidebar_search
+        role: button
+        label: 侧栏「搜索」入口
+        action_types: [click]
+        locator_priority:
+          - type: accessibility
+            role: AXCell
+            name: 搜索
+          - type: bbox_norm
+            value: [0.014, 0.065, 0.141, 0.04]
+        visual:
+          bbox_norm: [0.014, 0.065, 0.141, 0.04]
+          center_norm: [0.085, 0.085]
+        postcondition:
+          type: state_should_be
+          state_id: music.search
+        risk_level: safe
+      - id: sidebar_home
+        role: button
+        label: 侧栏「主页」
+        action_types: [click]
+        locator_priority:
+          - type: accessibility
+            role: AXCell
+            name: 主页
+          - type: bbox_norm
+            value: [0.014, 0.105, 0.141, 0.04]
+        visual:
+          bbox_norm: [0.014, 0.105, 0.141, 0.04]
+          center_norm: [0.085, 0.125]
+        risk_level: safe
+  - id: music.search
+    description: 搜索页：顶部出现「搜索文本栏」（AXTextField），下面是最近搜索/类别
+    kind: page
+    anchors:
+      - type: accessibility
+        role: AXTextField
+        description: 搜索文本栏
+      - type: accessibility
+        role: AXRadioButton
+        description: 资料库
+    match_policy: any_anchor
+    controls:
+      - id: query_input
+        role: textbox
+        label: 顶部搜索文本栏（默认 type：会先 click 聚焦再输入）
+        action_types: [type, click]
+        locator_priority:
+          - type: accessibility
+            role: AXTextField
+            description: 搜索文本栏
+          - type: bbox_norm
+            value: [0.318, 0.009, 0.326, 0.048]
+        visual:
+          bbox_norm: [0.318, 0.009, 0.326, 0.048]
+          center_norm: [0.481, 0.033]
+        risk_level: safe
+      - id: submit
+        role: button
+        label: 回车提交搜索
+        action_types: [key]
+        locator_priority:
+          - type: bbox_norm
+            value: [0.318, 0.009, 0.326, 0.048]
+        visual:
+          bbox_norm: [0.318, 0.009, 0.326, 0.048]
+        postcondition:
+          type: state_should_be
+          state_id: music.search_results
+        risk_level: safe
+  - id: music.search_results
+    description: 搜索结果页：主区域出现「最佳结果」AXList + 网格卡片
+    kind: page
+    anchors:
+      - type: accessibility
+        role: AXList
+        description: 最佳结果
+      - type: accessibility
+        role: AXList
+        description: 艺人
+      - type: accessibility
+        role: AXList
+        description: 专辑
+      - type: accessibility
+        role: AXCell
+        description_not: 单元格
+    match_policy: any_anchor
+    controls:
+      - id: first_result_card
+        role: button
+        label: 「最佳结果」区第一张卡片（通常是艺人）
+        action_types: [click]
+        locator_priority:
+          - type: accessibility
+            role: AXCell
+            description_not: 单元格
+            index: 0
+          - type: bbox_norm
+            value: [0.194, 0.134, 0.131, 0.087]
+        visual:
+          bbox_norm: [0.194, 0.134, 0.131, 0.087]
+        risk_level: safe
+      - id: top_song_card
+        role: button
+        label: 「最佳结果」区第二张卡片（通常是第一首歌）
+        action_types: [double_click, click]
+        locator_priority:
+          - type: accessibility
+            role: AXCell
+            description_not: 单元格
+            index: 1
+          - type: bbox_norm
+            value: [0.341, 0.134, 0.131, 0.087]
+        visual:
+          bbox_norm: [0.341, 0.134, 0.131, 0.087]
+        risk_level: safe
+transitions:
+  - from: music.home
+    action_id: music.home.sidebar_search
+    to: music.search
+  - from: music.search
+    action_id: music.search.submit
+    to: music.search_results
+workflows:
+  - id: search_and_play
+    description: 在 Music GUI 中搜索关键字并播放第一首歌曲卡片
+    inputs:
+      - name: keyword
+        type: string
+    steps:
+      - action_id: music.home.sidebar_search
+        on_failure: ask_user
+      - action_id: music.search.query_input
+        params:
+          text: "{{keyword}}"
+          clear_first: true
+        on_failure: ask_user
+      - action_id: music.search.submit
+        params:
+          combo: return
+        on_failure: ask_user
+      - action_id: music.search_results.top_song_card:double_click
+        on_failure: ask_user
+    timeout_ms: 90000
+repair_policy:
+  max_auto_repair_level: 3
+  geometry:
+    tolerate_client_size_delta_px: 12
+    tolerate_origin_change: true
+    require_same_dpi: true
+  state:
+    min_anchor_score: 0.7
+    min_ocr_similarity: 0.85
+    min_visual_similarity: 0.78
+  control_relocation:
+    confidence_threshold: 0.85
+    max_bbox_shift_norm: 0.15
+  destructive_actions:
+    auto_repair_before_action: false
+    require_user_confirmation: true
+safety_policy:
+  forbidden_action_categories:
+    - payment
+    - destructive
+    - external_communication
+    - permission_change
+    - captcha
+  require_approval_for_risk_levels:
+    - requires_confirmation
+    - destructive
+  redaction_patterns: []
+  allow_cloud_vlm: false
+  audit_log_retention_days: 14
+input_lease_policy:
+  default_lease_ms: 60000
+  break_on_user_input: true
+  break_hotkey: Esc Esc
+  require_revalidate_after_break: true
+metadata:
+  created_at: 2026-05-27T05:40:00.000Z
+  created_by: vision-mcp-live-test
+  tags:
+    - apple-music
+    - macos
+    - real-window
+    - click-based
+  builder_version: "0.1"

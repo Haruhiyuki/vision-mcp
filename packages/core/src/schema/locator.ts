@@ -9,10 +9,15 @@ export const AccessibilityLocator = z.object({
   type: z.literal("accessibility"),
   name: z.string().optional(),
   name_regex: z.string().optional(),
+  /** 显式排除：node.name 等于此值时不算命中。 */
+  name_not: z.string().optional(),
   role: z.string().optional(),
   automation_id: z.string().optional(),
   class_name: z.string().optional(),
   description: z.string().optional(),
+  description_regex: z.string().optional(),
+  /** 显式排除：node.description 等于此值时不算命中。 */
+  description_not: z.string().optional(),
   index: z.number().int().nonnegative().optional(),
 });
 

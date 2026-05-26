@@ -124,6 +124,11 @@ export async function ensureCapsule(
   const capsule = new Capsule(app.effective.visual_box, adapter, app.effective.input_lease_policy);
   app.adapter = adapter;
   app.capsule = capsule;
+  // 自动注入平台默认 providers（macOS：AX 树）。
+  const { DarwinOsascriptAdapter, DarwinAccessibilityProvider } = await import("@vision-mcp/core");
+  if (adapter instanceof DarwinOsascriptAdapter && !ctx.providers.accessibility) {
+    ctx.providers.accessibility = new DarwinAccessibilityProvider(adapter);
+  }
   return capsule;
 }
 

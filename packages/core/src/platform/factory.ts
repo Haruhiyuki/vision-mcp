@@ -3,8 +3,9 @@ import type { PlatformAdapter } from "../capsule/manager.js";
 import { MockPlatformAdapter } from "./mock.js";
 import { WindowsPlatformAdapter } from "./windows.js";
 import { MacosPlatformAdapter } from "./macos.js";
+import { DarwinOsascriptAdapter } from "./darwin-osascript.js";
 
-export type PlatformName = "windows" | "macos" | "mock" | "auto";
+export type PlatformName = "windows" | "macos" | "macos-osascript" | "macos-helper" | "mock" | "auto";
 
 export interface CreatePlatformOptions {
   platform?: PlatformName;
@@ -35,8 +36,19 @@ export async function createPlatformAdapter(
     if (resolved === "windows") {
       return await WindowsPlatformAdapter.create({ helperPath: opts.helperPath });
     }
-    if (resolved === "macos") {
+    if (resolved === "macos-helper") {
       return await MacosPlatformAdapter.create({ helperPath: opts.helperPath });
+    }
+    if (resolved === "macos" || resolved === "macos-osascript") {
+      // macOS 默认走 osascript 适配器：无须额外 helper，开箱可用。
+      // 若用户显式设置 VISION_MCP_PREFER_HELPER=1 或传入 helperPath，则走 JSON-RPC sidecar。
+      const wantsHelper =
+        process.env.VISION_MCP_PREFER_HELPER === "1" ||
+        (resolved === "macos" && !!opts.helperPath);
+      if (wantsHelper) {
+        return await MacosPlatformAdapter.create({ helperPath: opts.helperPath });
+      }
+      return new DarwinOsascriptAdapter();
     }
   } catch (err) {
     if (opts.fallbackToMock) {

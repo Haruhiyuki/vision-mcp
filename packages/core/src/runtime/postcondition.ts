@@ -164,18 +164,21 @@ export async function waitForCondition(
   refresh: () => Promise<ConditionContext>,
   options: { timeout_ms?: number; polling_ms?: number } = {},
 ): Promise<{ ok: boolean; reasons: string[]; iterations: number }> {
-  const timeout = options.timeout_ms ?? 3000;
+  const timeout = options.timeout_ms ?? 15000;
   const polling = options.polling_ms ?? 250;
   const start = Date.now();
   let iterations = 0;
   let last: { ok: boolean; reasons: string[] } = { ok: false, reasons: [] };
-  while (Date.now() - start < timeout) {
+  // 保证至少跑一次完整 refresh — 即便 refresh 比 timeout 还慢（例如 AX dump 数十秒），
+  // 也应给条件一次评估机会，否则永远超时。
+  do {
     iterations++;
     const ctx = await refresh();
     last = await evaluateCondition(cond, ctx);
     if (last.ok) return { ...last, iterations };
+    if (Date.now() - start >= timeout) break;
     await sleep(polling);
-  }
+  } while (Date.now() - start < timeout);
   return { ...last, iterations };
 }
 
