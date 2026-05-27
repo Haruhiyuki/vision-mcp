@@ -5,10 +5,19 @@ app:
   platform: windows
   build: "2026.05"
   launch_hint: attach_after_launch
-  description: 演示企业资源管理 (ERP) 系统的发票录入流程
+  description: |
+    虚构的企业 ERP 系统发票录入流程示例。
+    展示：多 state state graph / 多 locator 组合 / approval / postcondition /
+    redaction_patterns / image_patch fallback。
+
+    ⚠️ 这是 hypothetical demo（target = erp.exe），不能直接对真实软件跑。
+    真实可跑的示例见仓库根 apps/ 目录：
+      - apps/apple-music/  macOS Apple Music（含 region / collection 抽象）
+      - apps/notes/        macOS 备忘录（SwiftUI 自绘案例）
+      - apps/activity-monitor/  macOS 活动监视器
 visual_box:
   id: erp-capsule-1
-  mode: same_session_virtual_display
+  mode: real_window
   platform: windows
   display:
     width_px: 1280
@@ -28,8 +37,7 @@ visual_box:
     require_unminimized: true
     require_foreground_for_input: true
     validate_before_each_action: true
-  fallbacks:
-    - real_window
+  fallbacks: []
 states:
   - id: login
     description: 登录页

@@ -1,7 +1,9 @@
 # Apple Music — 纯视觉 vision-mcp 构建笔记
 
 > 这份 map 完全由 agent 通过截图视觉判断 + click + 看截图验证构建，未读取一行 AX 数据。
-> 对比 `vision-mcp.v1-ax-based.yaml`（基于 AX accessibility 树构建），用以验证 vision-mcp 的"视觉为主"理念。
+> 案例来源：在迭代过程中先做了基于 AX accessibility 树构建的 `v1-ax-based` 版本，
+> 后做了纯视觉版本 `v2-vision-only`，最终合并为现在的 `apps/apple-music/vision-mcp.yaml`（v3 region+collection）。
+> v1/v2 历史 yaml 已归档删除；本文档保留对比数据用作设计参考。
 
 ## 1. 构建流程
 
@@ -61,16 +63,21 @@ for each page in [home, search, search_results, artist_detail, playbar]:
 - 已有机制：lease validate 重试 3 次 + raise，但仍偶发
 - → **解决**：workflow 中 type/key 步骤后插 wait 100ms，或失败后重跑该步
 
-## 4. 与 AX 版本的对比
+## 4. 与 AX 版本的对比（历史快照）
 
-| 指标 | vision-mcp.v1-ax-based.yaml | vision-mcp.yaml（纯视觉） |
-| ---- | --------------------------- | ------------------------- |
+> 这两个 yaml 文件（v1-ax-based / v2-vision-only）已合并入最终版 `apps/apple-music/vision-mcp.yaml` 并归档删除。
+> 下表数据来自迭代过程，仅作设计权衡参考。
+
+| 指标 | v1-ax-based（已归档） | v2-vision-only（已归档） |
+| ---- | --------------------- | ------------------------ |
 | 控件数 | 9 个 control，3 个 state | 25 个 control，1 个 state |
 | 依赖 | macOS Accessibility | 仅截图 + click + 键盘 |
 | state detection 准确率 | 高（AXTextField/AXList 独有 anchor） | 弱（dHash 区分不开） |
 | 可移植性 | macOS only | 跨平台（Windows/Linux/任何能截图的环境） |
 | 控件位置稳健性 | AX 给精确 bbox，0 估计误差 | 视觉估计 ±5-10px，密集 UI 易 miss |
 | 适合自定义渲染 app | ❌（游戏/Electron/Flutter 几乎无 AX） | ✅（截图任意 app 都有） |
+
+最终版（v3 region+collection）汲取了两者优点：双轨 locator（AX + 视觉）+ region/collection 抽象消除重复（v2 的 25 控件压缩到 v3 的 8 控件 + 1 collection）。
 
 ## 5. 推荐工作方式：**双轨混合**
 

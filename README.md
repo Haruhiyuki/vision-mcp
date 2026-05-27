@@ -66,9 +66,12 @@ vision-mcp/
 │   ├── core/                 # 数据模型 / Capsule / Runtime / Repair / Locator / Trace / Builder
 │   ├── server/               # MCP server：tools + resources + stdio transport
 │   └── cli/                  # vision-mcp CLI
+├── apps/                     # 真实可跑案例（实测建图）
+│   ├── apple-music/          # macOS Apple Music：region/collection 抽象 + 双轨 locator
+│   ├── notes/                # macOS 备忘录：SwiftUI 自绘 + AX 不暴露案例
+│   └── activity-monitor/     # macOS 活动监视器：table view + 列排序
 ├── examples/
-│   ├── example-erp/          # Windows ERP 示例（含 patch + trace 样例）
-│   └── example-notes/        # macOS Real-window Capsule 示例
+│   └── example-erp/          # 虚构 Windows ERP（设计文档配套 demo，含 patch + trace 样例）
 ├── .claude-plugin/
 │   └── plugin.json           # Claude Code Plugin manifest（一键安装入口）
 ├── .mcp.json                 # Plugin 加载时使用的 MCP server 配置
@@ -119,7 +122,7 @@ Claude Desktop / Cursor / 其他 MCP 客户端配置示例：
 - `docs/errors.md`：错误码、recoverable 标志、默认处理建议。
 - `docs/acceptance.md`：对照设计文档 §17 的 MVP / Beta 验收对照表。
 - `skills/vision-mcp/SKILL.md`：agent 操作手册（注册到 host 后 agent 第一时间应读这一份）。
-- `skills/vision-mcp/references/platform-macos.md`：**macOS workspace 体系、virtual cursor、AX-press、SCKit 详解**。
+- `skills/vision-mcp/references/platform-macos.md`：**macOS 适配器、AX-press、SCKit window capture 详解**。
 - `skills/vision-mcp/references/safety.md`：高风险动作、prompt injection 防护、workspace 安全约束。
 - `vision_mcp_windows_macos_design.md`：原始设计文档。
 

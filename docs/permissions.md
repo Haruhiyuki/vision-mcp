@@ -11,7 +11,7 @@
 | Windows | Windows.Graphics.Capture | 捕获窗口 / 显示器 | 系统会显示捕获提示边框；不要关闭它。 |
 | Windows | UI Automation | 控件结构化访问 | 默认开启；某些 elevated app 需要 helper 同级权限。 |
 | macOS | Screen Recording | 捕获窗口 / 显示器（含 ScreenCaptureKit 抓屏外窗口） | "首次使用请到 系统设置 → 隐私 → 屏幕录制 中勾选 vision-mcp-helper。" |
-| macOS | Accessibility | 读取 / 移动窗口、点击、输入；**AX-press 操作屏外元素** | "请到 系统设置 → 隐私 → 辅助功能 中勾选 vision-mcp-helper。AX 是 off_screen workspace 下唯一能可靠操作窗口的途径。" |
+| macOS | Accessibility | 读取 / 移动窗口、AX 树 dump、AX-press、CGEvent 注入 | "请到 系统设置 → 隐私 → 辅助功能 中勾选 vision-mcp-helper。" |
 | macOS | Automation / Apple Events | 通过 AppleScript 控制菜单 | 仅在 osascript fallback 路径用；按 app 单独授权。 |
 | macOS | Input Monitoring | 监听用户输入打断 lease | 可选；未授予时降级为基于热键打断。 |
 
