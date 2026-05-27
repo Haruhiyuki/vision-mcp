@@ -34,12 +34,22 @@ helper stdin/stdout：每行一个 JSON 消息
 
 ### macOS
 
-- 推荐技术栈：Swift + ScreenCaptureKit + Accessibility + CGEvent。
+- 技术栈：Swift + ScreenCaptureKit + Accessibility + CGEvent + IOKit + Vision + CoreImage。
+- 编译命令（v0.4 起）：
+  ```bash
+  cd native/macos
+  swiftc -O -o vision-mcp-helper src/main.swift \
+    -framework AppKit -framework ApplicationServices -framework CoreGraphics \
+    -framework IOKit -framework Vision -framework CoreImage \
+    -framework ScreenCaptureKit
+  ```
 - 安装位置：`/Applications/VisionMCP.app/Contents/MacOS/vision-mcp-helper`。
 - 必须授权 Screen Recording + Accessibility。建议提供 `Open System Settings` 深链：
   `x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture`
   `x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`
-- 不创建系统级虚拟显示器；fallback 走 Real-window / Existing-display。
+- 不创建系统级虚拟显示器；改为自动检测并使用现有 workspace display（virtual / sidecar / airplay / extended），无副屏环境可启用 off_screen workspace（peek-corner 40px 模式）。详见 `skill/references/platform-macos.md`。
+- helper 启动时自动 `NSApplication.shared + .accessory` 初始化（ScreenCaptureKit 必需）。
+- macOS 14+ 支持完整 SCKit 抓窗口能力；macOS 13 及更早会自动 fallback `screencapture -R`（不支持屏外窗口）。
 
 ## 3. 部署环境变量
 

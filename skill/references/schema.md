@@ -21,13 +21,55 @@
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
 | `id` | string | capsule 实例标识。 |
-| `mode` | enum | `same_session_virtual_display` / `real_window` / `existing_display` / `third_party_virtual_display`。 |
+| `mode` | enum | `same_session_virtual_display` / `real_window` / `existing_display` / `third_party_virtual_display` / **`off_screen`**（v0.4 新增，macOS：合成屏外 workspace）。 |
 | `platform` | enum | `windows` / `macos` / `any`。 |
 | `display` | GeometryContract | `width_px`, `height_px`, `scale`, `dpi_x`, `dpi_y`, `refresh_rate_hz`。 |
 | `target_window` | TargetWindow | `process_name` / `title_regex` / `class_name` / `bundle_id`。 |
 | `coordinate_space` | enum | 默认 `normalized_client_rect`。 |
 | `contract` | ContractRules | `require_client_size_px`、`tolerate_client_size_delta_px`、`require_unminimized`、`require_foreground_for_input`、`validate_before_each_action`。 |
-| `fallbacks` | enum[] | 顺序尝试的备用 mode。 |
+| `fallbacks` | enum[] | 顺序尝试的备用 mode。如包含 `off_screen` 等价于 `allowOffScreen=true`。 |
+
+## EnsureDisplayOptions（runtime 参数）
+
+调用 `capsule.ensure_display()` / `Capsule.ensureDisplay()` 时使用：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `mode` | CapsuleMode | 期望模式（见上） |
+| `geometry` | GeometryContract | 期望 client 尺寸 / scale / DPI |
+| `fallbacks` | CapsuleMode[] | 主模式失败时按序尝试 |
+| `allowOffScreen` (v0.4) | boolean | macOS 专用：没有真实副屏时是否合成屏外 workspace。默认 false。 |
+
+## DisplayInfo（v0.4 扩展）
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `id` | string | `display-N` 索引；off-screen workspace 为 `off-screen-workspace`。 |
+| `bounds` / `work_area` | RectPx | 总尺寸 / 减去 menubar 后可用区域。 |
+| `scale` / `dpi_x` / `dpi_y` / `refresh_rate_hz` | number | 显示器参数。 |
+| `is_primary` / `is_virtual` | boolean | 兼容字段。 |
+| `kind` (v0.4) | DisplayKind | `primary` / `extended` / `mirror` / `sidecar` / `airplay` / `virtual` / `unknown`。 |
+| `name` (v0.4) | string? | `NSScreen.localizedName` / Windows monitor friendly name。 |
+| `vendor` / `product` (v0.4) | string? | EDID vendor / product ID。 |
+| `recommended_for_workspace` (v0.4) | boolean? | runtime 判定：是否适合做 agent workspace。 |
+| `native_handle` | string? | `CGDirectDisplayID` / `HMONITOR` 字符串。 |
+
+`DisplayKind` 评分（用于 `pickWorkspaceDisplay`）：virtual=100, sidecar=80, airplay=70, extended=50, primary=10, mirror=0, unknown=30。详见 `references/platform-macos.md` §3.1。
+
+## InputClickOptions（v0.4 扩展）
+
+`capsule.click_at` / `vision_map.click_at` / CLI `click --cursor` 接受：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `button` | enum | `left` / `right` / `middle`。 |
+| `modifiers` | enum[] | `ctrl` / `shift` / `alt` / `meta`。 |
+| `click_count` | number | 双击传 2。 |
+| `cursor_mode` (v0.4) | enum | macOS 专用：`physical` (默认) / `virtual` (warp_restore) / `virtual_no_warp` / `ax_press`。 |
+| `try_ax_press` (v0.4) | boolean | 先试 AX-press，失败 fallback CGEvent。完全不动鼠标的捷径。 |
+
+`virtual` 模式：用户主屏物理光标在 click 完成后被 `CGWarpMouseCursorPosition` 还原到原位，看起来"鼠标没动"。
+`ax_press` 模式：完全用 AX API，不发任何 mouse event；屏外/半屏外窗口必用此模式。
 
 ## Region（v0.3 新增）
 

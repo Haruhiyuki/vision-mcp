@@ -10,9 +10,9 @@
 | Windows | 用户级（运行 helper） | 窗口枚举、捕获、输入 | "Vision-MCP 将在你许可的应用范围内捕获窗口与发送输入。" |
 | Windows | Windows.Graphics.Capture | 捕获窗口 / 显示器 | 系统会显示捕获提示边框；不要关闭它。 |
 | Windows | UI Automation | 控件结构化访问 | 默认开启；某些 elevated app 需要 helper 同级权限。 |
-| macOS | Screen Recording | 捕获窗口 / 显示器 | "首次使用请到 系统设置 → 隐私 → 屏幕录制 中勾选 Vision-MCP。" |
-| macOS | Accessibility | 读取 / 移动窗口、点击、输入 | "请到 系统设置 → 隐私 → 辅助功能 中勾选 Vision-MCP。" |
-| macOS | Automation / Apple Events | 通过 AppleScript 控制菜单 | 仅在 fallback 控制应用脚本时使用；按 app 单独授权。 |
+| macOS | Screen Recording | 捕获窗口 / 显示器（含 ScreenCaptureKit 抓屏外窗口） | "首次使用请到 系统设置 → 隐私 → 屏幕录制 中勾选 vision-mcp-helper。" |
+| macOS | Accessibility | 读取 / 移动窗口、点击、输入；**AX-press 操作屏外元素** | "请到 系统设置 → 隐私 → 辅助功能 中勾选 vision-mcp-helper。AX 是 off_screen workspace 下唯一能可靠操作窗口的途径。" |
+| macOS | Automation / Apple Events | 通过 AppleScript 控制菜单 | 仅在 osascript fallback 路径用；按 app 单独授权。 |
 | macOS | Input Monitoring | 监听用户输入打断 lease | 可选；未授予时降级为基于热键打断。 |
 
 > **重要**：所有权限都通过 OS 弹窗授予；vision-mcp 不会 silently 取得权限。Agent 在调用 `capsule.*` 工具失败 (`PERMISSION_DENIED`) 时必须把这一条原样转告用户。
@@ -20,7 +20,8 @@
 ## 2. 用户可见状态
 
 - 状态边框：Windows.Graphics.Capture / ScreenCaptureKit 自带；不要尝试隐藏。
-- Live View（M1 里程碑）：右下角悬浮窗显示 capsule 状态（attaching / building / running / repairing / paused / takeover）。
+- **Live View**（v0.4 MVP，浏览器版）：`vision-mcp live-view <app> --port 7575` 启动后浏览器实时显示 capsule 画面 + 接管按钮（POST /takeover → 把窗口迁回主屏）。生产环境可升级为 native NSPanel + 全局接管热键（M1）。
+- **Workspace 提示**：选到非 primary workspace（virtual / sidecar / airplay / extended / off_screen）时，agent 必须在对话中告知用户本次任务执行的显示器名称；off_screen 模式必须额外说明 peek-corner 位置。详见 `skill/references/safety.md` §7。
 - Trace：所有动作进入 `<traces_dir>/<app_id>/events.jsonl`，用户随时可以打开 trace 查看 agent 做了什么。
 
 ## 3. 取消授权

@@ -2,12 +2,16 @@
 
 > 本文档面向 MCP host 中的 agent（Claude / Cursor / Codex 等）。介绍如何用 vision-mcp 提供的 tools「像人一样使用桌面软件」。
 >
-> 核心理念：**agent-in-the-loop + 视觉为主**。Vision-mcp 不是黑盒自动化脚本，而是让 agent **看截图** → 视觉判断 → click 估计坐标 → 再看截图验证。AX 数据是**校准辅助**，不是首选——很多桌面 app（游戏、Electron、自绘 UI、跨平台框架）根本不暴露 AX，但截图永远存在。
+> 核心理念：**agent-in-the-loop + 视觉为主 + 不抢主屏**。
+>
+> - Vision-mcp 不是黑盒自动化脚本，而是让 agent **看截图** → 视觉判断 → click 估计坐标 → 再看截图验证。AX 数据是**校准辅助**，不是首选——很多桌面 app（游戏、Electron、自绘 UI、跨平台框架）根本不暴露 AX，但截图永远存在。
+> - macOS 上把目标窗口迁到 **workspace display**（副屏/Sidecar/AirPlay/第三方虚拟显示驱动/屏外 peek-corner），配合 **virtual cursor** 或 **AX-press**，用户主屏物理光标和窗口不被打扰。
 >
 > **正确的优先级**：
 > 1. 第一选择 — 视觉：snapshot 返回的 PNG，agent 用自己的视觉能力识别元素、估坐标。
 > 2. 第二选择 — AX 校准：如果是有 accessibility 的原生 app（Apple Music / Finder / Safari 等），snapshot 也返回 AX candidates 帮你精确化 bbox。
 > 3. 第三选择 — 失败重试：click 一次没生效？snapshot 再看，调坐标重试。这是"像人一样"的本质。
+> 4. **macOS 屏外/半屏外窗口**：不能用普通 click（CGEvent 屏外不到达），必须用 `ax-press`（AX 操作不依赖鼠标坐标）。
 
 ## 1. 工具总览（按使用频率排序）
 
@@ -22,12 +26,18 @@
 | **`vision-mcp scroll-until-text`** (v0.3) | 在 region 内反复滚动 + OCR 找文字（如"播放列表里找黑色游行"） | { ok, attempts, matched_text, point } |
 | **`vision-mcp hover-probe`** (v0.3) | hover 后 vs hover 前像素 diff，找 hover 触发的新元素位置 | { ok, hot_block_bbox_norm, max_block_diff } |
 | `vision_map.click_at` | 在归一化坐标 click（建图原始动作） | { ok, point_screen } |
+| **`vision-mcp ax-press`** (v0.4) | macOS 屏外/半屏外窗口必用：BFS 遍历窗口 AX tree 找最小 element 调 AXPress；零鼠标干预 | { ok, via, matched_role, matched_name } |
+| `vision-mcp click --cursor virtual\|ax_press` (v0.4) | virtual cursor：点击后立即把鼠标 warp 回原位；用户主屏光标不动 | { ok, point, cursor_mode } |
 | `vision_map.type_text` | 在当前焦点 type 文本（支持中文，走粘贴） | { ok, length } |
 | `vision_map.press_key` | 发键盘组合（return / cmd+f / Escape / cmd+left ...） | { ok } |
 | `vision_map.scroll` | 在归一化点滚动 | { ok } |
+| **`vision-mcp displays`** (v0.4) | 列所有显示器 + 自动评分推荐 workspace（virtual > sidecar > airplay > extended） | display list + recommendation |
+| **`vision-mcp capsule <app> [--off-screen]`** (v0.4) | 一键 ensureDisplay + attach + migrate；--off-screen 启用屏外 workspace | display + window info |
+| **`vision-mcp restore <app>`** (v0.4) | 把窗口迁回主屏中央（off-screen 模式后用） | { ok, bounds } |
+| **`vision-mcp live-view <app>`** (v0.4) | 启 HTTP server，浏览器实时查看 capsule + POST /takeover 接管 | URL |
 | `capsule.attach_window` | 把目标 app 窗口吸入 capsule | window info |
 | `capsule.migrate_window` | 把窗口固定到 capsule display | window info |
-| `capsule.raise` | 把窗口拉回前台（type/key 前可主动调用） | { ok } |
+| `capsule.raise` | 把窗口拉回前台（type/key 前可主动调用）；macOS 用 AXRaise + keep_position（不拉回屏外窗口） | { ok } |
 | `capsule.validate_geometry` | 校验几何契约（client size / DPI / foreground） | geometry state |
 | `vision_map.detect_state` | 仅做 state 识别，不返回截图（snapshot 的轻量版） | state_match |
 | `vision_map.commit_state` | 把当前帧的 AX 状态写入 map.baseline | { state_id } |
@@ -185,6 +195,52 @@ Sidebar 的 AXCell `name="主页"` 由 helper 从子 AXStaticText 反推（macOS
 3. AX 树里 description ∈ {返回, Back, ◁, ‹, <, 上一} 的 AXButton
 4. 不行就告诉用户 — 不要瞎 click
 
+### 4.7 macOS workspace 模式（v0.4）
+
+macOS 可以把窗口迁到非主屏的 workspace display，agent 操作不抢用户主屏。
+
+**workspace 优先级**（runtime 自动选）：
+1. `virtual`（BetterDisplay / Deskreen / DummyDisplay 等第三方虚拟驱动）— 最佳
+2. `sidecar` / `airplay` — iPad / 外部接收端
+3. `extended` — 普通物理副屏
+4. `off_screen` — 兜底：合成屏外 workspace（窗口移到主屏右下角 peek-corner，仅 40px 可见）
+5. `primary` — 抢主屏
+
+**选 workspace 后的输入策略**：
+- 真实副屏（前 3 类）：`click --cursor virtual` 让用户主屏物理光标不被打扰
+- off_screen 模式：**必须用** `ax-press`（CGEvent 屏外坐标的鼠标事件不到达窗口，AX-press 才能可靠操作）
+
+**典型命令序列**：
+```bash
+# 1. 看可用 workspace
+vision-mcp displays
+# 输出：display-0 "BetterDisplay 4K" 🖥️ virtual 2560x1440@2x (work 2560x1440)  ⇐ recommended workspace
+
+# 2. 一键 capsule（自动选 workspace）
+vision-mcp capsule apple-music
+
+# 没副屏？强制 off-screen
+vision-mcp capsule apple-music --off-screen
+# → workspace display: off-screen-workspace (virtual) bounds={x:1880, y:1040, w:1280, h:800}
+
+# 3. 浏览器实时看屏外窗口
+vision-mcp live-view apple-music --port 7575 &
+# 打开 http://localhost:7575
+
+# 4. AX-press 操作屏外
+vision-mcp ax-press apple-music --norm 0.085,0.085  # sidebar 搜索
+vision-mcp type apple-music --text "张学友"
+vision-mcp key apple-music --combo return
+
+# 5. 任务结束，迁回主屏
+vision-mcp restore apple-music
+```
+
+**off_screen 物理限制**（无法绕过的 macOS WindowServer 行为）：
+- AX setPosition 会被 `constrainFrameRectToScreen` clamp，窗口至少留 ~40px peek-corner 在屏内（完全屏外的窗口会被 WindowServer 标 hidden 停止渲染，SCKit / CGWindowList 都找不到）
+- CGEvent 屏外坐标的鼠标事件不到达 → 必须 `ax-press`
+- 真正完美的"不抢主屏"体验仍需副屏 / Sidecar / AirPlay / 第三方虚拟显示驱动
+
 ## 5. MCP host 配置示例
 
 ```json
@@ -205,15 +261,22 @@ Sidebar 的 AXCell `name="主页"` 由 helper 从子 AXStaticText 反推（macOS
 }
 ```
 
-第一次安装请在 `native/macos/` 下编译 helper：
+第一次安装请在 `native/macos/` 下编译 helper（v0.4 起需要 ScreenCaptureKit + IOKit + Vision + CoreImage）：
 
 ```bash
 cd native/macos
 swiftc -O -o vision-mcp-helper src/main.swift \
-  -framework AppKit -framework ApplicationServices -framework CoreGraphics
+  -framework AppKit -framework ApplicationServices -framework CoreGraphics \
+  -framework IOKit -framework Vision -framework CoreImage \
+  -framework ScreenCaptureKit
 ```
 
-或者完全不编译——vision-mcp 会自动降级到 osascript adapter（慢 ~500x，但开箱即用）。
+或者完全不编译——vision-mcp 会自动降级到 osascript adapter（慢 ~500x，但开箱即用；无 SCKit / OCR / workspace 能力）。
+
+**权限**（系统设置 → 隐私）：
+- Screen Recording：所有 capture 调用必需
+- Accessibility：读写窗口、AX dump、AX-press、CGEvent 注入必需
+- 第一次调用会弹系统对话框
 
 ## 6. 自动化兜底
 

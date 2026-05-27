@@ -64,7 +64,8 @@
                 "same_session_virtual_display",
                 "real_window",
                 "existing_display",
-                "third_party_virtual_display"
+                "third_party_virtual_display",
+                "off_screen"
               ]
             },
             "platform": {
@@ -195,7 +196,7 @@
           ],
           "additionalProperties": false
         },
-        "states": {
+        "regions": {
           "type": "array",
           "items": {
             "type": "object",
@@ -208,138 +209,47 @@
               "description": {
                 "type": "string"
               },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "page",
-                  "modal",
-                  "menu",
-                  "tooltip",
-                  "dialog",
-                  "system_modal"
-                ],
-                "default": "page"
-              },
-              "anchors": {
+              "bbox_norm": {
                 "type": "array",
-                "items": {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "ocr_text"
-                        },
-                        "text": {
-                          "type": "string"
-                        },
-                        "min_confidence": {
-                          "type": "number",
-                          "minimum": 0,
-                          "maximum": 1,
-                          "default": 0.85
-                        },
-                        "match": {
-                          "type": "string",
-                          "enum": [
-                            "exact",
-                            "contains",
-                            "regex"
-                          ],
-                          "default": "contains"
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "text"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "accessibility"
-                        },
-                        "role": {
-                          "type": "string"
-                        },
-                        "name": {
-                          "type": "string"
-                        },
-                        "name_regex": {
-                          "type": "string"
-                        },
-                        "automation_id": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "type"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "window_title"
-                        },
-                        "pattern": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "pattern"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "visual_hash"
-                        },
-                        "hash": {
-                          "type": "string"
-                        },
-                        "min_similarity": {
-                          "type": "number",
-                          "minimum": 0,
-                          "maximum": 1,
-                          "default": 0.82
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "hash"
-                      ],
-                      "additionalProperties": false
-                    }
-                  ]
-                },
-                "minItems": 1,
-                "description": "状态识别锚点；任一锚点命中即可，但应优先多锚点全命中"
-              },
-              "match_policy": {
-                "type": "string",
-                "enum": [
-                  "any_anchor",
-                  "all_anchors",
-                  "score"
+                "minItems": 4,
+                "maxItems": 4,
+                "items": [
+                  {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1.5
+                  },
+                  {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1.5
+                  },
+                  {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1.5
+                  },
+                  {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1.5
+                  }
                 ],
-                "default": "any_anchor"
+                "description": "[x, y, w, h] 归一化坐标，相对 capsule client rect"
               },
               "controls": {
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "control",
+                        "collection"
+                      ],
+                      "default": "control"
+                    },
                     "id": {
                       "type": "string",
                       "minLength": 1,
@@ -393,6 +303,9 @@
                               "name_regex": {
                                 "type": "string"
                               },
+                              "name_not": {
+                                "type": "string"
+                              },
                               "role": {
                                 "type": "string"
                               },
@@ -403,6 +316,12 @@
                                 "type": "string"
                               },
                               "description": {
+                                "type": "string"
+                              },
+                              "description_regex": {
+                                "type": "string"
+                              },
+                              "description_not": {
                                 "type": "string"
                               },
                               "index": {
@@ -441,31 +360,7 @@
                                 "default": 0.8
                               },
                               "search_region": {
-                                "type": "array",
-                                "minItems": 4,
-                                "maxItems": 4,
-                                "items": [
-                                  {
-                                    "type": "number",
-                                    "minimum": 0,
-                                    "maximum": 1.5
-                                  },
-                                  {
-                                    "type": "number",
-                                    "minimum": 0,
-                                    "maximum": 1.5
-                                  },
-                                  {
-                                    "type": "number",
-                                    "minimum": 0,
-                                    "maximum": 1.5
-                                  },
-                                  {
-                                    "type": "number",
-                                    "minimum": 0,
-                                    "maximum": 1.5
-                                  }
-                                ],
+                                "$ref": "#/definitions/VisionMap/properties/regions/items/properties/bbox_norm",
                                 "description": "[x, y, w, h] 归一化坐标，相对 capsule client rect"
                               }
                             },
@@ -545,7 +440,7 @@
                                 "const": "bbox_norm"
                               },
                               "value": {
-                                "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/locator_priority/items/anyOf/1/properties/search_region"
+                                "$ref": "#/definitions/VisionMap/properties/regions/items/properties/bbox_norm"
                               }
                             },
                             "required": [
@@ -565,7 +460,7 @@
                                 "type": "string"
                               },
                               "hint_bbox_norm": {
-                                "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/locator_priority/items/anyOf/1/properties/search_region",
+                                "$ref": "#/definitions/VisionMap/properties/regions/items/properties/bbox_norm",
                                 "description": "[x, y, w, h] 归一化坐标，相对 capsule client rect"
                               },
                               "cost_budget_usd": {
@@ -578,6 +473,45 @@
                               "prompt"
                             ],
                             "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "ordinal_in_region"
+                              },
+                              "region_id": {
+                                "type": "string"
+                              },
+                              "role": {
+                                "type": "string"
+                              },
+                              "role_regex": {
+                                "type": "string"
+                              },
+                              "index": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "min_width_norm": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                                "default": 0.01
+                              },
+                              "min_height_norm": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                                "default": 0.01
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "index"
+                            ],
+                            "additionalProperties": false
                           }
                         ]
                       },
@@ -588,7 +522,7 @@
                       "type": "object",
                       "properties": {
                         "bbox_norm": {
-                          "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/locator_priority/items/anyOf/1/properties/search_region",
+                          "$ref": "#/definitions/VisionMap/properties/regions/items/properties/bbox_norm",
                           "description": "[x, y, w, h] 归一化坐标，相对 capsule client rect"
                         },
                         "center_norm": {
@@ -787,6 +721,123 @@
                                 "state_id"
                               ],
                               "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "visual_diff_should_be"
+                                },
+                                "region_norm": {
+                                  "type": "array",
+                                  "minItems": 4,
+                                  "maxItems": 4,
+                                  "items": [
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1.5
+                                    },
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1.5
+                                    },
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1.5
+                                    },
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1.5
+                                    }
+                                  ],
+                                  "description": "可选；不填则取整个 client rect 比对"
+                                },
+                                "max_similarity": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1,
+                                  "default": 0.95
+                                },
+                                "timeout_ms": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "default": 3000
+                                }
+                              },
+                              "required": [
+                                "type"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "ocr_should_appear"
+                                },
+                                "text": {
+                                  "type": "string"
+                                },
+                                "match": {
+                                  "type": "string",
+                                  "enum": [
+                                    "exact",
+                                    "contains",
+                                    "regex"
+                                  ],
+                                  "default": "contains"
+                                },
+                                "min_confidence": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1,
+                                  "default": 0.6
+                                },
+                                "region_norm": {
+                                  "type": "array",
+                                  "minItems": 4,
+                                  "maxItems": 4,
+                                  "items": [
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1.5
+                                    },
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1.5
+                                    },
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1.5
+                                    },
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1.5
+                                    }
+                                  ],
+                                  "description": "可选限定 OCR 搜索区域，比全屏 OCR 快 5-10x"
+                                },
+                                "timeout_ms": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "default": 4000
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "text"
+                              ],
+                              "additionalProperties": false
                             }
                           ]
                         },
@@ -796,17 +847,17 @@
                             "all": {
                               "type": "array",
                               "items": {
-                                "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/precondition/anyOf/0"
+                                "$ref": "#/definitions/VisionMap/properties/regions/items/properties/controls/items/properties/precondition/anyOf/0"
                               }
                             },
                             "any": {
                               "type": "array",
                               "items": {
-                                "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/precondition/anyOf/0"
+                                "$ref": "#/definitions/VisionMap/properties/regions/items/properties/controls/items/properties/precondition/anyOf/0"
                               }
                             },
                             "not": {
-                              "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/precondition/anyOf/0"
+                              "$ref": "#/definitions/VisionMap/properties/regions/items/properties/controls/items/properties/precondition/anyOf/0"
                             }
                           },
                           "additionalProperties": false
@@ -814,7 +865,7 @@
                       ]
                     },
                     "postcondition": {
-                      "$ref": "#/definitions/VisionMap/properties/states/items/properties/controls/items/properties/precondition"
+                      "$ref": "#/definitions/VisionMap/properties/regions/items/properties/controls/items/properties/precondition"
                     },
                     "risk_level": {
                       "type": "string",
@@ -835,6 +886,51 @@
                     "metadata": {
                       "type": "object",
                       "additionalProperties": {}
+                    },
+                    "enumeration": {
+                      "type": "object",
+                      "properties": {
+                        "layout": {
+                          "type": "string",
+                          "enum": [
+                            "grid",
+                            "row",
+                            "column"
+                          ],
+                          "default": "grid"
+                        },
+                        "rows": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "cols": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "count": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "cell_bbox_norm": {
+                          "$ref": "#/definitions/VisionMap/properties/regions/items/properties/bbox_norm"
+                        },
+                        "spacing_x": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1,
+                          "default": 0
+                        },
+                        "spacing_y": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1,
+                          "default": 0
+                        }
+                      },
+                      "required": [
+                        "cell_bbox_norm"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -844,6 +940,181 @@
                     "locator_priority"
                   ],
                   "additionalProperties": false
+                },
+                "default": []
+              },
+              "notes": {
+                "type": "string"
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.\\-]*$"
+              },
+              "description": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "page",
+                  "modal",
+                  "menu",
+                  "tooltip",
+                  "dialog",
+                  "system_modal"
+                ],
+                "default": "page"
+              },
+              "anchors": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "ocr_text"
+                        },
+                        "text": {
+                          "type": "string"
+                        },
+                        "min_confidence": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1,
+                          "default": 0.85
+                        },
+                        "match": {
+                          "type": "string",
+                          "enum": [
+                            "exact",
+                            "contains",
+                            "regex"
+                          ],
+                          "default": "contains"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "accessibility"
+                        },
+                        "role": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "name_regex": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "description_regex": {
+                          "type": "string"
+                        },
+                        "automation_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "window_title"
+                        },
+                        "pattern": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "pattern"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "visual_hash"
+                        },
+                        "hash": {
+                          "type": "string"
+                        },
+                        "min_similarity": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1,
+                          "default": 0.82
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "hash"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "minItems": 1,
+                "description": "状态识别锚点；任一锚点命中即可，但应优先多锚点全命中"
+              },
+              "match_policy": {
+                "type": "string",
+                "enum": [
+                  "any_anchor",
+                  "all_anchors",
+                  "score"
+                ],
+                "default": "any_anchor"
+              },
+              "controls": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/VisionMap/properties/regions/items/properties/controls/items"
+                },
+                "default": []
+              },
+              "inherit_regions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
                 },
                 "default": []
               },

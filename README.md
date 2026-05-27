@@ -21,15 +21,19 @@
 | Map Builder + WorkflowRecorder | ✅ 基础完成 | `packages/core/src/builder/*` |
 | MCP Server（§13.2 全部工具 + §13.3 资源） | ✅ 完整 | `packages/server/src/*` |
 | CLI | ✅ 完整 | `packages/cli/src/cli.ts` 提供 init/validate/build/run/workflow/repair/trace/serve/schema |
-| Skill 文档 / 示例 map / trace 样例 | ✅ 完整 | `skill/`、`examples/` |
-| 测试覆盖（schema, capsule, locator, runtime, repair, trace, MCP server e2e） | ✅ 32 个 vitest 测试全部通过 | `packages/*/tests/*.test.ts` |
+| **macOS workspace display 体系 (v0.4)** | ✅ 完整 | `packages/core/src/capsule/workspace.ts`：自动识别 virtual/sidecar/airplay/extended/off_screen + 评分推荐 |
+| **macOS virtual cursor + AX-press (v0.4)** | ✅ 完整 | `native/macos/src/main.swift`：cursor warp_restore + axPressInWindowAtNorm；off-screen 窗口零鼠标干预操作 |
+| **macOS SCKit window capture (v0.4)** | ✅ 完整 | `capture.window` 用 ScreenCaptureKit 抓半屏外窗口完整内容（2560×1600 retina） |
+| **CLI workspace 命令族 (v0.4)** | ✅ 完整 | `vision-mcp displays / capsule / restore / live-view / ax-press` |
+| Skill 文档 / 示例 map / trace 样例 | ✅ 完整 | `skill/`、`examples/`、`apps/activity-monitor/` |
+| 测试覆盖（schema, capsule, locator, runtime, repair, trace, workspace, MCP server e2e） | ✅ 43 个 vitest 测试全部通过 | `packages/*/tests/*.test.ts` |
 
 不在交付范围内（设计文档明示 P2 / 长期研究项）：
 
 - Windows IDD（Indirect Display Driver）签名安装器与企业部署脚本。
-- macOS 系统级虚拟显示器的私有实现。
+- macOS 系统级虚拟显示器的私有实现（设计文档 §9.5 明确不做；现用 workspace display 体系覆盖等价能力）。
 - 生产级 OCR / VLM 实现：当前提供接口（`OcrProvider` / `VlmProvider`），生产可注入 Tesseract / PaddleOCR / Apple Vision / OpenAI VLM 等。
-- Live View UI / Review Console（M1/M2 里程碑）。
+- 独立 GUI Live View app（已用 HTTP server + 浏览器实现 MVP；M1/M2 可升级为 native NSPanel + 全局接管热键）。
 
 ## 快速开始
 
@@ -106,11 +110,14 @@ Claude Desktop / Cursor / 其他 MCP 客户端配置示例：
 
 ## 文档导览
 
+- `AGENT-USAGE.md`：**agent 工具速查表 + Apple Music 实战示例 + macOS workspace 模式（v0.4）**。
 - `docs/deployment.md`：跨平台安装与 native helper 部署。
 - `docs/permissions.md`：Windows / macOS 权限清单与卸载流程。
 - `docs/errors.md`：错误码、recoverable 标志、默认处理建议。
 - `docs/acceptance.md`：对照设计文档 §17 的 MVP / Beta 验收对照表。
-- `skill/SKILL.md`：agent 端的操作手册（注册到 host 后 agent 第一时间应读这一份）。
+- `skill/SKILL.md`：agent 操作手册（注册到 host 后 agent 第一时间应读这一份）。
+- `skill/references/platform-macos.md`：**macOS workspace 体系、virtual cursor、AX-press、SCKit 详解**。
+- `skill/references/safety.md`：高风险动作、prompt injection 防护、workspace 安全约束。
 - `vision_mcp_windows_macos_design.md`：原始设计文档。
 
 ## 协议

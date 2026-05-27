@@ -212,6 +212,14 @@
             "partial": {
               "type": "object",
               "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "control",
+                    "collection"
+                  ],
+                  "default": "control"
+                },
                 "id": {
                   "type": "string",
                   "minLength": 1,
@@ -265,6 +273,9 @@
                           "name_regex": {
                             "type": "string"
                           },
+                          "name_not": {
+                            "type": "string"
+                          },
                           "role": {
                             "type": "string"
                           },
@@ -275,6 +286,12 @@
                             "type": "string"
                           },
                           "description": {
+                            "type": "string"
+                          },
+                          "description_regex": {
+                            "type": "string"
+                          },
+                          "description_not": {
                             "type": "string"
                           },
                           "index": {
@@ -424,6 +441,45 @@
                         "required": [
                           "type",
                           "prompt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "const": "ordinal_in_region"
+                          },
+                          "region_id": {
+                            "type": "string"
+                          },
+                          "role": {
+                            "type": "string"
+                          },
+                          "role_regex": {
+                            "type": "string"
+                          },
+                          "index": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "min_width_norm": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                            "default": 0.01
+                          },
+                          "min_height_norm": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                            "default": 0.01
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "index"
                         ],
                         "additionalProperties": false
                       }
@@ -635,6 +691,123 @@
                             "state_id"
                           ],
                           "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "visual_diff_should_be"
+                            },
+                            "region_norm": {
+                              "type": "array",
+                              "minItems": 4,
+                              "maxItems": 4,
+                              "items": [
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1.5
+                                },
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1.5
+                                },
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1.5
+                                },
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1.5
+                                }
+                              ],
+                              "description": "可选；不填则取整个 client rect 比对"
+                            },
+                            "max_similarity": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1,
+                              "default": 0.95
+                            },
+                            "timeout_ms": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "default": 3000
+                            }
+                          },
+                          "required": [
+                            "type"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "ocr_should_appear"
+                            },
+                            "text": {
+                              "type": "string"
+                            },
+                            "match": {
+                              "type": "string",
+                              "enum": [
+                                "exact",
+                                "contains",
+                                "regex"
+                              ],
+                              "default": "contains"
+                            },
+                            "min_confidence": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1,
+                              "default": 0.6
+                            },
+                            "region_norm": {
+                              "type": "array",
+                              "minItems": 4,
+                              "maxItems": 4,
+                              "items": [
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1.5
+                                },
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1.5
+                                },
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1.5
+                                },
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1.5
+                                }
+                              ],
+                              "description": "可选限定 OCR 搜索区域，比全屏 OCR 快 5-10x"
+                            },
+                            "timeout_ms": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "default": 4000
+                            }
+                          },
+                          "required": [
+                            "type",
+                            "text"
+                          ],
+                          "additionalProperties": false
                         }
                       ]
                     },
@@ -683,6 +856,51 @@
                 "metadata": {
                   "type": "object",
                   "additionalProperties": {}
+                },
+                "enumeration": {
+                  "type": "object",
+                  "properties": {
+                    "layout": {
+                      "type": "string",
+                      "enum": [
+                        "grid",
+                        "row",
+                        "column"
+                      ],
+                      "default": "grid"
+                    },
+                    "rows": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    "cols": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    "count": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    "cell_bbox_norm": {
+                      "$ref": "#/definitions/Patch/anyOf/1/properties/old_bbox_norm"
+                    },
+                    "spacing_x": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1,
+                      "default": 0
+                    },
+                    "spacing_y": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1,
+                      "default": 0
+                    }
+                  },
+                  "required": [
+                    "cell_bbox_norm"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "additionalProperties": false
@@ -803,6 +1021,12 @@
                           "name_regex": {
                             "type": "string"
                           },
+                          "description": {
+                            "type": "string"
+                          },
+                          "description_regex": {
+                            "type": "string"
+                          },
                           "automation_id": {
                             "type": "string"
                           }
@@ -871,6 +1095,9 @@
                   "items": {
                     "type": "object",
                     "properties": {
+                      "kind": {
+                        "$ref": "#/definitions/Patch/anyOf/2/properties/partial/properties/kind"
+                      },
                       "id": {
                         "$ref": "#/definitions/Patch/anyOf/2/properties/partial/properties/id"
                       },
@@ -909,6 +1136,9 @@
                       },
                       "metadata": {
                         "$ref": "#/definitions/Patch/anyOf/2/properties/partial/properties/metadata"
+                      },
+                      "enumeration": {
+                        "$ref": "#/definitions/Patch/anyOf/2/properties/partial/properties/enumeration"
                       }
                     },
                     "required": [
@@ -918,6 +1148,13 @@
                       "locator_priority"
                     ],
                     "additionalProperties": false
+                  },
+                  "default": []
+                },
+                "inherit_regions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
                   },
                   "default": []
                 },

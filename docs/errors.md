@@ -16,7 +16,7 @@
 
 | 错误码 | 含义 | 默认处理建议 |
 | ------ | ---- | ------------ |
-| `CAPSULE_DISPLAY_MISSING` | capsule 显示器不存在 / 已断开 | 重试 `capsule.ensure_display`，失败则提示用户检查 IDD 驱动或外接显示器。 |
+| `CAPSULE_DISPLAY_MISSING` | capsule 显示器不存在 / 已断开 / **无合适 workspace** (v0.4) | macOS：检查是否连接副屏 / 启用 Sidecar / 装 BetterDisplay；或重试 `capsule.ensure_display({ allowOffScreen: true })` 启用屏外 workspace。Windows：检查 IDD 驱动。`details.scored` 含 pickWorkspaceDisplay 的评分细节。 |
 | `CAPSULE_PLATFORM_UNAVAILABLE` | native helper 未找到 / 启动失败 | 检查 `VISION_MCP_NATIVE_HELPER` 是否指向 helper；或设置 `VISION_MCP_FALLBACK_MOCK=1` 用 mock 调试。 |
 | `WINDOW_NOT_FOUND` | 目标窗口不存在或已关闭 | 提示用户重新打开/登录目标软件，再调用 `capsule.attach_window`。 |
 | `WINDOW_MIGRATION_FAILED` | SetWindowPos / AX setBounds 失败 | 降级 Real-window Capsule；记录 `unsupported window` 标志。 |
