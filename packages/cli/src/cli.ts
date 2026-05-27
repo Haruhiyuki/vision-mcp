@@ -42,6 +42,29 @@ function makeAccessibilityProvider(a: PlatformAdapter): AccessibilityProvider | 
   if (a instanceof WindowsPlatformAdapter) return new WindowsAccessibilityProvider(a);
   return undefined;
 }
+
+/**
+ * 平台无关地拿一个 OcrProvider（有 recognizeRect 方法）。
+ * - macOS swift helper → DarwinOcrProvider（Vision framework）
+ * - Windows → WindowsOcrProvider（Windows.Media.Ocr WinRT）
+ * - osascript / mock：undefined → 调用方应该报错或跳过 OCR 步骤
+ *
+ * 返回的 provider 都暴露 recognizeRect(screenRect, opts)；click-text /
+ * scroll-until-text 等 OCR-依赖命令应通过这层而不是 instanceof DarwinHelperAdapter。
+ */
+type RectOcrProvider = {
+  recognizeRect(
+    screenRect: { x: number; y: number; width: number; height: number },
+    options?: { nocache?: boolean },
+  ): Promise<Array<{ text: string; confidence: number; bbox_norm: [number, number, number, number] }>>;
+  invalidate?(): void;
+};
+async function makeOcrProvider(a: PlatformAdapter): Promise<RectOcrProvider | undefined> {
+  const { DarwinHelperAdapter, DarwinOcrProvider, WindowsOcrProvider: WinOcr } = await import("@vision-mcp/core");
+  if (a instanceof DarwinHelperAdapter) return new DarwinOcrProvider(a);
+  if (a instanceof WindowsPlatformAdapter) return new WinOcr(a);
+  return undefined;
+}
 import {
   createServerContext,
   createVisionMcpServer,
@@ -1383,9 +1406,16 @@ async function cmdClickText(args: ParsedArgs) {
   const text = String(args.flags.text ?? "");
   if (!text) throw new Error("click-text 需要 --text");
   const match = (args.flags.match as "exact" | "contains" | "regex") ?? "contains";
-  const { DarwinHelperAdapter: HA, DarwinOcrProvider } = await import("@vision-mcp/core");
-  if (!(adapter instanceof HA)) throw new Error("click-text 当前需要 swift helper（含 Vision OCR）");
-  const ocr = new DarwinOcrProvider(adapter);
+  const ocr = await makeOcrProvider(adapter);
+  if (!ocr) {
+    throw new Error(
+      `click-text 需要 OCR provider。当前 adapter (${adapter.platform}) 不支持：` +
+      `macOS 需 swift helper（不是 osascript），Windows 需 helper.ps1`,
+    );
+  }
+  // OCR 走 GDI 屏幕抓取（不是 PrintWindow），目标窗口必须可见且在前台
+  // 否则 OCR 会读到上层其它窗口（比如我们自己的终端）。先 raise 再 OCR。
+  await capsule.raise().catch(() => {});
   const status = await capsule.status();
   const cr = status.geometry?.client_rect_px;
   if (!cr) throw new Error("client_rect missing");
@@ -1523,9 +1553,12 @@ async function cmdScrollUntilText(args: ParsedArgs) {
   const { adapter, capsule } = await openCapsuleForRaw(args);
   const text = String(args.flags.text ?? "");
   if (!text) throw new Error("scroll-until-text 需要 --text");
-  const { DarwinHelperAdapter: HA, DarwinOcrProvider } = await import("@vision-mcp/core");
-  if (!(adapter instanceof HA)) throw new Error("scroll-until-text 需要 swift helper (OCR)");
-  const ocr = new DarwinOcrProvider(adapter);
+  const ocr = await makeOcrProvider(adapter);
+  if (!ocr) {
+    throw new Error(
+      `scroll-until-text 需要 OCR provider。当前 adapter (${adapter.platform}) 不支持。`,
+    );
+  }
   const cr = (await capsule.validateGeometry()).client_rect_px;
   let region = cr;
   if (args.flags.region) {
@@ -1816,27 +1849,58 @@ async function cmdHoverThenClick(args: ParsedArgs) {
 }
 
 /** snapshot-crop: 只截屏幕 region 子部分，省 agent context。 */
+/** 跨平台默认临时目录（不能再 hardcode /tmp）。 */
+function defaultTempPath(name: string): string {
+  return path.join(process.env.TEMP ?? process.env.TMP ?? (process.platform === "win32" ? "C:\\Windows\\Temp" : "/tmp"), name);
+}
+
+/** 在 RGBA frame 上裁剪指定像素 rect（frame 坐标系），返回 RGBA pixels + 尺寸。 */
+function cropRgba(
+  frame: { width_px: number; height_px: number; pixels: Uint8Array },
+  rect: { x: number; y: number; width: number; height: number },
+): { width: number; height: number; pixels: Uint8Array } {
+  const W = frame.width_px;
+  const H = frame.height_px;
+  const x0 = Math.max(0, Math.min(W, rect.x));
+  const y0 = Math.max(0, Math.min(H, rect.y));
+  const x1 = Math.max(0, Math.min(W, rect.x + rect.width));
+  const y1 = Math.max(0, Math.min(H, rect.y + rect.height));
+  const w = Math.max(0, x1 - x0);
+  const h = Math.max(0, y1 - y0);
+  const out = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const srcOff = ((y0 + y) * W + x0) * 4;
+    const dstOff = y * w * 4;
+    out.set(frame.pixels.subarray(srcOff, srcOff + w * 4), dstOff);
+  }
+  return { width: w, height: h, pixels: out };
+}
+
 async function cmdSnapshotCrop(args: ParsedArgs) {
   const { adapter, capsule } = await openCapsuleForRaw(args);
-  const outPath = String(args.flags.out ?? "/tmp/crop.png");
+  const outPath = String(args.flags.out ?? defaultTempPath("vm-crop.png"));
   if (!args.flags.region) throw new Error("snapshot-crop 需要 --region x,y,w,h（归一化）");
   const [nx, ny, nw, nh] = String(args.flags.region).split(",").map(Number);
   const cr = (await capsule.validateGeometry()).client_rect_px;
-  const rect = {
+  const { encodeRgbaToPng } = await import("@vision-mcp/core");
+  // 走 capsule.capture()（window/Print Window 路径），跨平台。
+  // frame 是 client_rect 的内容，所以 region 直接用 frame 像素坐标（client_rect 内偏移）。
+  const frame = await capsule.capture();
+  const frameRect = {
+    x: Math.round(nx * frame.width_px),
+    y: Math.round(ny * frame.height_px),
+    width: Math.round(nw * frame.width_px),
+    height: Math.round(nh * frame.height_px),
+  };
+  const { width, height, pixels } = cropRgba(frame, frameRect);
+  await fs.writeFile(outPath, encodeRgbaToPng(width, height, pixels));
+  const screenRect = {
     x: Math.round(cr.x + nx * cr.width),
     y: Math.round(cr.y + ny * cr.height),
     width: Math.round(nw * cr.width),
     height: Math.round(nh * cr.height),
   };
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const execFileP = promisify(execFile);
-  await execFileP("/usr/sbin/screencapture", [
-    "-x", "-t", "png", "-R",
-    `${rect.x},${rect.y},${rect.width},${rect.height}`,
-    outPath,
-  ]);
-  console.log(JSON.stringify({ ok: true, out: outPath, region_screen: rect }));
+  console.log(JSON.stringify({ ok: true, out: outPath, region_screen: screenRect, region_frame: frameRect, size: { width, height } }));
   await adapter.dispose?.();
 }
 
@@ -1845,26 +1909,19 @@ async function cmdSnapshotTile(args: ParsedArgs) {
   const { adapter, capsule } = await openCapsuleForRaw(args);
   const cols = Number(args.flags.cols ?? 3);
   const rows = Number(args.flags.rows ?? 3);
-  const outDir = String(args.flags["out-dir"] ?? "/tmp/tiles");
+  const outDir = String(args.flags["out-dir"] ?? defaultTempPath("vm-tiles"));
   await fs.mkdir(outDir, { recursive: true });
-  const cr = (await capsule.validateGeometry()).client_rect_px;
-  const tileW = Math.floor(cr.width / cols);
-  const tileH = Math.floor(cr.height / rows);
+  const { encodeRgbaToPng } = await import("@vision-mcp/core");
+  const frame = await capsule.capture();
+  const tileW = Math.floor(frame.width_px / cols);
+  const tileH = Math.floor(frame.height_px / rows);
   const tiles: Array<{ row: number; col: number; out: string; region_norm: [number, number, number, number] }> = [];
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const execFileP = promisify(execFile);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const x = cr.x + c * tileW;
-      const y = cr.y + r * tileH;
+      const cropped = cropRgba(frame, { x: c * tileW, y: r * tileH, width: tileW, height: tileH });
       const filename = `tile_r${r}_c${c}.png`;
       const fullPath = path.join(outDir, filename);
-      await execFileP("/usr/sbin/screencapture", [
-        "-x", "-t", "png", "-R",
-        `${x},${y},${tileW},${tileH}`,
-        fullPath,
-      ]).catch(() => {});
+      await fs.writeFile(fullPath, encodeRgbaToPng(cropped.width, cropped.height, cropped.pixels));
       tiles.push({
         row: r,
         col: c,
@@ -2317,6 +2374,17 @@ async function cmdDoctor(_args: ParsedArgs) {
       if (has) ok("ps2exe", "已装（v0.1 暂不用，留作 prebuilt 编译）");
       else warn("ps2exe", "未装（v0.1 不需要；helper 走 .ps1 + powershell.exe -File）");
     } catch { /* skip */ }
+    // OCR 语言包检测（Windows.Media.Ocr 需要装语言包才能识别该语言）
+    try {
+      const r = await execP(psExe, [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null; " +
+        "([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { $_.LanguageTag }) -join ','",
+      ], { timeout: 10_000 });
+      const langs = (r.stdout || "").trim();
+      if (langs) ok("ocr.languages", langs);
+      else warn("ocr.languages", "无—设置 → 时间和语言 → 添加语言（中文 / 英文）");
+    } catch { warn("ocr.languages", "Windows.Media.Ocr 不可用"); }
   }
 
   lines.push("");

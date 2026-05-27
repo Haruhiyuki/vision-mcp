@@ -1,4 +1,4 @@
-# vision-mcp-helper (Windows)
+﻿# vision-mcp-helper (Windows)
 #
 # 长寿命 JSON-RPC sidecar：从 stdin 按行读 JSON 命令，到 stdout 写响应。
 #
@@ -626,6 +626,98 @@ function Post-Key($combo) {
     [Win32]::SendInput([uint32]$count, $inputs, [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])) | Out-Null
 }
 
+# ---------- OCR: Windows.Media.Ocr (WinRT) ----------
+# 离线 OCR，等价 macOS 的 Vision framework。Windows 10+ 自带。
+# 首次调用懒加载 WinRT 类型（避免给非 OCR 用户增加 ~200ms 启动）。
+$script:ocrEngine = $null
+$script:ocrAsTaskGeneric = $null
+$script:ocrAsTaskAction = $null
+
+function Initialize-Ocr {
+    if ($script:ocrEngine) { return $true }
+    try {
+        [Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+        [Windows.Graphics.Imaging.SoftwareBitmap,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+        [Windows.Graphics.Imaging.BitmapDecoder,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+        [Windows.Storage.Streams.InMemoryRandomAccessStream,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+        [Windows.Storage.Streams.DataWriter,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+        Add-Type -AssemblyName System.Runtime.WindowsRuntime
+        $script:ocrAsTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+            $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+        })[0]
+        $script:ocrAsTaskAction = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+            $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction'
+        })[0]
+        $script:ocrEngine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+        return ($script:ocrEngine -ne $null)
+    } catch {
+        return $false
+    }
+}
+
+function Await-OcrOp($winRtAsyncOp, $resultType) {
+    $asTask = $script:ocrAsTaskGeneric.MakeGenericMethod($resultType)
+    $netTask = $asTask.Invoke($null, @($winRtAsyncOp))
+    $netTask.Wait(-1) | Out-Null
+    return $netTask.Result
+}
+
+# 对屏幕 rect 跑 OCR。返回 {text, bbox_norm: [x,y,w,h], confidence} 列表，
+# bbox 归一化到传入 rect。Windows.Media.Ocr 不给单词置信度，统一返回 1.0。
+function Recognize-Rect($rect) {
+    if (-not (Initialize-Ocr)) {
+        throw "Windows.Media.Ocr 不可用：未安装对应语言包（设置 → 时间和语言 → 语言 → 添加语言）"
+    }
+    if ($rect.width -le 0 -or $rect.height -le 0) { return @() }
+    if ($rect.width -gt 10000 -or $rect.height -gt 10000) {
+        throw "OCR 矩形过大：Windows.Media.Ocr 限制 10000px/边"
+    }
+    # 1. 屏幕区域 → PNG bytes
+    $bmp = New-Object System.Drawing.Bitmap $rect.width, $rect.height
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($rect.x, $rect.y, 0, 0, $bmp.Size)
+    $g.Dispose()
+    $ms = New-Object System.IO.MemoryStream
+    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bytes = $ms.ToArray()
+    $bmp.Dispose()
+    # 2. PNG → IRandomAccessStream
+    $iras = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
+    $writer = New-Object Windows.Storage.Streams.DataWriter $iras
+    $writer.WriteBytes($bytes)
+    Await-OcrOp $writer.StoreAsync() ([uint32]) | Out-Null
+    $writer.DetachStream() | Out-Null
+    $writer.Dispose()
+    $iras.Seek(0)
+    # 3. 解码 → SoftwareBitmap
+    $decoder = Await-OcrOp ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($iras)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $softBmp = Await-OcrOp $decoder.GetSoftwareBitmapAsync() ([Windows.Graphics.Imaging.SoftwareBitmap])
+    # 4. OCR
+    $ocrResult = Await-OcrOp $script:ocrEngine.RecognizeAsync($softBmp) ([Windows.Media.Ocr.OcrResult])
+    # 5. 提取词 + 归一化 bbox
+    # 注意：用 invScale * dim 而不是 dim / w，避免 PowerShell 偶发把 $rect.width
+    # 当 Object[] 处理（脚本作用域 + foreach 嵌套时易发）触发 op_Division 报错
+    $tokens = New-Object System.Collections.ArrayList
+    $invW = 1.0 / ([double]([int]$rect.width))
+    $invH = 1.0 / ([double]([int]$rect.height))
+    foreach ($ocrLine in $ocrResult.Lines) {
+        foreach ($ocrWord in $ocrLine.Words) {
+            $b = $ocrWord.BoundingRect
+            $bx = [double]$b.X * $invW
+            $by = [double]$b.Y * $invH
+            $bw = [double]$b.Width * $invW
+            $bh = [double]$b.Height * $invH
+            [void]$tokens.Add(@{
+                text       = [string]$ocrWord.Text
+                bbox_norm  = @($bx, $by, $bw, $bh)
+                confidence = 1.0
+            })
+        }
+    }
+    $iras.Dispose()
+    return $tokens
+}
+
 # ---------- UI Automation: AX tree dump + InvokePattern ----------
 # 等价 macOS 的 AXUIElement 树 + AXPerformAction("AXPress")。
 # 对支持 InvokePattern 的元素（普通按钮、菜单项、链接）等价"零鼠标点击"；
@@ -886,6 +978,29 @@ while ($true) {
                 if (-not $norm -or $norm.Length -ne 2) { Send-Error $id "norm [x,y] required"; break }
                 $r = UIA-Invoke-At-Norm $p.handle $norm[0] $norm[1]
                 Send-Result $id $r
+                break
+            }
+            "ocr.recognize_rect" {
+                # 等价 macOS swift helper 的 ocr.recognize_rect。
+                # params: { rect: {x,y,width,height} }
+                # returns: { tokens: [{ text, bbox_norm:[x,y,w,h], confidence }] }
+                if (-not $p.rect) { Send-Error $id "rect required" "BAD_PARAMS"; break }
+                $tokens = Recognize-Rect $p.rect
+                # 用 ArrayList 包，避免 ConvertTo-Json 把单元素展平
+                $arr = New-Object System.Collections.ArrayList
+                foreach ($t in $tokens) { [void]$arr.Add($t) }
+                Send-Result $id @{ tokens = $arr }
+                break
+            }
+            "ocr.languages" {
+                # 列出可用 OCR 语言（设备装的语言包）
+                if (-not (Initialize-Ocr)) { Send-Error $id "OCR not available" "OCR_UNAVAILABLE"; break }
+                $langs = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages
+                $out = New-Object System.Collections.ArrayList
+                foreach ($l in $langs) {
+                    [void]$out.Add(@{ tag = $l.LanguageTag; display = $l.DisplayName })
+                }
+                Send-Result $id $out -AsArray
                 break
             }
             "input.subscribe" {
