@@ -201,7 +201,7 @@ cd ../..
 # 列出当前显示器（确认 helper 已就绪）
 vision-mcp displays
 
-# 列出已建图的 apps
+# 列出已建立 vision-mcp 的 apps
 ls $VISION_MCP_APPS_ROOT  # 或 --apps-root ./apps
 
 # 单跑一个 workflow

@@ -15,11 +15,13 @@
 | 用户说什么 | 入口 |
 |-----------|------|
 | "播一首歌" / "按内存排序" / "新建备忘录" | **任务驱动 ⭐**（默认） |
-| "建一份 X 的地图" / "探索这个 app" | **建图驱动** |
+| "探索这个 app" / "帮我建立 X 的 vision-mcp" / "建一份 X 的地图" | **探索驱动** |
 
-**任务驱动**：直接试 `run_workflow`；遇 unknown state 当场 `commit_state` 小切片继续走；遇偏差当场 `vision-mcp patch`；任务结束 map 比开始时更完整。
+> **探索的产出**：写入 `vision-mcp.yaml`（建立或扩展 vision-mcp），后续任务可用 `run_workflow` 直接命中。
 
-**建图驱动**：BFS 探索所有可达 state，commit 完整 anchors + controls，写 transitions / workflows。
+**任务驱动**：直接试 `run_workflow`；遇 unknown state 当场 `commit_state` 把这页**写入 vision-mcp**继续走；遇偏差当场 `vision-mcp patch`；任务结束时 vision-mcp 比开始时更完整。
+
+**探索驱动**：BFS 走遍每个可达 state，把 anchors / 关键 controls / transitions / 代表性 workflows **完整写入 vision-mcp**。
 
 任务驱动下 snapshot 仅在 4 个时机调用：
 1. 任务起点（优先 `detect_state` 轻量；不确定才拿 PNG）
@@ -27,7 +29,7 @@
 3. 失败诊断（`repair_minimal` 修不好后）
 4. 任务结束（给用户的"已完成"回报）
 
-**副产品原则**：snapshot 一旦截了，candidates 列表本来就在 context——顺带把页面几个明显 control 一起 commit 进 baseline，边际成本几乎为零。但不要为"看更多元素"额外多 snapshot（那是建图驱动）。
+**副产品原则**：snapshot 一旦截了，candidates 列表本来就在 context——顺带把页面几个明显 control 一起 commit 进 baseline，边际成本几乎为零。但不要为"看更多元素"额外多 snapshot（那是探索驱动）。
 
 详见 [`references/workflow.md`](references/workflow.md)。
 
@@ -83,7 +85,7 @@ Trust 渐进：`session_only`（默认，本次会话） → `trusted`（用户�
 
 ## 8. 进一步阅读
 
-- [`references/workflow.md`](references/workflow.md) — 任务驱动 vs 建图驱动决策树、副产品、反模式
+- [`references/workflow.md`](references/workflow.md) — 任务驱动 vs 探索驱动决策树、副产品、反模式
 - [`references/patches.md`](references/patches.md) — 持续修正：4 种 patch 类型 / trust 升级
 - [`references/schema.md`](references/schema.md) — vision-mcp.yaml 字段速查
 - [`references/repair-policy.md`](references/repair-policy.md) — L0–L3 repair ladder

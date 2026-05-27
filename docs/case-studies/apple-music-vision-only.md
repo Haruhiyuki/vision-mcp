@@ -34,7 +34,7 @@ for each page in [home, search, search_results, artist_detail, playbar]:
 | 双击歌曲卡片播放 | click count=2 | ✅ | 在搜索结果第一行第二列（歌曲位）实测有效 |
 | 双击艺人卡片进详情 | click count=2 | ❌ | Apple Music 艺人卡片需点头像或浮动 ▶ 按钮（hover-only） |
 
-## 3. 纯视觉建图的真实局限
+## 3. 纯视觉探索的真实局限
 
 实测过程发现的客观问题：
 

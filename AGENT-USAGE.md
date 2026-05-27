@@ -4,8 +4,8 @@
 >
 > **核心**：**视觉为主 + 路径上沉淀 map + 稳定窗口 + 高风险必审批**。
 >
-> - 用户给任务 → **任务驱动 ⭐**：`detect_state` → `run_workflow` → 失败时 `snapshot` 诊断 → `patch` / `commit_state` → 继续
-> - 用户说"建图" → **建图驱动**：BFS 探索 + commit 完整 anchors/controls
+> - 用户给任务 → **任务驱动 ⭐**：`detect_state` → `run_workflow` → 失败时 `snapshot` 诊断 → `patch` / `commit_state` 继续；任务结束时 vision-mcp 比开始时更完整
+> - 用户说"探索 X" / "建立 X 的 vision-mcp" → **探索驱动**：BFS 走遍 → commit 完整 anchors/controls/workflows 写入 vision-mcp
 > - `snapshot` 仅 4 时机：任务起点 / 关键决策 / 失败诊断 / 任务结束
 > - **副产品原则**：snapshot 已截了，candidates 已在 context，顺带把几个明显 control 一起 commit 入 baseline
 > - 偏差当场固化：`vision-mcp patch --state ... --control ... --bbox-norm x,y,w,h`
@@ -31,20 +31,20 @@
 | **`vision-mcp patch`** | 实战发现偏差 → 写 patch 固化修正（持续修正机制） | patch file path |
 | **`vision-mcp patches`** | 列出 app 已应用的 patch | patch list |
 
-### 1.2 探索 / 建图 — 任务路径上遇 unknown 时按需 + 建图驱动时常用
+### 1.2 探索 — 任务路径上遇 unknown 时按需 + 探索驱动时常用
 
-> 任务驱动遇 unknown state 时按需调（探索副产品原则）；建图驱动下系统使用。
+> 任务驱动遇 unknown state 时按需调（探索副产品原则）；探索驱动下系统使用。产出物写入 `vision-mcp.yaml`。
 
 | 工具 | 用途 | 返回 |
 | ---- | ---- | ---- |
 | `vision_map.snapshot` | 一次拿**截图 + AX 候选 + state 匹配**。**只在 §7 四个看图时机调** | base64 PNG + candidates + state_match + visual_hash |
-| `vision-mcp annotated` | 截图叠加网格 + 候选框 + 序号；建图时说"click #7"而非估坐标 | PNG 文件 + box_count |
-| `vision-mcp click-text` | OCR 找文字 → click 其中心；建图时定位元素的利器 | { matched_text, confidence, point } |
+| `vision-mcp annotated` | 截图叠加网格 + 候选框 + 序号；探索时说"click #7"而非估坐标 | PNG 文件 + box_count |
+| `vision-mcp click-text` | OCR 找文字 → click 其中心；探索时定位元素的利器 | { matched_text, confidence, point } |
 | `vision-mcp click-fuzzy` | click 失败时围绕 ±jitter 多次试 | { ok, point, offset, visual_diff } |
 | `vision-mcp hover` | 移到坐标 + 等待，触发 hover-only 控件 | { ok } |
 | `vision-mcp hover-probe` | hover 后 vs 前像素 diff，找 hover 触发的新元素 | { ok, hot_block_bbox_norm } |
 | `vision-mcp scroll-until-text` | region 内反复滚动 + OCR 找文字 | { ok, attempts, matched_text } |
-| `vision_map.click_at` | 在归一化坐标 click（建图原始动作） | { ok, point_screen } |
+| `vision_map.click_at` | 在归一化坐标 click（探索原始动作） | { ok, point_screen } |
 | `vision_map.commit_state` | 把当前帧 AX 状态写入 map.baseline | { state_id } |
 | `vision_map.apply_patch` | 写 control_bbox / geometry / state patch | patch file path |
 | `vision-mcp ax-press` | macOS 高级：AX 直接对 norm 位置元素发 AXPress（对菜单/按钮稳；NSTableView cell / SwiftUI 自绘元素无效） | { ok, via, matched_role } |
@@ -93,7 +93,7 @@ run_workflow(app, workflow_id, inputs)
    │           │     → 重试，patch 已生效
    │           │
    │           └─ 是 unknown state / 缺 control
-   │                 → 当场建图（小切片）：
+   │                 → 当场探索 + 扩展 vision-mcp（小切片）：
    │                    commit_state(state_id, anchors)
    │                    把这页**几个明显 control** 一起加入 region（副产品原则）
    │                 → 继续往任务终态走
@@ -108,7 +108,7 @@ run_workflow(app, workflow_id, inputs)
 ✅ **应该做**：commit_state 时把这页**几个明显 control** 一起入 baseline（不只写任务必须那一个）
 ✅ **应该做**：发现 sidebar 还有别的导航项，顺带加进 region.controls
 ✅ **应该做**：把 OCR 关键字写入 state.anchors 让下次 detect_state 更准
-❌ **不应该做**：为"看其他元素"专门多 snapshot 几次 → 那是建图驱动了
+❌ **不应该做**：为"看其他元素"专门多 snapshot 几次 → 那是探索驱动了
 ❌ **不应该做**：单次任务硬塞 20 个 control 进 commit_state → 留给后续任务自然补充
 
 **度的把握**：snapshot 已经在 context，每多记 1 个 control 几乎零成本；但每多调一次 snapshot 就是真成本。
@@ -118,16 +118,16 @@ run_workflow(app, workflow_id, inputs)
 ```
 ❌ 跑 5 步 workflow，每步 snapshot 一次       # 已 covered 步骤不需要看
 ❌ click_at 后总 snapshot 验证              # perform_action 内置 postcondition 已验证
-❌ 任务驱动下 BFS 探索整个 app              # 那是建图驱动；任务驱动只走必经路径
+❌ 任务驱动下 BFS 探索整个 app              # 那是探索驱动；任务驱动只走必经路径
 ❌ 探索 unknown 时死盯一个 element 忽略其他   # 副产品白扔了
 ❌ 失败时立即 snapshot                      # 先 repair_minimal；不行才看图
 ```
 
 详见 `skills/vision-mcp/SKILL.md` §7。
 
-## 3. 建图驱动（用户明确要求"建图"/"探索"时）
+## 3. 探索驱动（用户明确要求"探索"/"建立 vision-mcp"时）
 
-> **一次性深度投入**。用户说"帮我建一份 X 应用的地图"/"探索这个 app" → 进入这里。系统覆盖所有可达 UI，奠定 baseline。
+> **一次性深度投入**。用户说"探索这个 app"/"帮我建立 X 的 vision-mcp"/"建一份 X 的地图" → 进入这里。系统覆盖所有可达 UI，把发现的 states / regions / controls / workflows 写入 `apps/<app>/vision-mcp.yaml`。
 
 ### 阶段 A：把目标 app 吸入 capsule
 
@@ -139,7 +139,7 @@ run_workflow(app, workflow_id, inputs)
 5. capsule.validate_geometry   ← 必须 ok=true 才能继续
 ```
 
-### 阶段 B：用 snapshot 边看边建图
+### 阶段 B：用 snapshot 边看边探索
 
 对每个想建模的页面（比如主页 / 搜索页 / 详情页 / 播放器），重复：
 
@@ -186,9 +186,9 @@ if new_snap.state_match.state_id == parent_state {
 }
 ```
 
-### 阶段 D：建图完成 → 后续任务进 §2 任务驱动模式
+### 阶段 D：探索完成 → 后续任务进 §2 任务驱动模式
 
-建图完成后，agent 不需要再视觉判断每一步：
+探索完成后，agent 不需要再视觉判断每一步：
 
 ```
 vision_map.run_workflow(app_id, workflow_id, inputs)
@@ -221,7 +221,7 @@ vision-mcp snapshot apple-music --out /tmp/final.png
 # 把 final.png 附到回报里："已开始播放，截图见附件"
 ```
 
-### 4.2 建图驱动（首次建 apple-music map 时；§3 的实例）
+### 4.2 探索驱动（首次建 apple-music map 时；§3 的实例）
 
 下面是当初**建** apple-music map 时的视觉 + AX 双轨流程。**这是一次性深度投入**——建好后日常任务用 §4.1。
 
@@ -233,7 +233,7 @@ vision-mcp snapshot apple-music --out /tmp/home.png
 # 取 bbox 中心 (0.085, 0.085) → click
 
 vision-mcp click apple-music --norm "0.085,0.085"
-vision-mcp snapshot apple-music --out /tmp/v.png       # 建图时验证每步
+vision-mcp snapshot apple-music --out /tmp/v.png       # 探索时验证每步
 
 vision-mcp click apple-music --norm "0.481,0.033"      # AX 给的搜索框中心
 vision-mcp type apple-music --text "张学友" --clear-first
@@ -243,10 +243,10 @@ vision-mcp snapshot apple-music --out /tmp/results.png # 验证结果页
 # AX 给 AXCell desc="偷心" bbox=[0.341, 0.134, 0.131, 0.087] → 中心 (0.407, 0.178)
 vision-mcp click apple-music --norm "0.407,0.178" --count 2
 
-# 建图完成后 → vision_map.commit_state + 写 workflow + 切回 §4.1 执行模式
+# 探索完成后 → vision_map.commit_state + 写 workflow + 切回 §4.1 执行模式
 ```
 
-**实测时间**：建图 ~30 步 / 20 分钟（每步 snapshot 验证）；执行 ~5 秒 / 0 snapshot。
+**实测时间：探索 ~30 步 / 20 分钟（每步 snapshot 验证）；执行 ~5 秒 / 0 snapshot。
 
 ### 4.3 **纯视觉**流程（AX 不可用时也能工作）
 
@@ -411,9 +411,9 @@ swiftc -O -o vision-mcp-helper src/main.swift \
 
 ## 7. 自动化兜底
 
-如果 agent 不想边看边建图，仓库也提供：
+如果 agent 不想边看边探索，仓库也提供：
 
 - `vision-mcp record <app_id> --plan plan.json`：按预写脚本走一遍，每步输出截图+AX。
 - `vision-mcp discover <app_id> --max-clicks 20 --max-depth 2`：BFS 探索全部可交互节点，自动尝试返回路径，输出 `discover.json` + draft yaml 草稿。
 
-这两个适合作为建图前的"快速摸底"，但**最终决定 anchor / control / transition 仍然需要 agent 视觉判断**——否则会把同类元素都建模成单独 control，map 会膨胀且无意义。
+这两个适合作为探索前的"快速摸底"，但**最终决定 anchor / control / transition 仍然需要 agent 视觉判断**——否则会把同类元素都建模成单独 control，map 会膨胀且无意义。

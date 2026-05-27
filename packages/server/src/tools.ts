@@ -354,7 +354,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "返回当前 capsule 的截图 + AX 候选 + 已知 state 匹配",
       description:
-        "Agent 主导建图的核心工具：一次拿到 PNG（base64）、可交互节点列表、与 map.states 的最佳匹配。",
+        "Agent 探索的核心工具：一次拿到 PNG（base64）、可交互节点列表、与 map.states 的最佳匹配；后续 commit_state 时一并写入 vision-mcp。",
       inputSchema: {
         app_id: z.string(),
         include_image: z.boolean().default(true),
@@ -409,7 +409,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "vision_map.click_at",
     {
-      title: "在 capsule 内按归一化坐标 click（建图原始动作）",
+      title: "在 capsule 内按归一化坐标 click（探索原始动作）",
       description:
         "Agent 看完 snapshot 后直接传 [x, y] norm 触发 click，不需要预先定义 control。",
       inputSchema: {
