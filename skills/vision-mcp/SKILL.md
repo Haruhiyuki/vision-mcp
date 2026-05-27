@@ -4,11 +4,12 @@
 
 ## 1. 核心原则
 
-1. **视觉为主，AX 校准**：snapshot 拿 PNG，自己看图估归一化坐标；原生 app 的 AX candidates 给精确 bbox。游戏/Electron/自绘 UI 没 AX，截图永远在。
-2. **路径上沉淀 map**：用过的路径要 `commit_state` / `patch` 固化进 map，下次直接 `run_workflow` 命中。每次视觉成本都摊销到永久 map 资产上。
+1. **视觉为主，AX/OCR 校准**：snapshot 拿 PNG，自己看图估归一化坐标；有 AX 的元素 candidates 给精确 bbox；CEF/游戏/自绘 UI 走 OCR + bbox。截图永远在。
+2. **路径上沉淀 map**：用过的路径要 `commit_state` / `patch` 固化进 map，下次直接 `run_workflow` 命中。每次视觉成本都摊销到永久 map 资产上。**建 map 时按 [`references/map-design.md`](references/map-design.md) 的 13 项 checklist 走**——不只是 anchors+controls，还有 regions / kbd / collection / postcondition / risk_level / parent_state_id 等组合，漏一个 map 复用价值就少一截。
 3. **稳定窗口 + 归一化坐标**：目标窗口被迁到主屏 display 工作区中心，**完整可见**；所有动作用客户区归一化坐标。**不创建虚拟显示器**（macOS / Windows public API 都不可靠）。
 4. **失败先 repair 后 snapshot**：runtime 内置 L0–L3 修复 ladder；先调 `repair_minimal`，修不好才看图诊断。
 5. **高风险必审批**：`destructive` / `requires_confirmation` 必须经审批通道；不绕验证码、不跳 2FA。
+6. **跨平台同接口**：CLI / MCP 工具在 macOS / Windows 同名同语义；用 modifier 时按平台传 params（`cmd` vs `ctrl`）— 见 §8 平台差异。
 
 ## 2. 工作流：用户意图选入口，路径上混合
 
@@ -83,14 +84,43 @@ Trust 渐进：`session_only`（默认，本次会话） → `trusted`（用户�
 - `vision-mcp://apps/{id}/patches` — 已应用 patches
 - `vision-mcp://apps/{id}/traces/latest` — 最近 trace
 
-## 8. 进一步阅读
+## 8. 平台差异速查（macOS ↔ Windows）
 
+CLI / MCP 工具 **API 同接口**；以下是底层和 modifier 差异，写跨平台 workflow / 调命令时注意：
+
+| 行为 | macOS | Windows |
+| ---- | ----- | ------- |
+| Modifier 键 | `cmd` / `option` / `cmd+[` (Back) | `ctrl` / `alt` / `alt+left` (Back) |
+| AX 拿不到内容时 fallback | osascript adapter / Vision OCR | MSAA (`ax.dump_msaa`) / Windows.Media.Ocr |
+| 强制窗口前台 | `NSWorkspace.activate` | `SwitchToThisWindow` (Alt+Tab API) — UIPI 锁前台时需要 |
+| 屏外/被遮挡窗口 OCR | screencapture window mode | `ocr.recognize_window` (PrintWindow path) |
+| 中文输入 | NSPasteboard 粘贴 | SendInput VK_PACKET（绕过 IME，不污染剪贴板） |
+| 高完整度 app（任务管理器/反作弊） | 系统权限弹窗 + Accessibility 授权 | UIPI 拒绝；vision-mcp 整个进程需 elevated |
+| 现代截图 API | ScreenCaptureKit (macOS 14+) | PrintWindow PW_RENDERFULLCONTENT |
+| CEF/Chromium app (Steam/Discord/Edge/VSCode) | AX 树常缺；走 OCR | UIA 只看到 `Chrome_RenderWidgetHostHWND` 空壳；**必走 OCR + bbox** |
+| 健康检查 | `health.snapshot` (mach_task_basic_info) | `health.snapshot` (GetGuiResources + GDI/USER handle) |
+| 安装诊断 | xcode-select 检测 | `vision-mcp doctor` 检测 PS5.1 / OCR 语言 / elevation |
+
+跨平台 workflow 用 `kbd` region + step.params 传 combo：
+
+```yaml
+# region 不绑 combo；workflow step 按平台传
+steps:
+  - action_id: kbd.save
+    params: { combo: "ctrl+s" }   # macOS 改 "cmd+s"
+```
+
+或 `app.platform: any` 时为两平台分别写 workflow。详细底层差异见 `references/platform-{macos,windows}.md`。
+
+## 9. 进一步阅读
+
+- **[`references/map-design.md`](references/map-design.md)** ⭐ — 建 map 实战 patterns + 反模式 + 13 项 checklist（regions / kbd / collection / postcondition / risk_level / parent_state_id 何时用）
 - [`references/workflow.md`](references/workflow.md) — 任务驱动 vs 探索驱动决策树、副产品、反模式
 - [`references/patches.md`](references/patches.md) — 持续修正：4 种 patch 类型 / trust 升级
 - [`references/schema.md`](references/schema.md) — vision-mcp.yaml 字段速查
 - [`references/repair-policy.md`](references/repair-policy.md) — L0–L3 repair ladder
 - [`references/safety.md`](references/safety.md) — 高风险动作 / prompt injection 防护
 - [`references/platform-macos.md`](references/platform-macos.md) — macOS 适配器 / SCKit / AX-press
-- [`references/platform-windows.md`](references/platform-windows.md) — Windows 适配器 / PrintWindow / UIA
+- [`references/platform-windows.md`](references/platform-windows.md) — Windows 适配器 / PrintWindow / UIA + MSAA / Windows.Media.Ocr / SwitchToThisWindow
 - [`assets/vision-mcp.schema.json`](assets/vision-mcp.schema.json) — 完整 JSON Schema
 - [`assets/review-report-template.md`](assets/review-report-template.md) — 人类审阅模板

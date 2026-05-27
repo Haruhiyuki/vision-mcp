@@ -59,11 +59,15 @@
 
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
-| `button` | enum | `left` / `right` / `middle`。 |
-| `modifiers` | enum[] | `ctrl` / `shift` / `alt` / `meta`。 |
-| `click_count` | number | 双击传 2。 |
+| `button` | enum | `left` / `right` / `middle`（跨平台） |
+| `modifiers` | enum[] | `ctrl` / `shift` / `alt` / `meta` / `cmd` / `win` / `option`（跨平台；helper 内按平台映射 VK 码 / CGKeyCode） |
+| `click_count` | number | 双击传 2 |
 
-macOS 高级：可单独调 `axPressInWindow(handle, norm)`（DarwinHelperAdapter 暴露）或 CLI `ax-press` 子命令——用 AX 直接对窗口内 norm 位置元素发 AXPress，不依赖鼠标坐标。适用有 `AXPress` action 的元素（菜单 / 工具栏 / 普通按钮）。对 NSTableView cell / SwiftUI 自绘元素无效。
+**AX-press**（macOS / Windows 通用 — 用 AX/UIA 直接对 norm 位置元素发 invoke，不依赖鼠标）：
+- CLI `ax-press <app> --norm x,y` 或 adapter.axPressInWindow(handle, norm)
+- macOS：`AXPress` action；适用菜单 / 工具栏 / 普通 AXButton
+- Windows：UIA `InvokePattern` → fallback `SelectionItemPattern` → `TogglePattern` → `ExpandCollapsePattern`
+- 共同**不适用**：CEF/Chromium 网页内容（Windows: `Chrome_RenderWidgetHostHWND` 空壳；macOS: AX 树缺）+ DirectX 游戏自绘 + macOS NSTableView cell / SwiftUI 自绘
 
 ## Region（v0.3 新增）
 
@@ -143,14 +147,20 @@ runtime 按 enumeration 把 N 解到具体 cell 的 bbox。
 
 ## Locator 类型
 
-| type | 主要字段 |
-| ---- | -------- |
-| `accessibility` | `role`, `name`, `name_regex`, `name_not`, `automation_id`, `class_name`, `description`, `description_regex`, `description_not`, `index` |
-| `ocr_text` | `text`, `match`(`exact`/`contains`/`regex`), `min_confidence`, `search_region` |
-| `nearby_text` | `text`, `direction`, `max_distance_norm`（要求控件有 `visual.bbox_norm` 作 pivot） |
-| `image_patch` | `file`, `hash`, `min_similarity` |
-| `bbox_norm` | `value`（兜底） |
-| `vlm` | `prompt`, `hint_bbox_norm`, `cost_budget_usd`（受 safety_policy.allow_cloud_vlm 控制） |
+| type | 主要字段 | 跨平台备注 |
+| ---- | -------- | --------- |
+| `accessibility` | `role`, `name`, `name_regex`, `name_not`, `automation_id`, `class_name`, `description`, `description_regex`, `description_not`, `index` | macOS：AX 命名（AXButton/AXCell/...）；Windows：UIA ControlType 自动映射成 AX 名（WindowsAccessibilityProvider 做的）；`automation_id` 仅 Windows 有效。**CEF/Chromium app 在两平台都拿不到**——必走 OCR + bbox |
+| `ocr_text` | `text`, `match`(`exact`/`contains`/`regex`), `min_confidence`, `search_region` | macOS：Vision framework；Windows：Windows.Media.Ocr WinRT（需装语言包 — 见 `platform-windows.md §7`） |
+| `nearby_text` | `text`, `direction`, `max_distance_norm`（要求控件有 `visual.bbox_norm` 作 pivot） | 跨平台；适合 "标签 + 输入框" 布局（ERP / 表单） |
+| `image_patch` | `file`, `hash`, `min_similarity` | 跨平台；适合 icon-only 按钮（⚙ / ▶ / X）无文字无 AX |
+| `bbox_norm` | `value`（兜底） | 跨平台；总是最后一档；UI 偏移 patch 时只动这个 |
+| `vlm` | `prompt`, `hint_bbox_norm`, `cost_budget_usd`（受 safety_policy.allow_cloud_vlm 控制） | 跨平台；默认 disabled |
+
+**按 app 类型选 locator 链长度**（详 [`map-design.md §4`](map-design.md)）：
+- 原生 Win32 / WinForms / WPF：`automation_id → role+name → ocr_text → bbox_norm`（4 档）
+- 原生 macOS AppKit：`role+name/description → ocr_text → bbox_norm`（3 档）
+- **CEF / Chromium**（Steam/Discord/VS Code/Edge）：`ocr_text exact → ocr_text contains → bbox_norm`（无 accessibility）
+- SwiftUI 自绘 / DirectX：`ocr_text → nearby_text → bbox_norm` 或 `image_patch + vlm` 兜底
 
 ## Condition / Postcondition 类型
 

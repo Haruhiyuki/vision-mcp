@@ -82,12 +82,40 @@ swiftc -O -o vision-mcp-helper src/main.swift \
 
 CLI 默认：`autoAttach=true autoMigrate=false`——snapshot / click 等命令只 attach 不重新 migrate，避免反复打扰用户。`vision-mcp build` 与 `vision-mcp capsule` 显式触发 migrate。
 
-## 8. 已知限制
+## 8. OCR：Vision framework
 
-- 不创建系统虚拟显示器（设计文档 §9.5）；窗口总是显示在用户主屏。
-- 全屏 / Spaces：迁移前必须退出全屏。运行时如发现 `is_fullscreen=true` 会标记 `GEOMETRY_MISMATCH`。
-- 多 Spaces：跨 Space 操作行为不稳定；建议把 capsule 与目标窗口固定在同一 Space。
-- 系统弹窗（权限、Touch ID、登录钥匙串）：属于 `system_modal` state，禁止自动处理。
-- SCKit 在 macOS 14+ 可用；macOS 13 及更早自动 fallback `screencapture -R`。
-- macOS NSTableView cell（如 Apple Music sidebar）不响应 `AXPress`，必须用普通 `click`。
-- 部分应用（如 Apple Music 新版搜索）用 SwiftUI 自绘，AX 不暴露 SearchField，type 无法 focus；需视觉判断 click 位置。
+`ocr.recognize_rect rect` — `VNRecognizeTextRequest` (accurate path)。
+
+- 1280×800 区域 ~150-300ms（CPU），首次冷启动多 ~200ms
+- 自动识别中英文（无需额外语言包）
+- 返回 per-word `confidence`（Windows.Media.Ocr 没有）
+- 走 `screencapture` 抓 rect → Vision OCR；目标窗口需可见前台
+
+CLI `click-text` 在 macOS 上走这条；屏外窗口 OCR 尚不直接支持（Windows 走 PrintWindow + WinRT 实现了；macOS roadmap）。
+
+## 9. 已知限制
+
+- 不创建系统虚拟显示器（设计文档 §9.5）；窗口总是显示在用户主屏
+- 全屏 / Spaces：迁移前必须退出全屏。`is_fullscreen=true` 标 `GEOMETRY_MISMATCH`
+- 多 Spaces：跨 Space 操作不稳定；建议 capsule + 目标窗口同 Space
+- 系统弹窗（权限、Touch ID、登录钥匙串）：`system_modal` state，禁止自动处理
+- SCKit macOS 14+ 可用；macOS 13 及更早自动 fallback `screencapture -R`
+- **NSTableView cell**（Apple Music sidebar 等）不响应 `AXPress`，必须 `click`
+- **SwiftUI 自绘**（Apple Music 新版搜索 / Notes）AX 不暴露 SearchField，type 无法 focus；视觉判断 click 位置
+- **CEF/Chromium app**（Discord / VS Code / Edge）在 macOS 同样 AX 树缺；走 OCR + bbox 见 `map-design.md §4`
+
+## 10. 平台差异速查（跟 Windows 对照）
+
+| 行为 | macOS | Windows |
+| ---- | ----- | ------- |
+| Modifier 键 | `cmd+s` `cmd+f` `cmd+[` | `ctrl+s` `ctrl+f` `alt+left` |
+| Back 导航 | `cmd+[` / 工具栏 ◁ | `alt+left` / 浏览器 Back |
+| 关菜单 / 模态 | `Escape` | `Escape` |
+| AX 拿不到内容时 | osascript / Vision OCR 兜底 | MSAA / Windows.Media.Ocr 兜底 |
+| 强制窗口前台 | `NSWorkspace.activate` | `SwitchToThisWindow` (Alt+Tab API) |
+| 现代截图 API | ScreenCaptureKit (macOS 14+) | PrintWindow PW_RENDERFULLCONTENT (Win 8.1+) |
+| 中文输入 | NSPasteboard 粘贴 | SendInput VK_PACKET（绕过 IME） |
+| 屏外 / 被遮挡 OCR | screencapture window mode | PrintWindow → OcrEngine（专用 `ocr.recognize_window`） |
+| 健康检查 | `health.snapshot` (mach_task_basic_info) | `health.snapshot` (GetGuiResources GDI/USER) |
+
+写 cross-platform workflow 时把 modifier 写进 step.params 由 agent 按平台传，或 `app.platform: any` 时为两平台分别给一份 workflow。详 SKILL §8。

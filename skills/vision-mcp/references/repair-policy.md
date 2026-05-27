@@ -48,6 +48,19 @@ repair_policy:
 - 出现 system_modal / 验证码 / 登录异常 / 权限弹窗：禁止任何自动修复。
 - 当前截图与已知 state 的相似度全部低于 `state.min_visual_similarity` 与 `min_ocr_similarity`。
 
+## 平台差异
+
+L0-L1（geometry / raise）的 helper 实现按平台不同：
+
+| 阶 | macOS | Windows |
+| -- | ----- | ------- |
+| L1 raise | `NSWorkspace.activate` | `SwitchToThisWindow`（Alt+Tab API）→ AttachThreadInput → Alt-key 抖动 → minimize+restore 4 招 |
+| L1 强制前台 | 系统直接放行 | UIPI 可能拒；要求 vision-mcp 进程是终端前台子进程 |
+| L1 移窗口 | AX `setPosition/setSize` | `MoveWindow` + `Raise-Window-Strong` |
+| L3 locator fallback | OCR via Vision framework | OCR via Windows.Media.Ocr + UIA→MSAA 自动降级 |
+
+repair_policy 的阈值字段（`min_anchor_score` 等）跨平台同语义；helper 内部实现差异不影响 agent 调用。
+
 ## Patch 生命周期
 
 1. runtime 修复后写 `patches/<date>-<slug>.yaml`，trust 默认 `session_only`。

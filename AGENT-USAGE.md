@@ -250,23 +250,77 @@ vision-mcp click apple-music --norm "0.407,0.178" --count 2
 
 ### 4.3 **纯视觉**流程（AX 不可用时也能工作）
 
-某些 app（游戏、自绘 UI）不暴露 AX，必须靠视觉。这里展示同样目的的纯视觉路径——**只看截图估坐标**：
+某些 app（游戏、自绘 UI、CEF/Chromium）不暴露 AX，必须靠视觉 + OCR。这里展示同样目的的纯视觉路径——**只看截图估坐标**或用 `annotated` 拿网格：
 
 ```bash
+# 方法 A：纯视觉估坐标
 vision-mcp snapshot apple-music --out /tmp/v1.png      # 只看 v1.png，不解析 AX
 # Agent 看图：sidebar 左侧第 7 项是"艺人"，估计中心 ≈ (0.085, 0.305)
 vision-mcp click apple-music --norm "0.085,0.305"
 vision-mcp snapshot apple-music --out /tmp/v2.png      # 验证：艺人页打开了
 
-# 如果 click 没生效（cell 密集时常见）：调坐标重试
-vision-mcp click apple-music --norm "0.085,0.31"
-vision-mcp snapshot apple-music --out /tmp/v3.png
+# 方法 B：annotated 拿"网格 + #N 候选框"
+vision-mcp annotated apple-music --out /tmp/a.png --grid-step 0.1
+# Agent 看图：第 7 个候选框是"艺人"（label 直接标在框上）
+vision-mcp click apple-music --norm "0.085,0.305"
 ```
 
 **实测过程中真实发现的坑**：
-- Sidebar 4 个紧邻 cell 每个仅 32px 高 → norm 0.04，人眼估计经常偏 1-2 cells。
-- Apple Music 在搜索激活状态下，sidebar 的"主页"cell 即使 click 命中位置也不响应（应用层逻辑）。
-- → 在这种边缘情况下，AX 校准 + 视觉验证 双轨流程比纯视觉/纯 AX 都稳健。
+- Sidebar 4 个紧邻 cell 每个仅 32px 高 → norm 0.04，人眼估计经常偏 1-2 cells
+- Apple Music 在搜索激活状态下，sidebar 的"主页"cell 即使 click 命中位置也不响应（应用层逻辑）
+- → 这种边缘情况下，AX 校准 + 视觉验证 双轨流程比纯视觉/纯 AX 都稳健
+
+### 4.4 Windows + CEF 实战：Steam 库导航
+
+Steam 是 Chromium-based（CEF）— UIA 树只看到 `Chrome_RenderWidgetHostHWND` 空壳，必走 OCR + bbox 视觉路线。完整 map 见 [`examples/steam-windows/vision-mcp.yaml`](examples/steam-windows/vision-mcp.yaml)（504 行，涵盖 region / collection / multi-state menu/dialog / destructive workflow）。
+
+任务驱动调用（map 已建好）：
+
+```powershell
+# 切到库
+vision-mcp workflow steam --id open_library --approve-all
+# → succeeded: true (1 step)
+
+# 多步 sediment 链：切库 + 开 filter
+vision-mcp workflow steam --id open_library_filter --approve-all
+# → succeeded: true (2 steps)
+
+# 用 OCR click 定位动态文字（workflow.locator 不支持 {{}}，动态文本走 click-text 命令式）
+vision-mcp click-text steam --text "Soundpad"
+# → ok:true, point:(749,671), 1.8s 跳到 Soundpad 详情页
+# Windows 上 click-text 自动走 PrintWindow OCR，屏外 / 后台窗口都能用
+
+# destructive：4 步链 + 每步 approval_required
+vision-mcp workflow steam --id uninstall_first_installed_game \
+  --inputs '{"game_name":"Portal 2"}' --approve-all
+# → library → context_menu → manage_submenu → uninstall_confirm → 卸载完成
+```
+
+探索驱动（建 map 时）：
+
+```powershell
+# 1. 自检 helper 可用 + OCR 语言装好
+vision-mcp doctor
+# → ✅ powershell: 5.1 / ✅ ocr.languages: en-US,zh-Hans-CN / ...
+
+# 2. 看现状 + 注释图
+vision-mcp annotated steam --out /tmp/anno.png --grid-step 0.1
+# Agent 看图：#3 是"库" tab，#8 是"游戏和软件"下拉
+
+# 3. 自动建图（Discoverer BFS）— Windows 也跑了
+vision-mcp discover steam --max-clicks 20 --max-depth 2
+
+# 4. 偏差固化（patch）
+vision-mcp patch steam --state top_nav --control store_tab \
+  --bbox-norm "0.034,0.054,0.024,0.022" \
+  --reason "实测：annotated 后微调"
+```
+
+**实测过程中真实发现的坑**：
+- CEF app 的 UIA 完全无效 → `accessibility` locator 不要写；用 `ocr_text exact min_confidence: 0.7+ → ocr_text contains → bbox_norm` 三档
+- Steam 最小窗口 ~1364×810 — `visual_box.display` 用实测尺寸，`tolerate_client_size_delta_px` 放宽到 80
+- UIPI 锁前台时 vision-mcp 必须是终端的前台子进程（自动化场景需考虑）
+- 卸载 / 删除等 destructive 必须 `risk_level: destructive` + `approval_required: true` + `on_failure: abort`（详 [`map-design.md §7`](skills/vision-mcp/references/map-design.md)）
 
 ## 5. 重要细节 / 避坑
 

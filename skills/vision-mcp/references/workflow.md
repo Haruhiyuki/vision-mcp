@@ -102,7 +102,68 @@ run_workflow / perform_action 链
 
 ## 8. 视觉为主路径的优先级（遇 unknown / 失败时）
 
-- 第一选择 — **视觉**：snapshot 拿 PNG，自己看图估归一化坐标
-- 第二选择 — **AX 校准**：原生 app 的 candidates 给精确 bbox
+- 第一选择 — **视觉**：snapshot 拿 PNG，自己看图估归一化坐标；不确定时用 `annotated` 拿"网格 + #N 候选框"
+- 第二选择 — **AX/OCR 校准**：原生 app 的 AX candidates 给精确 bbox；CEF/自绘 UI 用 OCR (`click-text` / `recognize_window`)
 - 第三选择 — **失败重试**：click 没生效 → snapshot 再看 → 调坐标
-- **macOS 高级**：有 `AXPress` 的元素（菜单/工具栏/普通按钮）可用 `ax-press` 零鼠标干预；NSTableView cell / SwiftUI 自绘元素不响应，仍用普通 click
+- **AX-press**（macOS / Windows 通用）：有 `InvokePattern` 的元素（菜单/工具栏/普通按钮）可用 `ax-press` 零鼠标干预
+  - **macOS** 不适用：NSTableView cell / SwiftUI 自绘元素
+  - **Windows** 不适用：CEF/Chromium 网页内容（UIA 空壳）+ DirectX 游戏自绘 UI
+
+## 9. workflow step 高级字段（建 workflow 时易漏）
+
+step 是 `{ action_id, params?, approval_required?, on_failure?, timeout_ms? }` 而不是只有 action_id：
+
+```yaml
+steps:
+  - action_id: top_nav.library_tab
+    on_failure: repair          # 失败 runtime 跑 repair_minimal L0-L3
+  - action_id: game_submenu.uninstall
+    approval_required: true     # destructive：step 级临时确认
+    on_failure: abort           # destructive 失败绝不重试
+  - action_id: search_bar.input
+    params:
+      text: "{{keyword}}"       # workflow.inputs.keyword 插值
+      clear_first: true
+```
+
+`on_failure`：`abort` (destructive 用) / `ask_user` / `repair` / `skip`
+
+**关键陷阱：`{{}}` 模板只在 step.params 生效**，**不**在 control.locator 里插值。动态文本目标（"找到游戏 X"）走 `click-text` 命令式，workflow 只覆盖固定 UI 元素。详 [`map-design.md §10`](map-design.md)。
+
+## 10. 跨平台 workflow
+
+modifier 键和快捷键命名按平台不同（cmd vs ctrl / cmd+[ vs alt+left）。两种写法：
+
+**方式 A**：control 不绑 combo，step.params 按平台传
+
+```yaml
+regions:
+  - id: kbd
+    controls:
+      - id: save
+        role: button
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+
+workflows:
+  - id: save_doc
+    steps:
+      - action_id: kbd.save
+        params: { combo: "ctrl+s" }   # Windows；macOS 改 "cmd+s"
+```
+
+**方式 B**：`app.platform: any` + 分别写两条 workflow
+
+```yaml
+workflows:
+  - id: save_doc_macos
+    steps:
+      - action_id: kbd.save
+        params: { combo: "cmd+s" }
+  - id: save_doc_windows
+    steps:
+      - action_id: kbd.save
+        params: { combo: "ctrl+s" }
+```
+
+agent 按 `app.platform` 选 workflow。详细差异 SKILL §8。
