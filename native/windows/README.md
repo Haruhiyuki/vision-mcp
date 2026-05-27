@@ -52,6 +52,9 @@ $env:VISION_MCP_NATIVE_HELPER = "C:\path\to\src\vision-mcp-helper.ps1"
 | `input.scroll` | `mouse_event(MOUSEEVENTF_WHEEL)` | < 10ms |
 | **`input.drag`** | `SetCursorPos` 逐步 + `mouse_event(LEFT_DOWN/MOVE/UP)` | 200ms（默认 duration） |
 | **`input.ax_press`** | `AutomationElement.FromPoint(x,y)` + `InvokePattern → SelectionItem → Toggle → ExpandCollapse` 依次尝试 | < 30ms |
+| **`ax.dump_msaa`** | `AccessibleObjectFromWindow + AccessibleChildren` MSAA fallback；`ax.dump` 在 UIA 节点 < 3 时也会自动走这条 | < 30ms |
+| **`ocr.recognize_rect`** | `Windows.Media.Ocr` WinRT（懒加载）+ GDI `CopyFromScreen` + `BitmapDecoder` → `SoftwareBitmap` → `OcrEngine.RecognizeAsync` | 120-180ms（1200x600 含约 160 词） |
+| **`ocr.languages`** | `AvailableRecognizerLanguages`（设置 → 时间和语言 → 添加语言） | < 10ms |
 | `input.subscribe` | no-op（lease 用键盘热键打断） | - |
 
 ## 4. 与 macOS helper 等价的 protocol
@@ -81,12 +84,12 @@ $env:VISION_MCP_NATIVE_HELPER = "C:\path\to\src\vision-mcp-helper.ps1"
 
 ## 6. 已知限制 / 未实现
 
-- **OCR**：Windows 10+ 自带 `Windows.Media.Ocr` 但 WinRT 难直接从 PowerShell 调；生产建议 C# 包装。MVP 用 cloud OCR provider。
-- **AX 树 dump 性能**：UIA TreeWalker 对深层窗口（Chrome 等）可能 > 1s；helper 默认限制 maxNodes=500、maxDepth=6。
+- **OCR 走 GDI screen pixels**：`Windows.Media.Ocr` 需要 SoftwareBitmap，目前 helper 用 `CopyFromScreen` 抓——目标窗口必须可见 + 前台；屏外 workspace OCR 不到（roadmap：feed PrintWindow bitmap 到 OCR engine）。
+- **AX 树 dump 性能**：UIA TreeWalker 对深层窗口（Chrome 等）可能 > 1s；helper 默认 maxNodes=300、maxDepth=5（比 macOS 保守）。
 - **IDD 虚拟显示器**：需要驱动签名 + 企业部署，**不在 MVP**；生产可与 IddCx sample 集成。
-- **Windows.Graphics.Capture (WGC)**：比 BitBlt 快 5–10x、能抓 DirectX 窗口，但需要 WinRT 绑定（C# 包装更简洁）。MVP 用 `PrintWindow`。
-- **`SendKeys`** 对 elevated app 失败：用 `SendInput INPUT` API 更稳，但映射工作量大；当前已 cover 大多数键。
-- **DPI manifest**：ps2exe 编译版需要在 manifest 里声明 `<dpiAwareness>PerMonitorV2</dpiAwareness>` 才完全准确（启动期 `SetProcessDpiAwareness` API 调用一般够用）。
+- **Windows.Graphics.Capture (WGC)**：比 PrintWindow 快 5-10x、能抓 DirectX 窗口，但需要 WinRT IDirect3D 包装（C# / Rust 更简洁）。MVP 用 `PrintWindow`。
+- **PS5.1 + WinRT 限制**：所有 IAccessible 互操作和 IAsyncOperation→Task 转换都包在 C# Add-Type 里（PS 直接 cast `System.__ComObject` 到 `Accessibility.IAccessible` 抛 InvalidCastException）。修改 helper 时注意。
+- **CEF / Chromium-based app**（Steam / Discord / VS Code / Edge）：UIA 只看到 `Chrome_RenderWidgetHostHWND` 空壳，DOM 元素不可见。走 OCR + click 视觉路线，或等 CEF 启 UIA accessibility bridge。
 
 ## 7. 性能基准（PowerShell 5.1 + Win10）
 

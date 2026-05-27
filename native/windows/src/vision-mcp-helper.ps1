@@ -14,21 +14,24 @@
 # 当前实现的 RPC（与 macOS helper 同协议）：
 #   version
 #   capsule.list_displays / capsule.ensure_virtual_display / capsule.ensure_workspace_display
-#   window.list / window.get / window.move / window.restore / window.activate / window.raise
+#   window.list (filter.include_invisible 可选) / window.get / window.move / window.restore
+#       / window.activate / window.raise
 #   capture.rect / capture.rect_annotated / capture.window / capture.display
-#   ax.dump                              ← UI Automation tree dump
-#   input.click / input.type / input.key / input.scroll / input.drag
+#   ax.dump                              ← UI Automation tree dump（auto fallback MSAA）
+#   ax.dump_msaa                         ← 强制 MSAA dump（老 Win32 / GDI 自绘 app）
+#   ocr.recognize_rect / ocr.languages   ← Windows.Media.Ocr WinRT（zh-Hans-CN / en-US 等）
+#   input.click (modifiers 支持) / input.type / input.key / input.scroll / input.drag
 #   input.ax_press                        ← UI Automation InvokePattern (等价 macOS AXPress)
 #   input.subscribe                       ← no-op（设计文档 §8 lease 用键盘热键打断）
 #
 # 已知限制（Windows 平台特性）：
-#   - UAC 高完整度等级 app（任务管理器等）：SendInput 会被拒绝。需要 helper 以
-#     管理员身份运行才能注入到这类窗口。
-#   - DPI per-monitor：本 helper 默认按 96 DPI 报告；进程必须声明
-#     PROCESS_PER_MONITOR_DPI_AWARE 才能拿真实 DPI（生产应用 manifest 声明）。
-#   - 反作弊 / 游戏全屏：SendInput / BitBlt 都可能被拒；建议跳过这类 app。
-#   - BitBlt 抓 GPU 加速窗口（DirectX）可能黑屏；生产建议切到 Windows.Graphics.Capture
-#     （需要 C# / Rust 编译，PowerShell 难直接调）。
+#   - UAC 高完整度等级 app（任务管理器 / 反作弊）：SendInput 被 UIPI 拒绝。需要整个
+#     vision-mcp 进程（Node + helper）以管理员身份运行才能注入这类窗口。
+#   - DPI per-monitor：本 helper 启动期调 SetProcessDpiAwareness(2) 拿真 per-monitor DPI。
+#   - PrintWindow 抓 DirectX / Chromium GPU 渲染窗口可能拿到部分黑屏；roadmap WGC。
+#   - OCR 走 GDI CopyFromScreen → 目标窗口必须可见 + 前台；屏外 workspace 失效。
+#   - Steam / Discord / VS Code 等 CEF app：UIA 只看到 Chrome_RenderWidgetHostHWND
+#     空壳容器，DOM 元素需走 OCR + click 视觉路线（已实测 click-text 中英文 OK）。
 
 # ---------- 启动期：UTF-8 stdout，避免中文窗口标题 / OCR 文本乱码 ----------
 # 必须在任何 Send-Result 之前设置；ps2exe 产物没有 profile.ps1 不会自动配。
@@ -317,11 +320,16 @@ function List-Displays {
 # ---------- Windows ----------
 
 function List-Windows($filter) {
+    # filter.include_invisible: 默认 false（只列可见 + 有标题的窗口；标准 agent flow）。
+    # 若想抓 hidden modal dialogs（如 Steam 卸载对话框被预创建在 -32000,-32000）
+    # 或没标题的 popup 菜单，传 include_invisible: true。
+    $script:includeInvisible = $false
+    if ($filter -and $filter.include_invisible) { $script:includeInvisible = [bool]$filter.include_invisible }
     $cb = [Win32+EnumWindowsProc] {
         param($hWnd, $lParam)
-        if (-not [Win32]::IsWindowVisible($hWnd)) { return $true }
+        if (-not $script:includeInvisible -and -not [Win32]::IsWindowVisible($hWnd)) { return $true }
         $len = [Win32]::GetWindowTextLength($hWnd)
-        if ($len -eq 0) { return $true }
+        if (-not $script:includeInvisible -and $len -eq 0) { return $true }
         $sb = New-Object System.Text.StringBuilder ($len + 1)
         [Win32]::GetWindowText($hWnd, $sb, $sb.Capacity) | Out-Null
         $title = $sb.ToString()
@@ -587,21 +595,66 @@ function New-MouseInput([uint32]$flags) {
     return $i
 }
 
-# Post-Click：SendInput 路径替 mouse_event。
+# 把 modifier 名字列表 → VK 数组（用于 click + modifiers / drag + modifiers）
+function Get-ModifierVks($modifiers) {
+    $vks = New-Object System.Collections.ArrayList
+    if (-not $modifiers) { return $vks }
+    foreach ($m in $modifiers) {
+        switch ($m.ToString().ToLower()) {
+            "cmd"     { [void]$vks.Add([uint16]0x5B) }  # VK_LWIN
+            "win"     { [void]$vks.Add([uint16]0x5B) }
+            "meta"    { [void]$vks.Add([uint16]0x5B) }
+            "ctrl"    { [void]$vks.Add([uint16]0x11) }  # VK_CONTROL
+            "control" { [void]$vks.Add([uint16]0x11) }
+            "shift"   { [void]$vks.Add([uint16]0x10) }
+            "alt"     { [void]$vks.Add([uint16]0x12) }
+            "option"  { [void]$vks.Add([uint16]0x12) }
+        }
+    }
+    return $vks
+}
+
+# Post-Click：SendInput 路径替 mouse_event，支持 modifier 键（Cmd-Click 等）。
 # mouse_event 在 Win 10+ 文档已 deprecated；SendInput 是唯一受 UIPI 完整管的路径
 # （即 elevated app 也允许我们的 elevated helper 注入；提升 vision-mcp 父进程
 # 权限即可）。
-function Post-Click($point, $button = "left", $count = 1) {
+function Post-Click($point, $button = "left", $count = 1, $modifiers = $null) {
     [Win32]::SetCursorPos([int]$point.x, [int]$point.y) | Out-Null
     $down = if ($button -eq "right") { 0x0008 } elseif ($button -eq "middle") { 0x0020 } else { 0x0002 }
     $up   = if ($button -eq "right") { 0x0010 } elseif ($button -eq "middle") { 0x0040 } else { 0x0004 }
     $size = [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])
+    $modVks = Get-ModifierVks $modifiers
+    # 1. 按下所有 modifier 键
+    if ($modVks.Count -gt 0) {
+        $arr = New-Object 'Win32+INPUT[]' $modVks.Count
+        for ($j = 0; $j -lt $modVks.Count; $j++) {
+            $i = New-Object Win32+INPUT
+            $i.type = 1; $i.u.ki.wVk = $modVks[$j]; $i.u.ki.wScan = 0
+            $i.u.ki.dwFlags = 0; $i.u.ki.time = 0; $i.u.ki.dwExtraInfo = [IntPtr]::Zero
+            $arr[$j] = $i
+        }
+        [Win32]::SendInput($modVks.Count, $arr, $size) | Out-Null
+        Start-Sleep -Milliseconds 20
+    }
+    # 2. click（含 multi-click）
     for ($i = 0; $i -lt $count; $i++) {
         $arr = New-Object 'Win32+INPUT[]' 2
         $arr[0] = New-MouseInput $down
         $arr[1] = New-MouseInput $up
         [Win32]::SendInput(2, $arr, $size) | Out-Null
         if ($i -lt $count - 1) { Start-Sleep -Milliseconds 50 }
+    }
+    # 3. 反序松开 modifier 键
+    if ($modVks.Count -gt 0) {
+        Start-Sleep -Milliseconds 20
+        $arr = New-Object 'Win32+INPUT[]' $modVks.Count
+        for ($j = $modVks.Count - 1; $j -ge 0; $j--) {
+            $i = New-Object Win32+INPUT
+            $i.type = 1; $i.u.ki.wVk = $modVks[$j]; $i.u.ki.wScan = 0
+            $i.u.ki.dwFlags = 0x0002; $i.u.ki.time = 0; $i.u.ki.dwExtraInfo = [IntPtr]::Zero
+            $arr[$modVks.Count - 1 - $j] = $i
+        }
+        [Win32]::SendInput($modVks.Count, $arr, $size) | Out-Null
     }
 }
 
@@ -1088,7 +1141,8 @@ while ($true) {
             "input.click" {
                 $button = if ($p.button) { $p.button } else { "left" }
                 $count  = if ($p.click_count) { [int]$p.click_count } else { 1 }
-                Post-Click $p.point $button $count
+                $mods   = if ($p.modifiers) { $p.modifiers } else { $null }
+                Post-Click $p.point $button $count $mods
                 Send-Result $id @{ ok = $true; via = "send_input" }
                 break
             }
