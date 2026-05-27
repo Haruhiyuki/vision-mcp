@@ -91,11 +91,50 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
   }
 
   async captureWindow(handle: string): Promise<Frame> {
-    return this.bridge.request<Frame>("capture.window", { handle }, 15_000);
+    // helper 返回 {png_base64, width, height, via?}；adapter 负责解 PNG → RGBA Frame
+    const r = await this.bridge.request<{ png_base64: string; width: number; height: number; via?: string }>(
+      "capture.window",
+      { handle },
+      15_000,
+    );
+    const png = Buffer.from(r.png_base64, "base64");
+    const { width, height, pixels } = await decodePng(png);
+    return {
+      width_px: width,
+      height_px: height,
+      pixels,
+      captured_at: new Date().toISOString(),
+      source: "window",
+      client_rect_in_frame: { x: 0, y: 0, width, height },
+    };
   }
 
   async captureDisplay(displayId: string): Promise<Frame> {
-    return this.bridge.request<Frame>("capture.display", { displayId }, 15_000);
+    // 协议字段名 display_id（与 macOS swift helper 一致；老 ps1 同时兼容 displayId）。
+    const r = await this.bridge.request<{ png_base64: string; width: number; height: number; display_id?: string; scale?: number }>(
+      "capture.display",
+      { display_id: displayId },
+      15_000,
+    );
+    const png = Buffer.from(r.png_base64, "base64");
+    const { width, height, pixels } = await decodePng(png);
+    return {
+      width_px: width,
+      height_px: height,
+      pixels,
+      captured_at: new Date().toISOString(),
+      source: "display",
+      client_rect_in_frame: { x: 0, y: 0, width, height },
+    };
+  }
+
+  /** 给 OCR / annotated 等 provider 用的通用 bridge 调用（不破坏 bridge 生命周期封装）。 */
+  async helperRequest<T = unknown>(
+    method: string,
+    params: unknown = {},
+    timeoutMs = 15_000,
+  ): Promise<T> {
+    return this.bridge.request<T>(method, params, timeoutMs);
   }
 
   async click(point: { x: number; y: number }, opts?: InputClickOptions): Promise<void> {
@@ -177,4 +216,88 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
   async dispose(): Promise<void> {
     await this.bridge.dispose();
   }
+}
+
+// 复制自 darwin-helper.ts 的 PNG 解码（避免跨平台模块互引）。
+// 输入：标准 PNG bytes（IHDR/IDAT/IEND，RGB 或 RGBA 8-bit/channel）
+// 输出：RGBA Uint8Array（长度 = width * height * 4），不支持隔行 / 调色板。
+async function decodePng(buf: Buffer): Promise<{ width: number; height: number; pixels: Uint8Array }> {
+  const zlib = await import("node:zlib");
+  if (
+    buf.length < 8 ||
+    buf[0] !== 0x89 ||
+    buf[1] !== 0x50 ||
+    buf[2] !== 0x4e ||
+    buf[3] !== 0x47
+  ) {
+    throw new Error("not a PNG file");
+  }
+  let off = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  const idatChunks: Buffer[] = [];
+  while (off < buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString("ascii", off + 4, off + 8);
+    const data = buf.subarray(off + 8, off + 8 + len);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8];
+      colorType = data[9];
+    } else if (type === "IDAT") {
+      idatChunks.push(data);
+    } else if (type === "IEND") {
+      break;
+    }
+    off += 12 + len;
+  }
+  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
+    return { width: width || 1, height: height || 1, pixels: new Uint8Array(4) };
+  }
+  const channels = colorType === 6 ? 4 : 3;
+  const raw = zlib.inflateSync(Buffer.concat(idatChunks));
+  const stride = width * channels;
+  const pixels = new Uint8Array(width * height * 4);
+  let src = 0;
+  const prevLine = new Uint8Array(stride);
+  const currLine = new Uint8Array(stride);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[src++];
+    for (let i = 0; i < stride; i++) {
+      const a = i >= channels ? currLine[i - channels] : 0;
+      const b = prevLine[i];
+      const c = i >= channels ? prevLine[i - channels] : 0;
+      let value = raw[src + i];
+      switch (filter) {
+        case 0: break;
+        case 1: value = (value + a) & 0xff; break;
+        case 2: value = (value + b) & 0xff; break;
+        case 3: value = (value + Math.floor((a + b) / 2)) & 0xff; break;
+        case 4: {
+          const p = a + b - c;
+          const pa = Math.abs(p - a);
+          const pb = Math.abs(p - b);
+          const pc = Math.abs(p - c);
+          const pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+          value = (value + pr) & 0xff;
+          break;
+        }
+      }
+      currLine[i] = value;
+    }
+    src += stride;
+    for (let x = 0; x < width; x++) {
+      const di = (y * width + x) * 4;
+      const si = x * channels;
+      pixels[di] = currLine[si];
+      pixels[di + 1] = currLine[si + 1];
+      pixels[di + 2] = currLine[si + 2];
+      pixels[di + 3] = channels === 4 ? currLine[si + 3] : 255;
+    }
+    prevLine.set(currLine);
+  }
+  return { width, height, pixels };
 }

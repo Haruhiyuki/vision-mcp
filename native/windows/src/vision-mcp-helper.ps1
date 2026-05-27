@@ -30,6 +30,22 @@
 #   - BitBlt 抓 GPU 加速窗口（DirectX）可能黑屏；生产建议切到 Windows.Graphics.Capture
 #     （需要 C# / Rust 编译，PowerShell 难直接调）。
 
+# ---------- 启动期：UTF-8 stdout，避免中文窗口标题 / OCR 文本乱码 ----------
+# 必须在任何 Send-Result 之前设置；ps2exe 产物没有 profile.ps1 不会自动配。
+try {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    [Console]::InputEncoding  = New-Object System.Text.UTF8Encoding($false)
+    $OutputEncoding = [Console]::OutputEncoding
+} catch { }
+
+# PowerShell 7 / pwsh.exe 无法 Add-Type UIAutomationClient（依赖 WPF / .NET Framework）。
+# 提前检测并给出可识别的错误码，让 NativeBridge 能 fallback 到 powershell.exe。
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    [Console]::Out.WriteLine('{"id":null,"error":"vision-mcp-helper 必须用 Windows PowerShell 5.1 (powershell.exe) 运行；当前是 pwsh.exe (PowerShell Core)，无法加载 UIAutomationClient。","code":"PWSH_INCOMPATIBLE"}')
+    [Console]::Out.Flush()
+    exit 2
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
@@ -55,6 +71,7 @@ public class Win32 {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
@@ -105,6 +122,39 @@ try {
 
 $script:isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
+# 多显示器 + per-monitor DPI：MonitorFromPoint + GetDpiForMonitor
+try {
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class DpiUtil {
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+    [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int x; public int y; }
+    public const uint MONITOR_DEFAULTTONEAREST = 2;
+    public const int MDT_EFFECTIVE_DPI = 0;
+}
+"@
+} catch { }
+
+function Get-MonitorDpiForBounds($bounds) {
+    # 在 monitor 中心取一个点，让 MonitorFromPoint 选中该屏；再 GetDpiForMonitor。
+    # Win 8.1+ 才有 GetDpiForMonitor；老 Windows 上 catch 返回 96。
+    try {
+        $cx = [int]($bounds.X + $bounds.Width / 2)
+        $cy = [int]($bounds.Y + $bounds.Height / 2)
+        $pt = New-Object DpiUtil+POINT
+        $pt.x = $cx; $pt.y = $cy
+        $hMon = [DpiUtil]::MonitorFromPoint($pt, [DpiUtil]::MONITOR_DEFAULTTONEAREST)
+        $dx = 0; $dy = 0
+        $hr = [DpiUtil]::GetDpiForMonitor($hMon, [DpiUtil]::MDT_EFFECTIVE_DPI, [ref]$dx, [ref]$dy)
+        if ($hr -eq 0 -and $dx -gt 0) {
+            return @{ x = [int]$dx; y = [int]$dy }
+        }
+    } catch { }
+    return @{ x = 96; y = 96 }
+}
+
 # ---------- JSON 输出 ----------
 
 function Send-Result($id, $result) {
@@ -126,20 +176,16 @@ function List-Displays {
     $out = @()
     for ($i = 0; $i -lt $screens.Length; $i++) {
         $s = $screens[$i]
-        # 试着拿 per-monitor DPI（Win10+）；老 Windows 失败时回退 96
-        $dpi = 96
-        try {
-            $hwnd = [System.Windows.Forms.Form]::ActiveForm.Handle
-            if ($hwnd) { $dpi = [Win32]::GetDpiForWindow($hwnd) }
-        } catch { }
+        # per-monitor DPI（Win 8.1+ MDT_EFFECTIVE_DPI）；老 Windows 回退 96
+        $dpi = Get-MonitorDpiForBounds $s.Bounds
         $kind = if ($s.Primary) { "primary" } else { "extended" }
         $out += @{
             id                       = "display-$i"
             bounds                   = @{ x = $s.Bounds.X; y = $s.Bounds.Y; width = $s.Bounds.Width; height = $s.Bounds.Height }
             work_area                = @{ x = $s.WorkingArea.X; y = $s.WorkingArea.Y; width = $s.WorkingArea.Width; height = $s.WorkingArea.Height }
-            scale                    = [Math]::Round($dpi / 96.0, 2)
-            dpi_x                    = $dpi
-            dpi_y                    = $dpi
+            scale                    = [Math]::Round($dpi.x / 96.0, 2)
+            dpi_x                    = $dpi.x
+            dpi_y                    = $dpi.y
             refresh_rate_hz          = 60
             is_primary               = $s.Primary
             is_virtual               = $false
@@ -166,17 +212,22 @@ function List-Windows($filter) {
         [Win32]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
         $client = New-Object Win32+RECT
         [Win32]::GetClientRect($hWnd, [ref]$client) | Out-Null
-        $pid = 0
-        [Win32]::GetWindowThreadProcessId($hWnd, [ref]$pid) | Out-Null
-        $procName = try { (Get-Process -Id $pid -ErrorAction Stop).ProcessName } catch { "?" }
+        # $pid 是 PowerShell 自动只读变量（当前进程的 PID）——必须用其他名字
+        $wpid = 0
+        [Win32]::GetWindowThreadProcessId($hWnd, [ref]$wpid) | Out-Null
+        $procName = try { (Get-Process -Id $wpid -ErrorAction Stop).ProcessName } catch { "?" }
         $isFg = ([Win32]::GetForegroundWindow() -eq $hWnd)
+        # GetClientRect 总返回 (0,0) 起点——客户区屏幕坐标要 ClientToScreen 一次
+        $clientOrigin = New-Object Win32+POINT
+        $clientOrigin.x = 0; $clientOrigin.y = 0
+        [Win32]::ClientToScreen($hWnd, [ref]$clientOrigin) | Out-Null
         $script:tmpList += @{
             id            = "$hWnd"
             title         = $title
             process_name  = $procName
-            process_id    = $pid
+            process_id    = $wpid
             bounds        = @{ x = $rect.left; y = $rect.top; width = $rect.right - $rect.left; height = $rect.bottom - $rect.top }
-            client_bounds = @{ x = $rect.left; y = $rect.top; width = $client.right - $client.left; height = $client.bottom - $client.top }
+            client_bounds = @{ x = $clientOrigin.x; y = $clientOrigin.y; width = $client.right - $client.left; height = $client.bottom - $client.top }
             is_minimized  = [bool][Win32]::IsIconic($hWnd)
             is_maximized  = [bool][Win32]::IsZoomed($hWnd)
             is_fullscreen = $false
@@ -284,6 +335,7 @@ function Capture-Window-By-Handle($handle) {
 }
 
 function Capture-Display($displayId) {
+    if (-not $displayId) { return $null }
     $idx = [int]($displayId -replace "display-", "")
     $screens = [System.Windows.Forms.Screen]::AllScreens
     if ($idx -lt 0 -or $idx -ge $screens.Length) { return $null }
@@ -291,7 +343,8 @@ function Capture-Display($displayId) {
     $rect = @{ x = $s.Bounds.X; y = $s.Bounds.Y; width = $s.Bounds.Width; height = $s.Bounds.Height }
     $r = Capture-Rect $rect
     $r.display_id = $displayId
-    $r.scale = [Math]::Round((try { [Win32]::GetDpiForWindow([Win32]::GetForegroundWindow()) } catch { 96 }) / 96.0, 2)
+    $dpi = Get-MonitorDpiForBounds $s.Bounds
+    $r.scale = [Math]::Round($dpi.x / 96.0, 2)
     return $r
 }
 
@@ -394,10 +447,33 @@ function Post-Drag($from, $to, $steps = 20, $durationMs = 200) {
 }
 
 function Post-Type($text) {
-    # 用剪贴板 + Ctrl+V 支持任意 Unicode（SendKeys 不支持非 ASCII）
-    [System.Windows.Forms.Clipboard]::SetText($text)
-    Start-Sleep -Milliseconds 60
-    [System.Windows.Forms.SendKeys]::SendWait("^v")
+    # 用 SendInput + KEYEVENTF_UNICODE (VK_PACKET) 注入文本。
+    # 优点（对照原 Clipboard + SendKeys ^v 方案）：
+    #   - 不污染剪贴板
+    #   - 不触发输入法候选框（VK_PACKET 走系统层 Unicode 通道，绕过 IME）
+    #   - 对 elevated app（任务管理器等）仍可能被 UIPI 拒绝，但 SendKeys 同样被拒
+    if (-not $text) { return }
+    $chars = $text.ToCharArray()
+    $inputs = New-Object 'Win32+INPUT[]' ($chars.Length * 2)
+    for ($i = 0; $i -lt $chars.Length; $i++) {
+        $down = New-Object Win32+INPUT
+        $down.type = 1  # INPUT_KEYBOARD
+        $down.u.ki.wVk = 0
+        $down.u.ki.wScan = [uint16]([int][char]$chars[$i])
+        $down.u.ki.dwFlags = 0x0004  # KEYEVENTF_UNICODE
+        $down.u.ki.time = 0
+        $down.u.ki.dwExtraInfo = [IntPtr]::Zero
+        $inputs[$i * 2] = $down
+        $up = New-Object Win32+INPUT
+        $up.type = 1
+        $up.u.ki.wVk = 0
+        $up.u.ki.wScan = [uint16]([int][char]$chars[$i])
+        $up.u.ki.dwFlags = 0x0004 -bor 0x0002  # KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        $up.u.ki.time = 0
+        $up.u.ki.dwExtraInfo = [IntPtr]::Zero
+        $inputs[$i * 2 + 1] = $up
+    }
+    [Win32]::SendInput([uint32]$inputs.Length, $inputs, [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])) | Out-Null
 }
 
 function Post-Key($combo) {
@@ -523,6 +599,9 @@ function UIA-Invoke-At-Norm($handle, $normX, $normY) {
 while ($true) {
     $line = [Console]::In.ReadLine()
     if ($null -eq $line) { break }
+    # 防御 UTF-8 BOM（PowerShell Set-Content -Encoding utf8 / Windows 一些
+    # 工具会在文本开头加 BOM）；ConvertFrom-Json 不接受 BOM 前缀。
+    if ($line.Length -gt 0 -and $line[0] -eq [char]0xFEFF) { $line = $line.Substring(1) }
     $line = $line.Trim()
     if (-not $line) { continue }
     try {
@@ -586,8 +665,10 @@ while ($true) {
                 break
             }
             "capture.display" {
-                $r = Capture-Display $p.display_id
-                if ($r) { Send-Result $id $r } else { Send-Error $id "display not found" }
+                # 同时接受 display_id（macOS / 规范） 和 displayId（兼容旧 JS 适配器）
+                $did = if ($p.display_id) { $p.display_id } else { $p.displayId }
+                $r = Capture-Display $did
+                if ($r) { Send-Result $id $r } else { Send-Error $id "display not found" "CAPSULE_DISPLAY_MISSING" }
                 break
             }
             "input.click" {
@@ -598,6 +679,13 @@ while ($true) {
                 break
             }
             "input.type" {
+                if ($p.clear_first) {
+                    # Cmd+A 等价 Ctrl+A → 选中全部 → backspace 清掉
+                    [System.Windows.Forms.SendKeys]::SendWait("^a")
+                    Start-Sleep -Milliseconds 30
+                    [System.Windows.Forms.SendKeys]::SendWait("{BACKSPACE}")
+                    Start-Sleep -Milliseconds 30
+                }
                 Post-Type $p.text
                 Send-Result $id @{ ok = $true }
                 break
@@ -608,9 +696,23 @@ while ($true) {
                 break
             }
             "input.scroll" {
+                # dy_px：正值 = 向下滚（屏幕内容上移），与 macOS 一致。
+                # mouse_event 的 dwData 期望的是有符号 short（一格 = 120）；
+                # 但 DllImport 把它声明成 uint，PowerShell 不能直接传负数 ——
+                # 把负值做 32-bit 位级强转成 uint 再传。
                 $dy = if ($p.dy_px) { [int]$p.dy_px } else { 0 }
+                $dx = if ($p.dx_px) { [int]$p.dx_px } else { 0 }
                 [Win32]::SetCursorPos([int]$p.point.x, [int]$p.point.y) | Out-Null
-                [Win32]::mouse_event(0x0800, 0, 0, -$dy, [IntPtr]::Zero)
+                if ($dy -ne 0) {
+                    $wheel = -$dy  # 负 dy = 向上 = wheel forward = positive WHEEL_DELTA
+                    if ($wheel -lt 0) { $wheelU = [uint32]([int64]4294967296 + $wheel) } else { $wheelU = [uint32]$wheel }
+                    [Win32]::mouse_event(0x0800, 0, 0, $wheelU, [IntPtr]::Zero)
+                }
+                if ($dx -ne 0) {
+                    $wheel = $dx
+                    if ($wheel -lt 0) { $wheelU = [uint32]([int64]4294967296 + $wheel) } else { $wheelU = [uint32]$wheel }
+                    [Win32]::mouse_event(0x01000, 0, 0, $wheelU, [IntPtr]::Zero)  # MOUSEEVENTF_HWHEEL
+                }
                 Send-Result $id @{ ok = $true }
                 break
             }

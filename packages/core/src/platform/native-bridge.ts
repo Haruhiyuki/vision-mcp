@@ -39,9 +39,21 @@ export class NativeBridge extends EventEmitter {
     if (!helperPath) {
       throw new Error("NativeBridge 需要 helperPath");
     }
-    this.proc = spawn(helperPath, opts.args ?? [], {
+    // Windows: 如果 helper 是 .ps1 脚本，自动用 Windows PowerShell 5.1 包一层
+    //   - powershell.exe（5.1）而非 pwsh.exe（7.x）：UIAutomationClient Add-Type 仅在 5.1 可加载
+    //   - -NoProfile：避免用户 profile 改 OutputEncoding / 写日志污染 stdio
+    //   - -NonInteractive -ExecutionPolicy Bypass：CI/锁机环境也能跑
+    //   - -File：把 .ps1 当 script 跑，stdin/stdout 直通到子进程管道
+    const isPs1 = process.platform === "win32" && /\.ps1$/i.test(helperPath);
+    const execPath = isPs1 ? "powershell.exe" : helperPath;
+    const execArgs = isPs1
+      ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helperPath, ...(opts.args ?? [])]
+      : (opts.args ?? []);
+    this.proc = spawn(execPath, execArgs, {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? "info" },
+      // Windows .exe 启动用 shell:false（默认）即可；spawn 在 win32 上对 .exe 直接 CreateProcess
+      windowsHide: true,
     });
     this.proc.stdout!.setEncoding("utf8");
     this.proc.stderr!.setEncoding("utf8");
@@ -147,16 +159,26 @@ export async function resolveDefaultHelper(
   const env = process.env.VISION_MCP_NATIVE_HELPER;
   if (env) return env;
   if (hint) return hint;
-  const exe = platform === "windows" ? "vision-mcp-helper.exe" : "vision-mcp-helper";
-  const candidates = [
-    path.resolve(process.cwd(), "native", platform, exe),
-    path.resolve(process.cwd(), "packages/core/native", platform, exe),
+  // Windows 优先 .exe（ps2exe 编译产物，启动 ~10ms），缺失时 fallback .ps1（启动 ~400ms）。
+  // macOS 只看编译产物 vision-mcp-helper。
+  const candidateNames =
+    platform === "windows"
+      ? ["vision-mcp-helper.exe", path.join("src", "vision-mcp-helper.ps1")]
+      : ["vision-mcp-helper"];
+  // packages/cli 也会被打包，npm 安装时 helper 在 cli 包的 native/ 里
+  const roots = [
+    path.resolve(process.cwd(), "native", platform),
+    path.resolve(process.cwd(), "packages/core/native", platform),
+    path.resolve(process.cwd(), "packages/cli/native", platform),
   ];
-  for (const c of candidates) {
-    try {
-      const stat = await fs.stat(c);
-      if (stat.isFile()) return c;
-    } catch {}
+  for (const root of roots) {
+    for (const name of candidateNames) {
+      const c = path.join(root, name);
+      try {
+        const stat = await fs.stat(c);
+        if (stat.isFile()) return c;
+      } catch {}
+    }
   }
   return null;
 }
