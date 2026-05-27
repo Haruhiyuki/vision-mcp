@@ -2,52 +2,112 @@
 
 > 本文档面向 MCP host 中的 agent（Claude / Cursor / Codex 等）。介绍如何用 vision-mcp 提供的 tools「像人一样使用桌面软件」。
 >
-> 核心理念：**agent-in-the-loop + 视觉为主 + 稳定窗口**。
+> 核心理念：**两种模式 + 持续修正 + 稳定窗口**。
 >
-> - Vision-mcp 不是黑盒自动化脚本，而是让 agent **看截图** → 视觉判断 → click 估计坐标 → 再看截图验证。AX 数据是**校准辅助**，不是首选——很多桌面 app（游戏、Electron、自绘 UI、跨平台框架）根本不暴露 AX，但截图永远存在。
+> - **建图模式**（map 不存在/不完整）：视觉为主，**snapshot 是核心工具**。agent 看截图 → 视觉判断 → click 估计坐标 → snapshot 验证 → 把发现的 control / state 写进 baseline。
+> - **执行模式**（map 已建好）：**靠封装命令直接命中**。`run_workflow` / `perform_action` / `kbd.<action>` 跑预定义流程，**默认不 snapshot**——map 建好后还每步看图等于地图白建了。
+> - **持续修正**：执行中遇到 map 偏差 → `vision-mcp patch` 写一行命令固化修正 → 下次直接命中。每次发现的视觉成本都摊销到永久修复上。
 > - 目标窗口被迁到用户主屏的稳定位置（默认 display 工作区中心），**完整可见**；agent 用归一化坐标操作。**不创建虚拟显示器**（macOS / Windows public API 都不可靠）。
 >
-> **正确的优先级**：
-> 1. 第一选择 — 视觉：snapshot 返回的 PNG，agent 用自己的视觉能力识别元素、估坐标。
-> 2. 第二选择 — AX 校准：如果是有 accessibility 的原生 app（Apple Music / Finder / Safari 等），snapshot 也返回 AX candidates 帮你精确化 bbox。
-> 3. 第三选择 — 失败重试：click 一次没生效？snapshot 再看，调坐标重试。这是"像人一样"的本质。
-> 4. **macOS 高级**：有 `AXPress` action 的元素（菜单/工具栏/普通按钮）可以用 `ax-press` 直接发 AX 动作（不依赖鼠标坐标，更稳）。NSTableView cell（sidebar 等）/ SwiftUI 自绘元素不响应 AXPress，仍用普通 `click`。
+> **执行模式 4 个看图时机**（其它时机不 snapshot）：
+> 1. **任务开始**：一次 `detect_state` 确认入口 state（轻量版，无 PNG）
+> 2. **关键决策节点**：workflow 含"看后选 N"语义（如挑列表第几项）
+> 3. **postcondition 失败 + repair 修不好**：snapshot 看现状决定 patch 还是停下
+> 4. **工作流结束**：给用户报告时附一张"已完成"截图
+>
+> **建图时**：每个候选元素都视觉验证是合理的；优先级：**视觉看图 → AX 校准（如有）→ commit_state 写入 baseline → 失败 retry**。
 
-## 1. 工具总览（按使用频率排序）
+详见 `skills/vision-mcp/SKILL.md` §7「成本优化：执行阶段非必要不看截图」。
+
+## 1. 工具总览（按使用模式分组）
+
+### 1.1 执行模式 ⭐ — map 已建好，跑预定义 workflow
+
+> **默认路径**。先用这些；除非失败或 4 个看图时机，否则**不要 snapshot**。
 
 | 工具 | 用途 | 返回 |
 | ---- | ---- | ---- |
-| `vision_map.snapshot` | **核心**：一次拿截图 + 可交互 AX 候选 + 已知 state 匹配 | base64 PNG + candidates + state_match + visual_hash |
-| **`vision-mcp annotated`** (v0.3) | 截图叠加网格 + 候选框 + 序号；agent 看图后说"click #7"而非估坐标 | PNG 文件 + box_count |
-| **`vision-mcp click-text`** (v0.3) | OCR 找文字 → click 其中心；视觉路线核心工具 | { matched_text, confidence, point } |
-| **`vision-mcp click-fuzzy`** (v0.3) | click 失败时围绕 ±jitter 多次试，按视觉变化判定成功 | { ok, point, offset, visual_diff } |
-| **`vision-mcp hover`** (v0.3) | 移到坐标 + 等待，触发 hover-only 控件（如卡片浮动 ▶） | { ok } |
-| **`vision-mcp trace-viewer`** (v0.3) | 生成 HTML 时间线，每个 action 含前后截图（自动保存） | { out, events_with_screenshot } |
-| **`vision-mcp scroll-until-text`** (v0.3) | 在 region 内反复滚动 + OCR 找文字（如"播放列表里找黑色游行"） | { ok, attempts, matched_text, point } |
-| **`vision-mcp hover-probe`** (v0.3) | hover 后 vs hover 前像素 diff，找 hover 触发的新元素位置 | { ok, hot_block_bbox_norm, max_block_diff } |
-| `vision_map.click_at` | 在归一化坐标 click（建图原始动作） | { ok, point_screen } |
-| **`vision-mcp ax-press`** | macOS 高级：用 AX 直接对 norm 位置元素发 AXPress（对有 AXPress action 的元素更稳；NSTableView cell / SwiftUI 自绘元素无效） | { ok, via, matched_role, matched_name } |
+| **`vision_map.run_workflow`** | 跑一条预定义 workflow（多步组合） | result + steps |
+| **`vision_map.perform_action`** | 执行单个 action_id（如 `kbd.new_note` / `sidebar.search`） | result + events |
 | `vision_map.type_text` | 在当前焦点 type 文本（支持中文，走粘贴） | { ok, length } |
-| `vision_map.press_key` | 发键盘组合（return / cmd+f / Escape / cmd+left ...） | { ok } |
+| `vision_map.press_key` | 发键盘组合（return / cmd+f / Escape ...） | { ok } |
 | `vision_map.scroll` | 在归一化点滚动 | { ok } |
-| **`vision-mcp displays`** | 列所有显示器及类型 | display list |
-| **`vision-mcp capsule <app>`** | 一键 ensure + attach + migrate 到 display 工作区中心（窗口完整可见） | display + window info |
-| **`vision-mcp restore <app>`** | 把窗口迁回主屏中央 | { ok, bounds } |
-| **`vision-mcp live-view <app>`** | 启 HTTP server，浏览器实时查看 capsule + POST /takeover 接管 | URL |
-| `capsule.attach_window` | 把目标 app 窗口吸入 capsule | window info |
-| `capsule.migrate_window` | 把窗口移到 display 工作区中心 | window info |
-| `capsule.raise` | 把窗口拉回前台（type/key 前可主动调用） | { ok } |
-| `capsule.validate_geometry` | 校验几何契约（client size / DPI / foreground） | geometry state |
-| `vision_map.detect_state` | 仅做 state 识别，不返回截图（snapshot 的轻量版） | state_match |
-| `vision_map.commit_state` | 把当前帧的 AX 状态写入 map.baseline | { state_id } |
-| `vision_map.apply_patch` | 写入 control_bbox / geometry / state patch | patch file path |
-| `vision_map.perform_action` | 通过已定义的 action_id 操作（成品 workflow 模式） | result + events |
-| `vision_map.run_workflow` | 跑一条 workflow（多步） | result + steps |
-| `vision_map.repair_minimal` | 触发 L0-L3 修复 ladder | repair outcome |
-| **`vision-mcp patch`** | 主动写 control_bbox/control_locator/geometry patch（实战偏差固化）。详见 §4.7 持续修正 | patch file path |
+| `vision_map.detect_state` | **轻量** state 识别，**无 PNG 进 context**；任务开始时确认入口 state | state_match |
+| `vision_map.repair_minimal` | 触发 L0–L3 修复 ladder（postcondition 失败时自动调） | repair outcome |
+| **`vision-mcp patch`** | 实战发现偏差 → 写 patch 固化修正（持续修正机制） | patch file path |
 | **`vision-mcp patches`** | 列出 app 已应用的 patch | patch list |
 
-## 2. Agent 主导建图的标准流程
+### 1.2 建图模式 — map 不存在/不全，每步看图
+
+> 仅在建图或失败诊断时用。
+
+| 工具 | 用途 | 返回 |
+| ---- | ---- | ---- |
+| `vision_map.snapshot` | 一次拿**截图 + AX 候选 + state 匹配**。**只在 §7 四个看图时机调** | base64 PNG + candidates + state_match + visual_hash |
+| `vision-mcp annotated` | 截图叠加网格 + 候选框 + 序号；建图时说"click #7"而非估坐标 | PNG 文件 + box_count |
+| `vision-mcp click-text` | OCR 找文字 → click 其中心；建图时定位元素的利器 | { matched_text, confidence, point } |
+| `vision-mcp click-fuzzy` | click 失败时围绕 ±jitter 多次试 | { ok, point, offset, visual_diff } |
+| `vision-mcp hover` | 移到坐标 + 等待，触发 hover-only 控件 | { ok } |
+| `vision-mcp hover-probe` | hover 后 vs 前像素 diff，找 hover 触发的新元素 | { ok, hot_block_bbox_norm } |
+| `vision-mcp scroll-until-text` | region 内反复滚动 + OCR 找文字 | { ok, attempts, matched_text } |
+| `vision_map.click_at` | 在归一化坐标 click（建图原始动作） | { ok, point_screen } |
+| `vision_map.commit_state` | 把当前帧 AX 状态写入 map.baseline | { state_id } |
+| `vision_map.apply_patch` | 写 control_bbox / geometry / state patch | patch file path |
+| `vision-mcp ax-press` | macOS 高级：AX 直接对 norm 位置元素发 AXPress（对菜单/按钮稳；NSTableView cell / SwiftUI 自绘元素无效） | { ok, via, matched_role } |
+
+### 1.3 Capsule / Workspace — 一次性 setup
+
+| 工具 | 用途 | 返回 |
+| ---- | ---- | ---- |
+| `vision-mcp displays` | 列所有显示器及类型 | display list |
+| `vision-mcp capsule <app>` | 一键 ensure + attach + migrate 到 display 工作区中心（窗口完整可见） | display + window info |
+| `vision-mcp restore <app>` | 把窗口迁回主屏中央 | { ok, bounds } |
+| `vision-mcp live-view <app>` | 浏览器实时查看 capsule + 接管按钮 | URL |
+| `capsule.attach_window` | 把目标 app 窗口吸入 capsule | window info |
+| `capsule.migrate_window` | 把窗口移到 display 工作区中心 | window info |
+| `capsule.raise` | 把窗口拉回前台 | { ok } |
+| `capsule.validate_geometry` | 校验几何契约（client size / DPI / foreground） | geometry state |
+
+### 1.4 调试 / Trace
+
+| 工具 | 用途 | 返回 |
+| ---- | ---- | ---- |
+| `vision-mcp trace-viewer` | 生成 HTML 时间线，每个 action 含前后截图 | { out, events_with_screenshot } |
+| `vision-mcp snapshot-crop` / `snapshot-tile` | 只截 region / 切 N×M 网格；省 agent context | { ok, out } |
+
+## 2. 执行模式 ⭐（map 已建好，主路径）
+
+> 这是你**95% 时间**的工作模式。map 建好后，agent 应该尽量像调 RPC 一样调 workflow，不要每步看图。
+
+```
+# 1. 任务开始（轻量）
+detect_state(app)                 // 确认入口 state，不消耗 PNG
+# 如果 state 对，直接进 2；如果错，先 navigate 到正确 state
+
+# 2. 跑预定义 workflow（核心）
+run_workflow(app, workflow_id, inputs)
+# 内部：每步 perform_action → postcondition 自动验证 → 失败自动 repair L0-L3
+
+# 3. 结束验证（仅在长链路 / 给用户报告时）
+snapshot(app)                     // 看一眼最终画面，发给用户
+
+# 失败处理（仅当 repair 也修不好）
+snapshot(app)                     // 看现状
+patch(app, --state ... --control ... --bbox-norm ...)   // 固化偏差
+run_workflow(...)                 // 重试（patch 已生效）
+```
+
+**反模式**（成本浪费）：
+
+```
+❌ 跑 5 步 workflow，每步 snapshot 一次     # map 没用
+❌ click_at 后总 snapshot 验证            # perform_action 内置 postcondition 已验证
+❌ 每个 transition 前 detect_state         # workflow 内部已做 anchors 检测
+```
+
+具体说明见 `skills/vision-mcp/SKILL.md` §7。
+
+## 3. 建图模式（map 不存在/不全，仅在初次或扩展时用）
 
 ### 阶段 A：把目标 app 吸入 capsule
 
@@ -106,7 +166,7 @@ if new_snap.state_match.state_id == parent_state {
 }
 ```
 
-### 阶段 D：用成品 workflow 复用建好的 map
+### 阶段 D：用成品 workflow 复用建好的 map（=切换到 §2 执行模式）
 
 建图完成后，agent 不需要再视觉判断每一步：
 
@@ -117,9 +177,33 @@ events = vision_map.export_trace(app_id)
 // 若有 postcondition_failed → 通常 vision_map.repair_minimal --max-level 3 能自动解决
 ```
 
-## 3. Apple Music 真实演示
+## 4. Apple Music 真实演示
 
-### 3.1 视觉 + AX 双轨流程（推荐）
+### 4.1 执行模式（map 已建好，~~ 推荐用法 ~~）
+
+> 这就是 §2 模式 —— 调一条 workflow 完成完整任务，不看图。
+
+```bash
+# 已经有 examples/apple-music/vision-mcp.yaml（建好的 map）
+vision-mcp workflow apple-music --id search_and_play_top_song \
+  --inputs '{"keyword":"张学友"}' --approve-all
+
+# 内部自动完成：
+#   sidebar.search → search_bar.input(type "张学友") → key return →
+#   music.app.result_card[1]:double_click → 播放
+# 全程 ~5 秒，0 次 snapshot
+```
+
+可选的工作流结束 snapshot（给用户报告时）：
+
+```bash
+vision-mcp snapshot apple-music --out /tmp/final.png
+# 把 final.png 附到回报里："已开始播放，截图见附件"
+```
+
+### 4.2 建图模式（map 不存在时；§3 的展开）
+
+下面是当初**建** apple-music map 时的视觉 + AX 双轨流程。**这是一次性投入**——map 建好后用 §4.1。
 
 ```bash
 # 1. snapshot 看主页：返回 image_base64 + AX 候选
@@ -129,7 +213,7 @@ vision-mcp snapshot apple-music --out /tmp/home.png
 # 取 bbox 中心 (0.085, 0.085) → click
 
 vision-mcp click apple-music --norm "0.085,0.085"
-vision-mcp snapshot apple-music --out /tmp/v.png       # 看是否进搜索页
+vision-mcp snapshot apple-music --out /tmp/v.png       # 建图时验证每步
 
 vision-mcp click apple-music --norm "0.481,0.033"      # AX 给的搜索框中心
 vision-mcp type apple-music --text "张学友" --clear-first
@@ -138,11 +222,13 @@ vision-mcp snapshot apple-music --out /tmp/results.png # 验证结果页
 
 # AX 给 AXCell desc="偷心" bbox=[0.341, 0.134, 0.131, 0.087] → 中心 (0.407, 0.178)
 vision-mcp click apple-music --norm "0.407,0.178" --count 2
+
+# 建图完成后 → vision_map.commit_state + 写 workflow + 切回 §4.1 执行模式
 ```
 
-**实测时间：每条命令 < 2s，全流程约 15 秒**（macOS 26 + swift native helper）。
+**实测时间**：建图 ~30 步 / 20 分钟（每步 snapshot 验证）；执行 ~5 秒 / 0 snapshot。
 
-### 3.2 **纯视觉**流程（AX 不可用时也能工作）
+### 4.3 **纯视觉**流程（AX 不可用时也能工作）
 
 某些 app（游戏、自绘 UI）不暴露 AX，必须靠视觉。这里展示同样目的的纯视觉路径——**只看截图估坐标**：
 
@@ -162,41 +248,41 @@ vision-mcp snapshot apple-music --out /tmp/v3.png
 - Apple Music 在搜索激活状态下，sidebar 的"主页"cell 即使 click 命中位置也不响应（应用层逻辑）。
 - → 在这种边缘情况下，AX 校准 + 视觉验证 双轨流程比纯视觉/纯 AX 都稳健。
 
-## 4. 重要细节 / 避坑
+## 5. 重要细节 / 避坑
 
-### 4.1 macOS 焦点是异步的
+### 5.1 macOS 焦点是异步的
 
 Click / type / key 在窗口失焦后会发到其他 app。规则：
 - `vision_map.click_at` / `type_text` / `press_key` 内部已自动 `capsule.raise`。
 - 但 ECMA event loop 中两次 RPC 间隔较长时仍可能失焦——必要时显式调 `capsule.raise`。
 
-### 4.2 中文/Unicode 输入
+### 5.2 中文/Unicode 输入
 
 `type_text` 在 darwin helper 中总是走 **NSPasteboard 粘贴**。System Events 的 keystroke 只能发 ASCII。
 - 副作用：会暂时占用剪贴板，helper 自动备份+恢复。
 
-### 4.3 AX 树取自首个真窗口
+### 5.3 AX 树取自首个真窗口
 
 `window.list` 给的 handle 是 `pid:0`。当目标 app 弹 popup（如搜索建议下拉）时，helper 自动按"pid 内面积最大窗口"匹配主窗口，不会把 popup 当主窗口（避免 `client_size 397x28 ≠ 1280x800` 这种错误）。
 
-### 4.4 容器节点的 name
+### 5.4 容器节点的 name
 
 Sidebar 的 AXCell `name="主页"` 由 helper 从子 AXStaticText 反推（macOS AX 本身在 cell 的 AXTitle 为空）。如果 agent 看到 AXCell name=null，多半 dump 用了 osascript 路径；切到 swift helper（默认）即可拿到。
 
-### 4.5 何时 commit_state / commit_control
+### 5.5 何时 commit_state / commit_control
 
 - snapshot 返回的 `state_match=null` 或 score 很低（< 0.7） → 大概率是新页面，可考虑 commit_state。
 - agent 多次访问同一 page 拿到一致的 visual_hash + AX signature → 可信赖此 state，commit。
 - 单页面里同类 cell（如 8 张专辑卡片）：不要每个 commit 成一个 control。用一个"first_song_card / nth_song_card" 模板，靠 AXCell index 区分。
 
-### 4.6 返回路径的优先级（建议）
+### 5.6 返回路径的优先级（建议）
 
 1. `Escape`：modal / popup 最常用
 2. `cmd+[`：Apple 系应用的 Back（Finder / Safari / Music / Photos）
 3. AX 树里 description ∈ {返回, Back, ◁, ‹, <, 上一} 的 AXButton
 4. 不行就告诉用户 — 不要瞎 click
 
-### 4.7 持续修正：把每次实测偏差固化为 patch
+### 5.7 持续修正：把每次实测偏差固化为 patch
 
 **核心原则**：map 永远是渐近完善的，一次探索不可能覆盖所有 corner case。Agent 在实战中遇到 map 偏差时**必须主动写 patch**，让 map 越用越好。
 
@@ -232,7 +318,7 @@ vision-mcp patches <app>
 
 详见 `skills/vision-mcp/SKILL.md` §6。
 
-### 4.8 Capsule 行为：稳定窗口 + 完整可见
+### 5.8 Capsule 行为：稳定窗口 + 完整可见
 
 vision-mcp 不创建虚拟显示器（macOS / Windows public API 都不可靠）。`capsule.migrate` 把窗口固定到 display 工作区中心，**完整可见**，agent 用归一化客户区坐标操作。
 
@@ -266,7 +352,7 @@ vision-mcp restore apple-music
 - ✅ 菜单项、工具栏按钮、`AXButton` 类型的按钮
 - ❌ NSTableView cell（sidebar 等）、SwiftUI 自绘元素：不响应 AXPress，仍用 `click`
 
-## 5. MCP host 配置示例
+## 6. MCP host 配置示例
 
 ```json
 {
@@ -303,7 +389,7 @@ swiftc -O -o vision-mcp-helper src/main.swift \
 - Accessibility：读写窗口、AX dump、AX-press、CGEvent 注入必需
 - 第一次调用会弹系统对话框
 
-## 6. 自动化兜底
+## 7. 自动化兜底
 
 如果 agent 不想边看边建图，仓库也提供：
 

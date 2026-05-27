@@ -2,7 +2,9 @@
 
 本 skill 指导 agent 在 Claude / OpenClaw / Cursor / Codex 等宿主中使用 Vision-MCP server 操作真实桌面 GUI 应用。它**不**替代底层截图、点击或窗口管理能力，而是把这些能力收敛为 `vision-mcp.*` MCP 工具，并约束 agent 的调用顺序与安全边界。
 
-> 阅读优先级：先读 1～6，再按需查阅 `references/`。**§6「持续修正」是 agent 主动义务**——map 永远在迭代，把每次实测发现的偏差写成 patch 是核心工作流。
+> 阅读优先级：先读 1～7，再按需查阅 `references/`。
+> - **§6「持续修正」是 agent 主动义务**——map 永远在迭代，把每次实测发现的偏差写成 patch 是核心工作流。
+> - **§7「成本优化」是执行阶段铁律**——map 建好后非必要不 snapshot，靠 `run_workflow` / `perform_action` 直接命中，关键节点才看图。
 
 ## 1. 核心理念：视觉为主 + 稳定窗口
 
@@ -126,13 +128,75 @@ vision-mcp patch notes --state editor --control focus \
 vision-mcp patch <app> --state ... --reason "trace 2026-05-27T14:07Z 中 click_at (353,235) 实际命中主页 cell"
 ```
 
-## 7. Builder/录制流程
+## 7. 成本优化：执行阶段非必要不看截图
+
+vision-mcp 的核心价值是把"边看边判断"的高成本视觉环节，**前置到建图阶段**，让执行阶段通过封装命令（`run_workflow` / `perform_action` / `kbd.<action>`）直接命中。**map 建好后还每步 snapshot，等于地图白建了。**
+
+### 7.1 两种工作模式
+
+| 模式 | 何时进入 | 视觉投入 | 主要工具 |
+|------|----------|----------|----------|
+| **建图模式** | map 不存在 / `state_match=null` / locator 持续失败 / 新页面/弹窗 | **高**：每个候选元素都 snapshot 看 | `snapshot`, `annotated`, `click-text`, `commit_state` |
+| **执行模式** | map 已建好，跑成熟 workflow | **低**：只在节点回报时看 | `run_workflow`, `perform_action`, `patch`（修偏差） |
+
+### 7.2 执行模式 snapshot 仅在 4 个时机
+
+agent 跑 workflow / perform_action **默认不 snapshot**。仅在以下时机看一次截图：
+
+1. **任务开始** — 一次 `detect_state` 确认 state（**不需要 snapshot 拿 PNG**，detect_state 是轻量版只返回 state_id）
+2. **关键决策节点** — workflow 步骤含"看后选择 N"的语义（如"播放列表里挑黑色游行" / "选第 N 行"）时才看
+3. **postcondition 失败 + L0–L3 repair 仍失败** — runtime 已经重试过，agent snapshot 一次看实际状态，决定是写 patch 还是停下问用户
+4. **工作流结束** — 完整 workflow 跑完 / 长链路最后一步，看一眼最终画面给用户报告（"已完成 + 截图"）
+
+### 7.3 反模式（成本浪费典型）
+
+❌ 跑 5 步 workflow，每步 `snapshot` 一次 — 5 次 base64 PNG 进 context，等于 map 没用
+❌ `click_at` 完成后总 `snapshot` 验证 — `perform_action` 内置 postcondition 已自动验证
+❌ 一次跑完前每个 transition 都 `detect_state` — map 内置 anchors 已经做 state 检测
+❌ 失败时立即 `snapshot` 看 — 先 `repair_minimal`；repair 失败才看图
+
+### 7.4 决策树
+
+```
+跑 workflow / perform_action
+   │
+   ├─ map 完整 & state_match 高？
+   │     → run_workflow / perform_action（不 snapshot）
+   │     │
+   │     ├─ 成功 → 工作流结束时 snapshot 一次（给用户的"已完成"截图）
+   │     └─ 失败
+   │           ├─ runtime 自动 repair_minimal L0-L3
+   │           │     └─ 修好 → 继续
+   │           └─ 修不好 → snapshot 看现状
+   │                 ├─ map 偏差（坐标错 / action_type 错）→ vision-mcp patch 写 patch → 重试
+   │                 └─ 真未知 state → 告诉用户
+   │
+   └─ map 缺失 / 不全 → 切到建图模式（每步 snapshot 是合理的）
+```
+
+### 7.5 长任务的封装习惯
+
+如果 workflow 包含 8+ 步骤还得"看一下当前状态再决定"，说明缺**子工作流抽象**：
+- 把"看后判断"的判断点拆成独立小 workflow（每段 3–5 步）
+- 让 agent 在两个 workflow 之间做一次视觉判断，而不是在 workflow 内部
+- 同类元素用 `collection[N]` 索引而非视觉找
+
+### 7.6 跟"持续修正"的关系
+
+§6 的持续修正不是"每次都看图修"，而是"**遇到失败时**才主动写 patch"。理想流程：
+
+- 第 1 次跑 workflow：失败 → snapshot → 发现 sidebar 坐标偏差 → `vision-mcp patch` → 重试成功 → 修复进 trusted patch
+- 第 2 次起：直接跑，不 snapshot，0 失败
+
+每次发现的偏差成本（snapshot + patch）都**摊销到永久修复**上 —— 这才是"越用越便宜"的本质。
+
+## 8. Builder/录制流程
 
 - 与用户协作建图：先让用户把目标页面打开，再调用 `vision_map.propose_controls`，把候选控件展示给用户审阅。
 - 用户确认后通过 `vision_map.commit_state` 写回 baseline。
 - 写 workflow 前确认 inputs 模板（如 `{{customer_name}}`）能在 runtime 通过 `inputs` 字段提供。
 
-## 8. 资源族
+## 9. 资源族
 
 - `vision-mcp://apps`：所有可用 app 索引。
 - `vision-mcp://apps/{app_id}/map`：YAML 形式的有效地图。
@@ -142,7 +206,7 @@ vision-mcp patch <app> --state ... --reason "trace 2026-05-27T14:07Z 中 click_a
 - `vision-mcp://apps/{app_id}/patches`：当前 session 已应用 patches。
 - `vision-mcp://apps/{app_id}/traces/latest`：最近一次会话事件。
 
-## 9. 进一步阅读
+## 10. 进一步阅读
 
 - `references/schema.md`：vision-mcp.yaml 字段速查。
 - `references/repair-policy.md`：每级 repair 触发条件、置信度阈值。
