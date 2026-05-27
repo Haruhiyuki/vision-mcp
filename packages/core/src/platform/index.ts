@@ -1,5 +1,6 @@
 export * from "./mock.js";
 export * from "./windows.js";
+export * from "./windows-accessibility.js";
 export * from "./macos.js";
 export * from "./darwin-osascript.js";
 export * from "./darwin-helper.js";

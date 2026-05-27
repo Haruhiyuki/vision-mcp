@@ -35,6 +35,11 @@ export class NativeBridge extends EventEmitter {
 
   constructor(private readonly opts: NativeBridgeOptions) {
     super();
+    // 允许全局 env 强开 debug，方便用户排查 helper 通讯问题
+    if (process.env.VISION_MCP_NATIVE_DEBUG === "1" && !opts.debug) {
+      opts = { ...opts, debug: true };
+      (this.opts as NativeBridgeOptions) = opts;
+    }
     const helperPath = opts.helperPath;
     if (!helperPath) {
       throw new Error("NativeBridge 需要 helperPath");
@@ -96,7 +101,7 @@ export class NativeBridge extends EventEmitter {
     if (this.disposed) throw new Error("native bridge disposed");
     const id = randomUUID();
     const msg = JSON.stringify({ id, method, params }) + "\n";
-    if (this.opts.debug) process.stderr.write(`[native →] ${msg}`);
+    if (this.opts.debug) process.stderr.write(`${new Date().toISOString()} [native →] ${msg}`);
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -127,9 +132,12 @@ export class NativeBridge extends EventEmitter {
       const line = this.buffer.slice(0, idx).trim();
       this.buffer = this.buffer.slice(idx + 1);
       if (!line) continue;
-      if (this.opts.debug) process.stderr.write(`[native ←] ${line}\n`);
+      if (this.opts.debug) process.stderr.write(`${new Date().toISOString()} [native ←] ${line.slice(0, 200)}\n`);
       try {
         const msg = JSON.parse(line);
+        if (this.opts.debug) {
+          process.stderr.write(`${new Date().toISOString()} [native parse] id=${msg.id} pending.has=${msg.id ? this.pending.has(msg.id) : "?"}\n`);
+        }
         if (msg.id && this.pending.has(msg.id)) {
           const p = this.pending.get(msg.id)!;
           clearTimeout(p.timer);
@@ -140,6 +148,9 @@ export class NativeBridge extends EventEmitter {
           this.emit(msg.event, msg.data);
         }
       } catch (err) {
+        if (this.opts.debug) {
+          process.stderr.write(`${new Date().toISOString()} [native parse_error] ${(err as Error).message} line=${line.slice(0, 100)}\n`);
+        }
         this.emit("parse_error", { line, err });
       }
     }

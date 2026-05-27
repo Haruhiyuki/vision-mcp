@@ -21,12 +21,26 @@ import {
   loadMap,
   RuntimeExecutor,
   saveMap,
+  WindowsAccessibilityProvider,
+  WindowsPlatformAdapter,
   writePatch,
 } from "@vision-mcp/core";
-import type { PlatformAdapter } from "@vision-mcp/core";
+import type { AccessibilityProvider, PlatformAdapter } from "@vision-mcp/core";
 
 function isDarwinAdapter(a: PlatformAdapter): a is DarwinOsascriptAdapter | DarwinHelperAdapter {
   return a instanceof DarwinOsascriptAdapter || a instanceof DarwinHelperAdapter;
+}
+
+/**
+ * 平台无关地拿一个 AccessibilityProvider。
+ * - macOS：osascript / helper adapter → DarwinAccessibilityProvider
+ * - Windows：WindowsPlatformAdapter → WindowsAccessibilityProvider（走 helper ax.dump）
+ * - mock：undefined（snapshot 仍能跑，只是 candidates 空）
+ */
+function makeAccessibilityProvider(a: PlatformAdapter): AccessibilityProvider | undefined {
+  if (isDarwinAdapter(a)) return new DarwinAccessibilityProvider(a);
+  if (a instanceof WindowsPlatformAdapter) return new WindowsAccessibilityProvider(a);
+  return undefined;
 }
 import {
   createServerContext,
@@ -425,11 +439,10 @@ async function openAppRuntime(
   const traceDir = path.join(appsRoot(args), ".traces", appId);
   const trace = new FileTraceStore(traceDir);
   await trace.ensure();
-  // 在 macOS 上自动注入 accessibility provider（helper 或 osascript adapter 都支持）
+  // 注入跨平台 accessibility provider（macOS osascript/helper / Windows UIA）
   const providers: import("@vision-mcp/core").LocatorProviders = {};
-  if (isDarwinAdapter(adapter)) {
-    providers.accessibility = new DarwinAccessibilityProvider(adapter);
-  }
+  const ax = makeAccessibilityProvider(adapter);
+  if (ax) providers.accessibility = ax;
   // 默认 auto-attach：拿 window handle 让后续 click/snapshot 等命令可用。
   // 默认 autoMigrate=false：不重新移动窗口，避免反复把 off-screen workspace 拉回主屏。
   // 由 `vision-mcp capsule` 显式 ensureDisplay + migrate；`vision-mcp build` 显式传 autoMigrate=true。
@@ -1101,7 +1114,7 @@ async function cmdAnnotated(args: ParsedArgs) {
 async function cmdSnapshot(args: ParsedArgs) {
   const { adapter, capsule, loaded } = await openCapsuleForRaw(args);
   const { LocatorResolver } = await import("@vision-mcp/core");
-  const provider = isDarwinAdapter(adapter) ? new DarwinAccessibilityProvider(adapter) : undefined;
+  const provider = makeAccessibilityProvider(adapter);
   const resolver = new LocatorResolver(provider ? { accessibility: provider } : {});
   const frame = await capsule.capture();
   const insights = await resolver.analyze(frame);

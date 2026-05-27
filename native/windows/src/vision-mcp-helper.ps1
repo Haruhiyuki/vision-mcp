@@ -497,23 +497,92 @@ function Post-Type($text) {
     [Win32]::SendInput([uint32]$inputs.Length, $inputs, [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])) | Out-Null
 }
 
+# 字符串组合键名 → Win32 虚拟键码。覆盖 vision-mcp 常用按键
+# （单字母 / 单数字直接走 ASCII 大写；其他按表查）。
+$script:vkMap = @{
+    "return" = 0x0D; "enter" = 0x0D;
+    "escape" = 0x1B; "esc" = 0x1B;
+    "tab" = 0x09; "space" = 0x20;
+    "up" = 0x26; "down" = 0x28; "left" = 0x25; "right" = 0x27;
+    "backspace" = 0x08; "delete" = 0x2E;
+    "home" = 0x24; "end" = 0x23; "pageup" = 0x21; "pagedown" = 0x22;
+    "insert" = 0x2D;
+    "f1" = 0x70; "f2" = 0x71; "f3" = 0x72; "f4" = 0x73;
+    "f5" = 0x74; "f6" = 0x75; "f7" = 0x76; "f8" = 0x77;
+    "f9" = 0x78; "f10" = 0x79; "f11" = 0x7A; "f12" = 0x7B;
+    "minus" = 0xBD; "-" = 0xBD;
+    "equal" = 0xBB; "=" = 0xBB; "plus" = 0xBB;
+    "comma" = 0xBC; "," = 0xBC;
+    "period" = 0xBE; "." = 0xBE;
+    "slash" = 0xBF; "/" = 0xBF;
+    "semicolon" = 0xBA; ";" = 0xBA;
+    "quote" = 0xDE; "'" = 0xDE;
+    "backslash" = 0xDC; "\" = 0xDC;
+    "lbracket" = 0xDB; "[" = 0xDB;
+    "rbracket" = 0xDD; "]" = 0xDD;
+    "backtick" = 0xC0; "``" = 0xC0;
+}
+
+# 把一个键名解析成 VK 码。失败返回 0。
+function Resolve-Vk($name) {
+    $n = $name.ToLower().Trim()
+    if (-not $n) { return 0 }
+    if ($script:vkMap.ContainsKey($n)) { return $script:vkMap[$n] }
+    if ($n.Length -eq 1) {
+        $c = [int][char]$n.ToUpper()
+        # A-Z / 0-9 / 其他 ASCII 直接当 VK
+        if (($c -ge 0x30 -and $c -le 0x39) -or ($c -ge 0x41 -and $c -le 0x5A)) { return $c }
+    }
+    return 0
+}
+
+# Post-Key：完整 SendInput 路径替代 SendKeys。
+# 为何换：SendKeys 对 elevated app（任务管理器 / 反作弊）静默失败，且对中文 IME
+# 状态不稳定。SendInput INPUT 数组直接走系统输入队列，权限边界由 UIPI 控制
+# （提升 helper 整体进程权限即可）。
 function Post-Key($combo) {
-    $s = $combo.ToLower().Replace("cmd+", "^").Replace("ctrl+", "^").Replace("shift+", "+").Replace("alt+", "%").Replace("option+", "%")
-    $s = $s -replace "\breturn\b", "{ENTER}" `
-            -replace "\benter\b", "{ENTER}" `
-            -replace "\bescape\b|\besc\b", "{ESC}" `
-            -replace "\btab\b", "{TAB}" `
-            -replace "\bspace\b", " " `
-            -replace "\bup\b", "{UP}" `
-            -replace "\bdown\b", "{DOWN}" `
-            -replace "\bleft\b", "{LEFT}" `
-            -replace "\bright\b", "{RIGHT}" `
-            -replace "\bdelete\b|\bbackspace\b", "{BACKSPACE}" `
-            -replace "\bhome\b", "{HOME}" `
-            -replace "\bend\b", "{END}" `
-            -replace "\bpageup\b", "{PGUP}" `
-            -replace "\bpagedown\b", "{PGDN}"
-    [System.Windows.Forms.SendKeys]::SendWait($s)
+    if (-not $combo) { return }
+    $parts = $combo -split "\+" | ForEach-Object { $_.Trim().ToLower() }
+    $mods = New-Object System.Collections.ArrayList
+    $main = $null
+    foreach ($p in $parts) {
+        switch ($p) {
+            "cmd"     { [void]$mods.Add(0x5B) }   # VK_LWIN（macOS Cmd → Win 键）
+            "win"     { [void]$mods.Add(0x5B) }
+            "ctrl"    { [void]$mods.Add(0x11) }   # VK_CONTROL
+            "control" { [void]$mods.Add(0x11) }
+            "shift"   { [void]$mods.Add(0x10) }   # VK_SHIFT
+            "alt"     { [void]$mods.Add(0x12) }   # VK_MENU
+            "option"  { [void]$mods.Add(0x12) }
+            default   { $main = $p }
+        }
+    }
+    if (-not $main) { return }
+    $mainVk = Resolve-Vk $main
+    if ($mainVk -eq 0) {
+        # 未识别的键名：fall back 到 SendKeys（最大兼容性）
+        [System.Windows.Forms.SendKeys]::SendWait($combo)
+        return
+    }
+    # 构造 INPUT 数组：modifiers down → main down → main up → modifiers up（反序）
+    $count = $mods.Count * 2 + 2
+    $inputs = New-Object 'Win32+INPUT[]' $count
+    $idx = 0
+    function Make-KeyInput([uint16]$vk, [bool]$up) {
+        $i = New-Object Win32+INPUT
+        $i.type = 1
+        $i.u.ki.wVk = $vk
+        $i.u.ki.wScan = 0
+        $i.u.ki.dwFlags = if ($up) { 0x0002 } else { 0 }  # KEYEVENTF_KEYUP
+        $i.u.ki.time = 0
+        $i.u.ki.dwExtraInfo = [IntPtr]::Zero
+        return $i
+    }
+    foreach ($m in $mods) { $inputs[$idx++] = Make-KeyInput $m $false }
+    $inputs[$idx++] = Make-KeyInput $mainVk $false
+    $inputs[$idx++] = Make-KeyInput $mainVk $true
+    for ($i = $mods.Count - 1; $i -ge 0; $i--) { $inputs[$idx++] = Make-KeyInput $mods[$i] $true }
+    [Win32]::SendInput([uint32]$count, $inputs, [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])) | Out-Null
 }
 
 # ---------- UI Automation: AX tree dump + InvokePattern ----------
@@ -539,13 +608,23 @@ function Dump-UIA-Tree($handle, $maxNodes = 500, $maxDepth = 6) {
             $autoId = $info.AutomationId
             $cls = $info.ClassName
             $bb = $info.BoundingRectangle
+            # UIA 把不可见 / 未渲染的元素 BoundingRectangle 设成 Rect.Empty —
+            # X/Y = double.PositiveInfinity, W/H = double.NegativeInfinity。
+            # PowerShell 的 ConvertTo-Json 把 Infinity 直接写成裸字面量
+            # ("pos":[Infinity,Infinity])，这是无效 JSON，会让 Node 端 parse_error
+            # 后请求挂到 timeout。这里把 non-finite 全部归零（上层 normalize 会过滤掉
+            # w/h<=0 的节点，正好排除这些不可见元素）。
+            function ToFinite([double]$v) {
+                if ([double]::IsInfinity($v) -or [double]::IsNaN($v)) { return 0.0 }
+                return $v
+            }
             $node = @{
                 role  = $role
                 name  = $name
                 desc  = $autoId
                 class = $cls
-                pos   = @($bb.X, $bb.Y)
-                size  = @($bb.Width, $bb.Height)
+                pos   = @((ToFinite $bb.X), (ToFinite $bb.Y))
+                size  = @((ToFinite $bb.Width), (ToFinite $bb.Height))
                 depth = $cur.depth
                 path  = $cur.path
             }
