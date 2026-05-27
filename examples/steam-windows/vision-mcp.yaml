@@ -3,143 +3,441 @@ app:
   id: steam
   name: Steam
   platform: windows
+  build: "2026.05-steamui"
   launch_hint: attach_after_launch
+  description: |
+    Steam (Windows) 的 vision-mcp 地图——**Windows + CEF/Chromium app 的完整特性展示**。
+
+    与 examples/example-erp/ 的设计对照：
+      - 同样的 regions / inherit_regions（top_nav / kbd）
+      - 同样的 collection（library_home.game_list_row + featured_card +
+                          uninstall_confirm.button）
+      - 同样的 multi-locator（ocr_text + bbox_norm，无 accessibility——Steam 是
+                              CEF/Chromium，UIA 树只有 Chrome_RenderWidgetHostHWND 空壳）
+      - 同样的 multi-state（page / menu / dialog）+ parent_state_id 套嵌
+      - 同样的 postcondition.any + on_failure: ask_user + approval_required
+      - safety: 卸载游戏标 risk_level: destructive，approval_required: true
+
+    UI 差异（vs ERP 假设的传统 WinForms ERP）：
+      - 没有 accessibility locator（CEF），所有 control 必须 ocr_text 或 bbox_norm
+      - 主导航是 tab 而非 sidebar；游戏库列表是文字+图标卡片
+      - 上下文菜单 (kind: menu) + 子菜单 (kind: menu, parent_state_id) + 确认对话框 (kind: dialog)
+
 visual_box:
   id: steam-capsule
-  mode: same_session_virtual_display
+  mode: real_window
   platform: windows
   display:
-    # Steam 有最小窗口尺寸 ~1364x810；用 capsule.migrate 实测尺寸做契约
+    # Steam 有最小窗口尺寸 ~1364x810；契约用实测尺寸
     width_px: 1364
     height_px: 810
-    scale: 1
+    scale: 1.0
     dpi_x: 96
     dpi_y: 96
     refresh_rate_hz: 60
   target_window:
+    process_name: steamwebhelper
     title_regex: ^Steam$
   coordinate_space: normalized_client_rect
   contract:
     require_same_display: true
-    require_client_size_px:
-      - 1364
-      - 810
-    # Steam 不同子页（库 / 商店 / 详情）有时窗口微调；放宽到 80px
+    require_client_size_px: [1364, 810]
+    # Steam 不同子页（库 / 商店 / 详情）有时窗口微调，放宽 80px
     tolerate_client_size_delta_px: 80
     require_unminimized: true
     require_foreground_for_input: true
     validate_before_each_action: true
   fallbacks: []
+
+# ============ Regions：跨 state 共享的 UI 区域 ============
 regions:
   - id: top_nav
-    description: Steam 顶部导航栏（商店/库/社区 + 用户头像 + 窗口控件）。跨 state 共享。
+    description: Steam 顶部导航栏（商店/库/社区 tabs + 用户头像 + 窗口控件）。跨所有 page state 共享。
     bbox_norm: [0, 0.04, 1, 0.04]
     controls:
       - id: store_tab
         role: button
+        label: 商店 Tab
         action_types: [click]
         locator_priority:
-          - type: bbox_norm
-            value: [0.045, 0.054, 0.04, 0.022]
+          - { type: ocr_text, text: 商店, match: exact, min_confidence: 0.7 }
+          - { type: bbox_norm, value: [0.034, 0.054, 0.024, 0.022] }
+        visual: { bbox_norm: [0.034, 0.054, 0.024, 0.022], center_norm: [0.046, 0.065] }
       - id: library_tab
         role: button
+        label: 库 Tab
         action_types: [click]
         locator_priority:
-          - type: ocr_text
-            text: "库"
-            match: exact
-          - type: bbox_norm
-            value: [0.125, 0.054, 0.025, 0.022]
-        # 不设 postcondition：idempotent click（再次点已选中的 tab 不应失败）
+          - { type: ocr_text, text: "库", match: exact, min_confidence: 0.7 }
+          - { type: bbox_norm, value: [0.125, 0.054, 0.025, 0.022] }
+        visual: { bbox_norm: [0.125, 0.054, 0.025, 0.022], center_norm: [0.14, 0.062] }
+      - id: community_tab
+        role: button
+        label: 社区 Tab
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 社区, match: exact, min_confidence: 0.7 }
+          - { type: bbox_norm, value: [0.165, 0.054, 0.024, 0.022] }
+        visual: { center_norm: [0.18, 0.065] }
 
+  # 键盘虚拟控件集：把 Steam 真实快捷键收纳成可寻址 controls
+  # 用法：workflow 步骤里直接 action_id: kbd.close_dialog 而非 inline combo
+  - id: kbd
+    description: 键盘快捷键虚拟集合（Steam 内置 / Windows 标准）
+    bbox_norm: [0.5, 0.5, 0.01, 0.01]
+    controls:
+      - id: close_dialog
+        role: button
+        label: 关闭模态/菜单 (Escape)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: focus_search
+        role: button
+        label: 聚焦搜索 (Ctrl+F)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: confirm
+        role: button
+        label: 确认 (Enter)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: back
+        role: button
+        label: 后退 (Alt+Left)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+
+# ============ States ============
 states:
   - id: store_home
     description: Steam 商店首页（默认入口；推荐 + 特价）
     kind: page
     anchors:
-      - type: visual_hash
-        hash: 0f1312010f1d0d0c
-        min_similarity: 0.78
+      - { type: visual_hash, hash: 0f1312010f1d0d0c, min_similarity: 0.78 }
+      - { type: ocr_text, text: 新鲜推送速递, min_confidence: 0.7 }
     match_policy: any_anchor
+    inherit_regions: [top_nav, kbd]
     controls: []
-    inherit_regions: [top_nav]
     variants: []
 
   - id: library_home
-    description: Steam 库主页（左侧游戏列表 + 右侧主要游戏卡片）
+    description: Steam 库主页（左侧游戏列表 + 中央卡片网格 + 右侧 friends 栏）
     kind: page
     anchors:
-      - type: visual_hash
-        hash: 0f005f67155a520e
-        min_similarity: 0.82
-      - type: ocr_text
-        text: "准备就绪"
-        min_confidence: 0.7
+      - { type: visual_hash, hash: 0f005f67155a520e, min_similarity: 0.82 }
+      - { type: ocr_text, text: 准备就绪, min_confidence: 0.7 }
     match_policy: any_anchor
+    inherit_regions: [top_nav, kbd]
     controls:
-      # 左侧 sidebar 的 dropdown / search / 排序
       - id: filter_dropdown
         role: combobox
+        label: 游戏分类筛选下拉
         action_types: [click]
         locator_priority:
-          - type: bbox_norm
-            value: [0.02, 0.21, 0.16, 0.04]
+          - { type: ocr_text, text: 游戏和软件, match: contains }
+          - { type: bbox_norm, value: [0.02, 0.21, 0.16, 0.04] }
+        visual: { center_norm: [0.1, 0.23] }
       - id: search_icon
         role: button
+        label: 库搜索图标
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.02, 0.27, 0.16, 0.04] }]
+        visual: { center_norm: [0.026, 0.333] }
+      # 左侧游戏列表：collection 描述长列表行（按 N 寻址，配合滚动）
+      - kind: collection
+        id: game_list_row
+        role: button
+        label: 左侧游戏列表行（已安装 + 未分类）
+        action_types: [click, right_click, double_click]
+        locator_priority: [{ type: bbox_norm, value: [0.0, 0.42, 0.22, 0.04] }]
+        visual: { bbox_norm: [0.0, 0.42, 0.22, 0.04] }
+        enumeration:
+          layout: column
+          count: 17     # 实测 "准备就绪 (17)" 分组当前游戏数；滚动后会变
+          cell_bbox_norm: [0.0, 0.42, 0.22, 0.04]
+          spacing_y: 0.04
+        notes: |
+          按 library_home.game_list_row[N]:click 寻址（0..16），双击启动 / 右键开菜单。
+          列表行高 ~32px (norm 0.04)；滚动后 row[N] 指代下一批 → 找特定游戏
+          建议 click-text "{game_name}"，或 commit 一个 game-specific control。
+      # 右侧主内容区的游戏推荐卡片（4 列 × 多行 grid）
+      - kind: collection
+        id: featured_card
+        role: button
+        label: 中央"最近游玩"推荐卡片
+        action_types: [click, double_click]
+        locator_priority: [{ type: bbox_norm, value: [0.275, 0.32, 0.13, 0.18] }]
+        visual: { bbox_norm: [0.275, 0.32, 0.13, 0.18] }
+        enumeration:
+          layout: grid
+          rows: 2
+          cols: 4
+          cell_bbox_norm: [0.275, 0.32, 0.13, 0.18]
+          spacing_x: 0.145
+          spacing_y: 0.21
+    variants: []
+
+  - id: game_context_menu
+    description: 右键游戏行后弹出的上下文菜单（开始 / 添加至 / 移除 / 管理 / 属性）
+    kind: menu
+    parent_state_id: library_home
+    anchors:
+      - { type: ocr_text, text: 开始游戏, match: contains, min_confidence: 0.75 }
+      - { type: ocr_text, text: 管理, match: contains, min_confidence: 0.75 }
+    match_policy: all_anchors
+    inherit_regions: [kbd]
+    controls:
+      - id: play
+        role: menu_item
+        label: 开始游戏
         action_types: [click]
         locator_priority:
-          - type: bbox_norm
-            value: [0.02, 0.27, 0.16, 0.04]
-    inherit_regions: [top_nav]
+          - { type: ocr_text, text: 开始游戏, match: contains }
+        visual: { center_norm: [0.176, 0.378] }
+      - id: add_to_favorites
+        role: menu_item
+        label: 添加至收藏夹
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 添加至收藏夹, match: contains }
+        visual: { center_norm: [0.176, 0.451] }
+      - id: manage
+        role: menu_item
+        label: 管理 (打开子菜单)
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 管理, match: exact, min_confidence: 0.7 }
+          - { type: bbox_norm, value: [0.15, 0.62, 0.06, 0.04] }
+        visual: { center_norm: [0.176, 0.632] }
+      - id: properties
+        role: menu_item
+        label: 属性
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 属性, match: contains }
+        visual: { center_norm: [0.176, 0.704] }
+    variants: []
+
+  - id: game_manage_submenu
+    description: 上下文菜单 > 管理 子菜单（添加快捷方式 / 浏览本地文件 / 隐藏 / 标记私密 / 卸载 / 备份）
+    kind: menu
+    parent_state_id: game_context_menu
+    anchors:
+      - { type: ocr_text, text: 卸载, match: exact, min_confidence: 0.8 }
+      - { type: ocr_text, text: 浏览本地文件, match: contains }
+    match_policy: all_anchors
+    inherit_regions: [kbd]
+    controls:
+      - id: desktop_shortcut
+        role: menu_item
+        label: 添加桌面快捷方式
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 添加桌面快捷方式, match: contains }
+        visual: { center_norm: [0.279, 0.599] }
+      - id: browse_local
+        role: menu_item
+        label: 浏览本地文件
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 浏览本地文件, match: contains }
+        visual: { center_norm: [0.279, 0.660] }
+      - id: hide
+        role: menu_item
+        label: 隐藏此游戏
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 隐藏此游戏, match: contains }
+        visual: { center_norm: [0.279, 0.716] }
+      - id: mark_private
+        role: menu_item
+        label: 标记为私密
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 标记为私密, match: contains }
+        visual: { center_norm: [0.279, 0.778] }
+      # 关键 destructive 控件：卸载
+      - id: uninstall
+        role: menu_item
+        label: 卸载（destructive！弹确认对话框）
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 卸载, match: exact, min_confidence: 0.85 }
+          - { type: bbox_norm, value: [0.255, 0.825, 0.05, 0.04] }
+        visual: { center_norm: [0.279, 0.833] }
+        precondition: { type: state_should_be, state_id: game_manage_submenu }
+        postcondition:
+          any:
+            - { type: state_should_be, state_id: uninstall_confirm }
+            - { type: text_should_appear, text: 您希望从此设备中卸载, timeout_ms: 3000 }
+        risk_level: destructive
+        approval_required: true
+      - id: backup
+        role: menu_item
+        label: 备份游戏文件
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 备份游戏文件, match: contains }
+        visual: { center_norm: [0.279, 0.889] }
+    variants: []
+
+  - id: uninstall_confirm
+    description: 卸载确认模态（"您希望从此设备中卸载 X 吗？" + 卸载/取消 双按钮）
+    kind: dialog
+    parent_state_id: game_manage_submenu
+    anchors:
+      - { type: ocr_text, text: 您希望从此设备中卸载, match: contains, min_confidence: 0.85 }
+      - { type: ocr_text, text: 该游戏仍然在您的游戏库中, match: contains }
+    match_policy: any_anchor
+    inherit_regions: [kbd]
+    controls:
+      # 用 collection 描述对话框的两个并排按钮——一行两列
+      - kind: collection
+        id: button
+        role: button
+        label: 对话框按钮（[0]=卸载 / [1]=取消）
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.602, 0.598, 0.07, 0.04] }]
+        visual: { bbox_norm: [0.602, 0.598, 0.07, 0.04] }
+        enumeration:
+          layout: row
+          count: 2
+          cell_bbox_norm: [0.602, 0.598, 0.07, 0.04]
+          spacing_x: 0.087
+        notes: |
+          按 uninstall_confirm.button[0]:click 确认卸载（destructive）；
+          uninstall_confirm.button[1]:click 取消。
+      # 独立 confirm control（同位置但带 destructive 标记 + postcondition）
+      - id: confirm
+        role: button
+        label: 卸载（蓝色主按钮）
+        action_types: [click]
+        locator_priority:
+          - { type: ocr_text, text: 卸载, match: exact, min_confidence: 0.85 }
+          - { type: bbox_norm, value: [0.602, 0.598, 0.07, 0.04] }
+        visual: { bbox_norm: [0.602, 0.598, 0.07, 0.04], center_norm: [0.648, 0.605] }
+        precondition: { type: state_should_be, state_id: uninstall_confirm }
+        postcondition:
+          any:
+            - { type: modal_should_close }
+            - { type: state_should_be, state_id: library_home }
+            - { type: text_should_disappear, text: 您希望从此设备中卸载, timeout_ms: 8000 }
+        risk_level: destructive
+        approval_required: true
+      - id: cancel
+        role: button
+        label: 取消
+        action_types: [click, key]
+        locator_priority:
+          - { type: ocr_text, text: 取消, match: exact }
+          - { type: bbox_norm, value: [0.689, 0.598, 0.07, 0.04] }
+        visual: { center_norm: [0.696, 0.636] }
+        postcondition:
+          type: modal_should_close
     variants: []
 
 transitions:
   - from: store_home
     to: library_home
     action_id: top_nav.library_tab
+    verify:
+      - { type: text_appears, text: 准备就绪, timeout_ms: 4000 }
+  - from: library_home
+    to: store_home
+    action_id: top_nav.store_tab
+  - from: library_home
+    to: game_context_menu
+    action_id: "library_home.game_list_row[0]:right_click"
+  - from: game_context_menu
+    to: game_manage_submenu
+    action_id: game_context_menu.manage
+  - from: game_manage_submenu
+    to: uninstall_confirm
+    action_id: game_manage_submenu.uninstall
 
+# ============ Workflows ============
 workflows:
-  # 目标演示：把"任务驱动"链路打通——一条命令重放沉淀好的 map。
-  # 不再手工 click + 估坐标 + crop PNG 看位置。
-  #
-  # 注：locator 内容（如 ocr_text.text）固定，不支持 {{}} 模板（只 step.params 支持）。
-  # 所以动态文本目标（"打开游戏 X"，X 不定）应用 vision-mcp click-text 命令式，
-  # 而 workflow 只覆盖 UI 固定位置的元素。
-
+  # 1. 基础导航（无副作用、idempotent）
   - id: open_library
     description: 切到 Library tab（idempotent，已在 library 也成功）
-    inputs: []
     steps:
       - action_id: top_nav.library_tab
-
-  - id: open_library_filter
-    description: 切到 Library + 打开 filter 下拉（多步组合，验证 sediment 链路）
-    inputs: []
-    steps:
-      - action_id: top_nav.library_tab
-      - action_id: library_home.filter_dropdown
+    timeout_ms: 4000
 
   - id: open_store
     description: 切到 Store tab
-    inputs: []
     steps:
       - action_id: top_nav.store_tab
+    timeout_ms: 4000
+
+  - id: open_library_filter
+    description: 切到 Library + 打开 filter 下拉（验证 2 步 sediment 链路）
+    steps:
+      - action_id: top_nav.library_tab
+      - action_id: library_home.filter_dropdown
+    timeout_ms: 6000
+
+  # 2. collection 寻址 demo（双击启动游戏库第 N 个游戏）
+  - id: launch_first_game
+    description: 双击库左侧游戏列表第 0 行启动游戏（collection[N] 字面量寻址 demo）
+    steps:
+      - action_id: top_nav.library_tab
+      - action_id: "library_home.game_list_row[0]:double_click"
+    timeout_ms: 10000
+
+  # 3. destructive workflow demo：完整 Portal 2 卸载（右键 → 管理 → 卸载 → 确认）
+  - id: uninstall_first_installed_game
+    description: |
+      destructive workflow demo：卸载库左侧第 0 个已安装游戏。
+      演示完整跨 state 链：library_home → menu → submenu → dialog → library_home
+      每步带 approval_required + postcondition；on_failure: ask_user 让 agent 看图诊断。
+    inputs:
+      - { name: game_name, type: string, description: "审批提示用游戏名（仅显示；定位走第 0 行）" }
+    steps:
+      - action_id: top_nav.library_tab
+        on_failure: repair
+      - action_id: "library_home.game_list_row[0]:right_click"
+        on_failure: ask_user
+      - action_id: game_context_menu.manage
+        approval_required: true   # 进入"管理"子菜单——用户确认是不是要卸载
+        on_failure: ask_user
+      - action_id: game_manage_submenu.uninstall
+        approval_required: true   # destructive: 触发确认对话框
+        on_failure: abort
+      - action_id: uninstall_confirm.confirm
+        approval_required: true   # destructive: 真正执行卸载（删 manifest + 12GB 文件）
+        on_failure: abort
+    timeout_ms: 60000
+
+  # 4. 取消流程：随时 Esc 关闭菜单/对话框（kbd region 应用）
+  - id: cancel_current_modal
+    description: Esc 关闭当前菜单/对话框
+    steps:
+      - action_id: kbd.close_dialog
+        params: { combo: "Escape" }
+    timeout_ms: 2000
+
 repair_policy:
   max_auto_repair_level: 3
   geometry:
-    tolerate_client_size_delta_px: 2
+    tolerate_client_size_delta_px: 80
     tolerate_origin_change: true
     require_same_dpi: true
   state:
-    min_anchor_score: 0.86
-    min_ocr_similarity: 0.88
-    min_visual_similarity: 0.82
+    min_anchor_score: 0.6
+    min_ocr_similarity: 0.82
+    min_visual_similarity: 0.78
   control_relocation:
-    confidence_threshold: 0.92
-    max_bbox_shift_norm: 0.08
+    confidence_threshold: 0.85
+    max_bbox_shift_norm: 0.1
   destructive_actions:
-    auto_repair_before_action: false
+    auto_repair_before_action: false   # destructive 出错绝不自动 repair；必须 ask_user
     require_user_confirmation: true
+
 safety_policy:
   forbidden_action_categories:
     - payment
@@ -150,16 +448,57 @@ safety_policy:
   require_approval_for_risk_levels:
     - requires_confirmation
     - destructive
-  redaction_patterns: []
+  redaction_patterns:
+    # Steam guard code（5-character alphanumeric token）
+    - "\\b[A-Z0-9]{5}\\b"
+    # Steam 账户 ID（profile URL 段 76561198XXXXXXXXX）
+    - "76561[0-9]{12}"
   allow_cloud_vlm: false
   audit_log_retention_days: 30
+
 input_lease_policy:
-  default_lease_ms: 5000
+  default_lease_ms: 10000
   break_on_user_input: true
   break_hotkey: Esc Esc
   require_revalidate_after_break: true
+
 metadata:
-  created_at: 2026-05-27T23:18:52.694Z
-  created_by: vision-mcp-builder
-  tags: []
+  created_at: 2026-05-27T23:30:00.000Z
+  created_by: vision-mcp-windows-steam-demo
+  tags: [steam, windows, cef, region, kbd, collection, destructive, multi-state]
+  notes: |
+    Steam (Windows + CEF) 的完整 demo，对照 example-erp 的特性矩阵：
+
+    用上了：
+    ✅ regions/inherit_regions (top_nav / kbd)
+    ✅ kbd virtual region（close_dialog/focus_search/confirm/back 4 个真实快捷键）
+    ✅ collection × 3：library_home.game_list_row（17 行）/ featured_card（2×4 grid）
+                     / uninstall_confirm.button（行 2 按钮）
+    ✅ collection[N]:action_type 寻址
+    ✅ multi-locator priority chain (ocr_text → bbox_norm)
+    ✅ visual.bbox_norm / center_norm 双轨 fallback
+    ✅ action_types 多元素（[click, right_click, double_click] 首位默认）
+    ✅ 5 个 states，其中 game_context_menu/game_manage_submenu 是 kind: menu
+                            uninstall_confirm 是 kind: dialog
+    ✅ parent_state_id 套嵌（menu → submenu → dialog）
+    ✅ 5 个 transitions（含 verify）
+    ✅ 6 个 workflows：navigation / collection 寻址 / destructive 4 步链 / cancel
+    ✅ precondition (state_should_be) + postcondition.any (multi-condition OR)
+    ✅ modal_should_close / text_should_appear / text_should_disappear / state_should_be
+    ✅ risk_level: destructive + approval_required: true 在 uninstall + confirm
+    ✅ workflow step 级 approval_required + on_failure: ask_user/abort/repair
+    ✅ workflow inputs / timeout_ms
+    ✅ safety_policy.redaction_patterns (Steam guard code / profile id)
+
+    未用（不适用于本 app）：
+    ❌ accessibility locator（CEF：UIA 看到的只是 Chrome_RenderWidgetHostHWND 空壳）
+    ❌ nearby_text locator（ERP "用户名" 旁标签布局；Steam UI 无此模式）
+    ❌ image_patch locator（OCR + bbox 已够；适合 icon-only 按钮如 ⚙）
+    ❌ vlm locator（safety_policy.allow_cloud_vlm: false）
+
+    实战提示：
+    - locator.ocr_text 不支持 {{}} 模板插值（只 step.params 支持）→
+      动态文本目标（游戏名）走 vision-mcp click-text 命令式，不放进 workflow
+    - collection 字面量寻址 (`[N]:action_type`) 支持，但 N workflow 写死；
+      运行时按变量索引用 perform_action 直接传 action_id 字符串
   builder_version: "0.1"
