@@ -54,6 +54,100 @@ Add-Type -AssemblyName UIAutomationTypes
 # UIAutomationClient 不自动拉 WindowsBase。
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName PresentationCore
+# MSAA fallback：老 Win32 / MFC / GDI 自绘 app（记事本经典模式、部分对话框）
+# UIAutomation 看不到任何内容，但 IAccessible 能拿到树。Accessibility.dll 是
+# 系统自带的 MSAA 托管包装。
+Add-Type -AssemblyName Accessibility
+
+# MSAA dump：全部递归逻辑写 C#。PowerShell 5.1 不能把 oleacc 返回的
+# System.__ComObject 显式 cast 成 Accessibility.IAccessible（cast 抛
+# InvalidCastException），所有 IAccessible 成员调用都要在 C# 强类型范围做。
+# C# 直接返回 List<Dictionary<string,object>>，PowerShell 可直接 ConvertTo-Json。
+Add-Type -ReferencedAssemblies Accessibility @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using Accessibility;
+public static class MsaaDumper {
+    [DllImport("oleacc.dll")]
+    static extern int AccessibleObjectFromWindow(IntPtr hwnd, uint id, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IAccessible ppvObject);
+    [DllImport("oleacc.dll")]
+    static extern int AccessibleChildren(IAccessible paccContainer, int iChildStart, int cChildren, [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 3)] object[] rgvarChildren, out int pcObtained);
+    [DllImport("oleacc.dll")]
+    static extern uint GetRoleText(uint dwRole, StringBuilder lpszRole, uint cchRoleMax);
+    const uint OBJID_CLIENT = 0xFFFFFFFC;
+    static string RoleName(object roleObj) {
+        if (roleObj == null) return "MSAA_null";
+        if (roleObj is string) return "MSAA_" + (string)roleObj;
+        try {
+            uint r = Convert.ToUInt32(roleObj);
+            var sb = new StringBuilder(256);
+            GetRoleText(r, sb, 256);
+            var s = sb.ToString();
+            return string.IsNullOrEmpty(s) ? ("MSAA_role" + r) : ("MSAA_" + s);
+        } catch { return "MSAA_" + roleObj.ToString(); }
+    }
+    static double Finite(double v) { return (double.IsInfinity(v) || double.IsNaN(v)) ? 0.0 : v; }
+    public static List<Dictionary<string, object>> Dump(IntPtr hwnd, int maxNodes, int maxDepth) {
+        var result = new List<Dictionary<string, object>>();
+        Guid iid = new Guid("618736e0-3c3d-11cf-810c-00aa00389b71");
+        IAccessible root = null;
+        if (AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, ref iid, out root) != 0 || root == null) return result;
+        var stack = new Stack<Tuple<IAccessible, int, int, string>>();
+        stack.Push(Tuple.Create(root, 0, 0, "win[0]"));
+        while (stack.Count > 0 && result.Count < maxNodes) {
+            var cur = stack.Pop();
+            IAccessible acc = cur.Item1;
+            int childId = cur.Item2;
+            int depth = cur.Item3;
+            string path = cur.Item4;
+            try {
+                string name = null, desc = null;
+                try { name = acc.get_accName(childId); } catch {}
+                try { desc = acc.get_accDescription(childId); } catch {}
+                object roleObj = null;
+                try { roleObj = acc.get_accRole(childId); } catch {}
+                string roleName = RoleName(roleObj);
+                int x = 0, y = 0, w = 0, h = 0;
+                try { acc.accLocation(out x, out y, out w, out h, childId); } catch {}
+                var node = new Dictionary<string, object> {
+                    {"role", roleName}, {"name", name}, {"desc", desc}, {"class", null},
+                    {"pos", new double[] { Finite((double)x), Finite((double)y) }},
+                    {"size", new double[] { Finite((double)w), Finite((double)h) }},
+                    {"depth", depth}, {"path", path}
+                };
+                result.Add(node);
+                if (depth < maxDepth && childId == 0) {
+                    int childCount = 0;
+                    try { childCount = acc.accChildCount; } catch {}
+                    if (childCount > 0) {
+                        int bufSize = Math.Min(childCount, 100);
+                        var kids = new object[bufSize];
+                        int n = 0;
+                        try { AccessibleChildren(acc, 0, bufSize, kids, out n); } catch {}
+                        for (int k = 0; k < n; k++) {
+                            if (result.Count >= maxNodes) break;
+                            var kid = kids[k];
+                            if (kid == null) continue;
+                            var asIAcc = kid as IAccessible;
+                            if (asIAcc != null) {
+                                stack.Push(Tuple.Create(asIAcc, 0, depth + 1, path + "/" + roleName + "[" + k + "]"));
+                            } else {
+                                try {
+                                    int cid = Convert.ToInt32(kid);
+                                    if (cid > 0) stack.Push(Tuple.Create(acc, cid, depth + 1, path + "/" + roleName + "[" + k + "]"));
+                                } catch {}
+                            }
+                        }
+                    }
+                }
+            } catch {}
+        }
+        return result;
+    }
+}
+"@
 
 # Win32 互操作：窗口/输入/DPI/HDC
 Add-Type @"
@@ -482,30 +576,57 @@ function Capture-Rect-Annotated($rect, $boxes, $gridStep) {
 
 # ---------- Input ----------
 
+# 鼠标 INPUT 工厂：相对/绝对都可。这里只用绝对（SetCursorPos 已经决定了位置，
+# 后续 mouse_event 仅发按键状态，不要 dx/dy）。
+function New-MouseInput([uint32]$flags) {
+    $i = New-Object Win32+INPUT
+    $i.type = 0  # INPUT_MOUSE
+    $i.u.mi.dx = 0; $i.u.mi.dy = 0
+    $i.u.mi.mouseData = 0; $i.u.mi.dwFlags = $flags
+    $i.u.mi.time = 0; $i.u.mi.dwExtraInfo = [IntPtr]::Zero
+    return $i
+}
+
+# Post-Click：SendInput 路径替 mouse_event。
+# mouse_event 在 Win 10+ 文档已 deprecated；SendInput 是唯一受 UIPI 完整管的路径
+# （即 elevated app 也允许我们的 elevated helper 注入；提升 vision-mcp 父进程
+# 权限即可）。
 function Post-Click($point, $button = "left", $count = 1) {
     [Win32]::SetCursorPos([int]$point.x, [int]$point.y) | Out-Null
     $down = if ($button -eq "right") { 0x0008 } elseif ($button -eq "middle") { 0x0020 } else { 0x0002 }
     $up   = if ($button -eq "right") { 0x0010 } elseif ($button -eq "middle") { 0x0040 } else { 0x0004 }
+    $size = [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])
     for ($i = 0; $i -lt $count; $i++) {
-        [Win32]::mouse_event($down, 0, 0, 0, [IntPtr]::Zero)
-        [Win32]::mouse_event($up,   0, 0, 0, [IntPtr]::Zero)
+        $arr = New-Object 'Win32+INPUT[]' 2
+        $arr[0] = New-MouseInput $down
+        $arr[1] = New-MouseInput $up
+        [Win32]::SendInput(2, $arr, $size) | Out-Null
         if ($i -lt $count - 1) { Start-Sleep -Milliseconds 50 }
     }
 }
 
 function Post-Drag($from, $to, $steps = 20, $durationMs = 200) {
     [Win32]::SetCursorPos([int]$from.x, [int]$from.y) | Out-Null
-    [Win32]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)  # leftDown
+    Start-Sleep -Milliseconds 30
+    $size = [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])
+    # 1. 左键按下（SendInput）
+    $down = New-Object 'Win32+INPUT[]' 1
+    $down[0] = New-MouseInput 0x0002  # MOUSEEVENTF_LEFTDOWN
+    [Win32]::SendInput(1, $down, $size) | Out-Null
+    # 2. 逐步移动（SetCursorPos 配合短 sleep；不在 SendInput 队列发 MOVE，
+    #    那样部分 app 把多步合成一步看不到中间轨迹）
     $sleepMs = [Math]::Max(1, [int]($durationMs / $steps))
     for ($i = 1; $i -le $steps; $i++) {
         $t = $i / $steps
         $x = [int]($from.x + ($to.x - $from.x) * $t)
         $y = [int]($from.y + ($to.y - $from.y) * $t)
         [Win32]::SetCursorPos($x, $y) | Out-Null
-        [Win32]::mouse_event(0x0001, 0, 0, 0, [IntPtr]::Zero)  # mouseMove
         Start-Sleep -Milliseconds $sleepMs
     }
-    [Win32]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)  # leftUp
+    # 3. 左键松开
+    $up = New-Object 'Win32+INPUT[]' 1
+    $up[0] = New-MouseInput 0x0004  # MOUSEEVENTF_LEFTUP
+    [Win32]::SendInput(1, $up, $size) | Out-Null
 }
 
 function Post-Type($text) {
@@ -723,6 +844,30 @@ function Recognize-Rect($rect) {
 # 对支持 InvokePattern 的元素（普通按钮、菜单项、链接）等价"零鼠标点击"；
 # 对 ListItem / TabItem 等用 SelectionItemPattern。
 
+# MSAA fallback 入口：所有递归 + IAccessible 互操作在 [MsaaDumper]::Dump (C#) 里。
+# PowerShell 这层只负责把 List<Dictionary> 转 hashtable 让 ConvertTo-Json 正确序列化
+# （直接 ConvertTo-Json List<Dictionary> 会输出 .NET 类型元数据混进 JSON）。
+function Dump-MSAA-Tree($handle, $maxNodes = 500, $maxDepth = 6) {
+    $hwnd = [IntPtr]::new([int64]$handle)
+    $raw = [MsaaDumper]::Dump($hwnd, [int]$maxNodes, [int]$maxDepth)
+    $out = New-Object System.Collections.ArrayList
+    foreach ($n in $raw) {
+        # Dictionary<string,object> 直接 ConvertTo-Json 可用；放进 ArrayList
+        # 让 Send-Result -AsArray 走标准路径
+        [void]$out.Add(@{
+            role  = $n["role"]
+            name  = $n["name"]
+            desc  = $n["desc"]
+            class = $n["class"]
+            pos   = $n["pos"]
+            size  = $n["size"]
+            depth = $n["depth"]
+            path  = $n["path"]
+        })
+    }
+    return $out
+}
+
 function Dump-UIA-Tree($handle, $maxNodes = 500, $maxDepth = 6) {
     $hwnd = [IntPtr]::new([int64]$handle)
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
@@ -896,7 +1041,26 @@ while ($true) {
             "ax.dump" {
                 $maxNodes = if ($p.max_nodes) { [int]$p.max_nodes } else { 500 }
                 $maxDepth = if ($p.max_depth) { [int]$p.max_depth } else { 6 }
-                Send-Result $id (Dump-UIA-Tree $p.handle $maxNodes $maxDepth) -AsArray
+                $uia = Dump-UIA-Tree $p.handle $maxNodes $maxDepth
+                # UIA 拿不到内容的老 Win32 / GDI 自绘 app（记事本经典模式、老 MFC）
+                # 自动 fallback 到 MSAA。判定：UIA 节点数 < 3 视为 UIA 没看到内容
+                # （ProgrammaticName "ControlType.Pane" 套娃几层但没 name/desc 的情况也 < 3 节点有效）
+                # explicit prefer_msaa=true：跳过 UIA 直接走 MSAA
+                if ($p.prefer_msaa -or $uia.Count -lt 3) {
+                    $msaa = Dump-MSAA-Tree $p.handle $maxNodes $maxDepth
+                    if ($msaa.Count -gt $uia.Count) {
+                        Send-Result $id $msaa -AsArray
+                        break
+                    }
+                }
+                Send-Result $id $uia -AsArray
+                break
+            }
+            "ax.dump_msaa" {
+                # 强制走 MSAA，给 agent 调试 / 比较两条路径用
+                $maxNodes = if ($p.max_nodes) { [int]$p.max_nodes } else { 500 }
+                $maxDepth = if ($p.max_depth) { [int]$p.max_depth } else { 6 }
+                Send-Result $id (Dump-MSAA-Tree $p.handle $maxNodes $maxDepth) -AsArray
                 break
             }
             "capture.rect" {
@@ -947,21 +1111,35 @@ while ($true) {
             }
             "input.scroll" {
                 # dy_px：正值 = 向下滚（屏幕内容上移），与 macOS 一致。
-                # mouse_event 的 dwData 期望的是有符号 short（一格 = 120）；
-                # 但 DllImport 把它声明成 uint，PowerShell 不能直接传负数 ——
-                # 把负值做 32-bit 位级强转成 uint 再传。
+                # 走 SendInput 的 MOUSEINPUT；mouseData 是 int32 包装的 short，负数自然支持。
+                # 一格 = WHEEL_DELTA = 120；用户给 dy_px 直接当 wheel delta 传。
                 $dy = if ($p.dy_px) { [int]$p.dy_px } else { 0 }
                 $dx = if ($p.dx_px) { [int]$p.dx_px } else { 0 }
                 [Win32]::SetCursorPos([int]$p.point.x, [int]$p.point.y) | Out-Null
+                $size = [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])
+                # MOUSEINPUT.mouseData 是 uint，但 short→uint 位转：负值要做 32-bit 补码
+                function WheelToUint($v) {
+                    if ($v -lt 0) { return [uint32]([int64]4294967296 + $v) } else { return [uint32]$v }
+                }
                 if ($dy -ne 0) {
-                    $wheel = -$dy  # 负 dy = 向上 = wheel forward = positive WHEEL_DELTA
-                    if ($wheel -lt 0) { $wheelU = [uint32]([int64]4294967296 + $wheel) } else { $wheelU = [uint32]$wheel }
-                    [Win32]::mouse_event(0x0800, 0, 0, $wheelU, [IntPtr]::Zero)
+                    $arr = New-Object 'Win32+INPUT[]' 1
+                    $i = New-Object Win32+INPUT
+                    $i.type = 0; $i.u.mi.dx = 0; $i.u.mi.dy = 0
+                    $i.u.mi.mouseData = WheelToUint (-$dy)  # 负 dy = forward wheel
+                    $i.u.mi.dwFlags = 0x0800  # MOUSEEVENTF_WHEEL
+                    $i.u.mi.time = 0; $i.u.mi.dwExtraInfo = [IntPtr]::Zero
+                    $arr[0] = $i
+                    [Win32]::SendInput(1, $arr, $size) | Out-Null
                 }
                 if ($dx -ne 0) {
-                    $wheel = $dx
-                    if ($wheel -lt 0) { $wheelU = [uint32]([int64]4294967296 + $wheel) } else { $wheelU = [uint32]$wheel }
-                    [Win32]::mouse_event(0x01000, 0, 0, $wheelU, [IntPtr]::Zero)  # MOUSEEVENTF_HWHEEL
+                    $arr = New-Object 'Win32+INPUT[]' 1
+                    $i = New-Object Win32+INPUT
+                    $i.type = 0; $i.u.mi.dx = 0; $i.u.mi.dy = 0
+                    $i.u.mi.mouseData = WheelToUint $dx
+                    $i.u.mi.dwFlags = 0x01000  # MOUSEEVENTF_HWHEEL
+                    $i.u.mi.time = 0; $i.u.mi.dwExtraInfo = [IntPtr]::Zero
+                    $arr[0] = $i
+                    [Win32]::SendInput(1, $arr, $size) | Out-Null
                 }
                 Send-Result $id @{ ok = $true }
                 break
