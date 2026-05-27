@@ -2148,16 +2148,45 @@ async function cmdInstallHelper(args: ParsedArgs) {
   const force = Boolean(args.flags.force);
   const silent = Boolean(args.flags.silent);   // 静默模式：失败不抛错，给 postinstall 用
   const platform = process.platform;
-  // prefix 解析：
-  //   1. 用户 --prefix 显式指定
-  //   2. cli 包内的 native/（npm install 后 prepublishOnly 把仓库 native/ 复制进来）
-  //   3. 仓库根 ../../native（源码 dev 模式）
-  const cliDir = path.dirname(new URL(import.meta.url).pathname);
+  const { fileURLToPath } = await import("node:url");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execP = promisify(execFile);
+
+  // 跨平台路径解析（避免 Windows 上 new URL().pathname 带前导斜杠）
+  const cliDir = path.dirname(fileURLToPath(import.meta.url));
+
+  // 检测命令是否在 PATH（跨平台：用 spawn 试一下，比 which/where 更可靠）
+  async function commandExists(cmd: string, probeArgs: string[] = ["--version"]): Promise<boolean> {
+    try {
+      await execP(cmd, probeArgs, { timeout: 5000 });
+      return true;
+    } catch (err: unknown) {
+      const e = err as { code?: string; status?: number };
+      // 命令存在但 --version 失败时 status !== 0 但不是 ENOENT
+      if (e?.code === "ENOENT") return false;
+      // 其他错（包括 --version 异常退出）仍认为命令存在
+      return true;
+    }
+  }
+
+  // 跨平台文件存在/可执行检测：Windows 上 X_OK 不可靠（用 ACL 而非 mode bits），只查 F_OK
+  async function isExecutable(p: string): Promise<boolean> {
+    try {
+      const mode = platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK;
+      await fs.access(p, mode);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // prefix 解析：1) --prefix 显式 2) cli 包内 native/（npm 安装）3) 仓库根 ../../native（源码 dev）
   const candidates = args.flags.prefix
     ? [String(args.flags.prefix)]
     : [
-        path.resolve(cliDir, "..", "..", "native"),   // packages/cli/native（npm 安装路径）
-        path.resolve(cliDir, "..", "..", "..", "native"), // 仓库根 native（源码 dev）
+        path.resolve(cliDir, "..", "..", "native"),
+        path.resolve(cliDir, "..", "..", "..", "native"),
       ];
   let prefix = candidates[0];
   for (const c of candidates) {
@@ -2172,7 +2201,7 @@ async function cmdInstallHelper(args: ParsedArgs) {
   const fail = (msg: string) => {
     if (silent) {
       console.warn(`[vision-mcp install-helper] ${msg.split("\n")[0]}`);
-      console.warn(`[vision-mcp install-helper] 详细指引请运行：vision-mcp install-helper`);
+      console.warn(`[vision-mcp install-helper] 详细指引：vision-mcp install-helper`);
       return; // silent 模式不抛
     }
     throw new Error(msg);
@@ -2181,16 +2210,11 @@ async function cmdInstallHelper(args: ParsedArgs) {
   if (platform === "darwin") {
     const helperPath = path.join(prefix, "macos", "vision-mcp-helper");
     const srcPath = path.join(prefix, "macos", "src", "main.swift");
-    let exists = false;
-    try {
-      await fs.access(helperPath, fs.constants.X_OK);
-      exists = true;
-    } catch { /* not exists */ }
-    if (exists && !force) {
+    if (await isExecutable(helperPath) && !force) {
       log(`✅ macOS helper 已就绪：${helperPath}`);
       if (!silent) {
         log(`   重新编译请加 --force`);
-        log(`📋 配置环境变量（若 host 未自动检测）：`);
+        log(`📋 host 配置环境变量（Plugin / npm 路径会自动）：`);
         log(`   export VISION_MCP_NATIVE_HELPER="${helperPath}"`);
       }
       return;
@@ -2200,13 +2224,7 @@ async function cmdInstallHelper(args: ParsedArgs) {
     } catch {
       return fail(`找不到 swift 源码 ${srcPath}。请确保完整安装（npm tarball / git clone）。`);
     }
-    // 检测 swiftc
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const exec = promisify(execFile);
-    try {
-      await exec("which", ["swiftc"]);
-    } catch {
+    if (!(await commandExists("swiftc", ["--version"]))) {
       return fail(
         `未找到 swiftc。请先安装 Xcode Command Line Tools：\n` +
           `   xcode-select --install\n` +
@@ -2215,7 +2233,7 @@ async function cmdInstallHelper(args: ParsedArgs) {
     }
     log(`🔨 编译 macOS helper（首次约 5–10 秒）...`);
     try {
-      await exec(
+      await execP(
         "swiftc",
         [
           "-O",
@@ -2229,19 +2247,17 @@ async function cmdInstallHelper(args: ParsedArgs) {
           "-framework", "CoreImage",
           "-framework", "ScreenCaptureKit",
         ],
-        { maxBuffer: 10 * 1024 * 1024 },
+        { maxBuffer: 10 * 1024 * 1024, timeout: 120_000 },
       );
     } catch (err) {
       return fail(
         `swiftc 编译失败：${(err as Error).message}\n` +
-          `请确认已安装 Xcode Command Line Tools：\n` +
-          `   xcode-select --install`,
+          `请确认已安装 Xcode Command Line Tools：xcode-select --install`,
       );
     }
     log(`✅ 编译完成：${helperPath}`);
     if (!silent) {
-      log(`📋 host 配置环境变量（Claude Code Plugin 已自动）：`);
-      log(`   export VISION_MCP_NATIVE_HELPER="${helperPath}"`);
+      log(`📋 host 配置：export VISION_MCP_NATIVE_HELPER="${helperPath}"`);
       log(`\n⚠️  第一次操作真窗口时，macOS 会弹两个授权对话框：`);
       log(`   1. 屏幕录制（Screen Recording）`);
       log(`   2. 辅助功能（Accessibility）`);
@@ -2258,48 +2274,47 @@ async function cmdInstallHelper(args: ParsedArgs) {
     } catch {
       return fail(`找不到 PowerShell 脚本 ${ps1Path}。请确保完整安装。`);
     }
-    let exeExists = false;
-    try {
-      await fs.access(exePath);
-      exeExists = true;
-    } catch { /* not exists */ }
-    if (exeExists && !force) {
+    if (await isExecutable(exePath) && !force) {
       log(`✅ Windows helper.exe 已就绪：${exePath}`);
       if (!silent) {
-        log(`📋 host 配置环境变量：`);
-        log(`   $env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
+        log(`📋 host 配置：$env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
       }
       return;
     }
     // 尝试 ps2exe 自动编译
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const exec = promisify(execFile);
+    // 强制 UTF-8 输出避免 PowerShell 默认 UTF-16 BOM 让 Node stdout 乱码
+    const psWrap = (script: string) =>
+      `$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ${script}`;
+    let ps2exeReady = false;
     try {
-      const psCheck = await exec("powershell", [
-        "-NoProfile", "-Command",
-        "if (Get-Module -ListAvailable -Name ps2exe) { 'ok' } else { 'missing' }",
-      ]);
-      if ((psCheck.stdout || "").trim() === "ok") {
-        log(`🔨 用 ps2exe 编译 Windows helper.exe...`);
-        await exec("powershell", [
-          "-NoProfile", "-Command",
-          `Invoke-ps2exe "${ps1Path}" "${exePath}" -noConsole`,
-        ], { maxBuffer: 10 * 1024 * 1024 });
+      const psCheck = await execP("powershell", [
+        "-NoProfile", "-NonInteractive", "-Command",
+        psWrap("if (Get-Module -ListAvailable -Name ps2exe) { Write-Output 'ok' } else { Write-Output 'missing' }"),
+      ], { timeout: 15_000 });
+      ps2exeReady = (psCheck.stdout || "").trim() === "ok";
+    } catch {
+      // powershell 调用失败（可能 ExecutionPolicy 限制），fall through
+    }
+    if (ps2exeReady) {
+      log(`🔨 用 ps2exe 编译 Windows helper.exe...`);
+      try {
+        await execP("powershell", [
+          "-NoProfile", "-NonInteractive", "-Command",
+          psWrap(`Invoke-ps2exe "${ps1Path}" "${exePath}" -noConsole`),
+        ], { maxBuffer: 10 * 1024 * 1024, timeout: 120_000 });
         log(`✅ 编译完成：${exePath}`);
         if (!silent) {
           log(`📋 host 配置：$env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
         }
         return;
+      } catch (err) {
+        return fail(`ps2exe 编译失败：${(err as Error).message}\n请确认权限充足。`);
       }
-    } catch {
-      // ps2exe 不可用，fall through 到指引
     }
-    // ps2exe 不可用 / 调用失败 → 给出指引
+    // ps2exe 不可用 → 给指引（silent 模式 fallback .ps1）
     if (silent) {
-      // 静默模式下：fallback 到指向 .ps1（功能可用，仅启动慢）
       console.warn(`[vision-mcp install-helper] Windows: ps2exe 未安装，将用 .ps1 模式（启动较慢 ~400ms）`);
-      console.warn(`[vision-mcp install-helper] 加速 .exe 编译：vision-mcp install-helper`);
+      console.warn(`[vision-mcp install-helper] 加速 .exe 编译方法：vision-mcp install-helper`);
       return;
     }
     log(`📝 Windows helper 部署说明`);
@@ -2317,7 +2332,7 @@ async function cmdInstallHelper(args: ParsedArgs) {
 
   // Linux / 其他平台：mock-only
   if (silent) {
-    console.warn(`[vision-mcp install-helper] 当前 platform=${platform} 不支持 native helper；运行时仅 mock 模式可用`);
+    console.warn(`[vision-mcp install-helper] 当前 platform=${platform} 不支持 native helper；仅 mock 可用`);
     return;
   }
   fail(`install-helper 只支持 macOS / Windows，当前 platform=${platform}`);

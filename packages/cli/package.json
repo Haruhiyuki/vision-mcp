@@ -34,8 +34,8 @@
     "build": "tsc -b",
     "clean": "rimraf dist *.tsbuildinfo",
     "test": "vitest run",
-    "postinstall": "node ./dist/index.js install-helper --silent || true",
-    "prepublishOnly": "npm run clean && npm run build && find dist \\( -name '*tsbuildinfo' -o -name '*.map' \\) -delete && rm -rf native && cp -R ../../native ./native && rm -f ./native/macos/vision-mcp-helper ./native/windows/vision-mcp-helper.exe"
+    "postinstall": "node ./scripts/postinstall.mjs",
+    "prepublishOnly": "node ./scripts/prepublish.mjs"
   },
   "dependencies": {
     "@vision-mcp/core": "0.1.0",

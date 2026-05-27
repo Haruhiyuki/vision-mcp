@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createServerContext } from "./context.js";
 import { createVisionMcpServer } from "./server.js";
 import { runStdio } from "./transport.js";
@@ -9,26 +10,28 @@ async function checkHelper(helperPath?: string): Promise<void> {
   const platform = process.platform;
   if (platform !== "darwin" && platform !== "win32") return; // 其他平台仅 mock
 
+  // 跨平台：Windows X_OK 用 ACL 不可靠，统一只查 F_OK
+  const checkMode = platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK;
+
   // 尝试解析 helper 路径
   let resolved: string | undefined = helperPath;
   if (!resolved) {
     // 默认搜索 native/<platform>/vision-mcp-helper(.exe)
-    const cliRoot = path.resolve(
-      path.dirname(new URL(import.meta.url).pathname),
+    // 用 fileURLToPath 而非 new URL().pathname，避免 Windows 上前导斜杠
+    const serverRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
       "..", "..", "..",
     );
-    const guesses = platform === "darwin"
-      ? [
-          path.join(cliRoot, "native", "macos", "vision-mcp-helper"),
-          path.join(cliRoot, "..", "native", "macos", "vision-mcp-helper"),
-        ]
-      : [
-          path.join(cliRoot, "native", "windows", "vision-mcp-helper.exe"),
-          path.join(cliRoot, "..", "native", "windows", "vision-mcp-helper.exe"),
-        ];
+    const helperName = platform === "darwin" ? "vision-mcp-helper" : "vision-mcp-helper.exe";
+    const subdir = platform === "darwin" ? "macos" : "windows";
+    const guesses = [
+      path.join(serverRoot, "native", subdir, helperName),
+      path.join(serverRoot, "..", "native", subdir, helperName),
+      path.join(serverRoot, "..", "..", "native", subdir, helperName),
+    ];
     for (const g of guesses) {
       try {
-        await fs.access(g, fs.constants.X_OK);
+        await fs.access(g, checkMode);
         resolved = g;
         break;
       } catch { /* try next */ }
@@ -45,10 +48,10 @@ async function checkHelper(helperPath?: string): Promise<void> {
   }
 
   try {
-    await fs.access(resolved, fs.constants.X_OK);
+    await fs.access(resolved, checkMode);
   } catch {
     process.stderr.write(
-      `[vision-mcp-server] ⚠️  native helper "${resolved}" 不存在或不可执行。\n` +
+      `[vision-mcp-server] ⚠️  native helper "${resolved}" 不存在。\n` +
         `   重新编译：vision-mcp install-helper --force\n`,
     );
   }
