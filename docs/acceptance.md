@@ -21,7 +21,7 @@
 | ---- | ---- | ---- |
 | 授权后捕获目标窗口 / 显示器 | ✅ 接口完整 | `MacosPlatformAdapter.captureWindow/captureDisplay`；权限指引 `docs/permissions.md` |
 | 通过 Accessibility 控制窗口与执行点击/输入 | ✅ 接口完整 | helper 协议 `window.move/restore` + `input.*` |
-| 建立 Real-window Capsule 的 geometry contract | ✅ | `apps/notes/vision-mcp.yaml` 等 `mode: real_window`；窗口固定主屏稳定位置 |
+| 建立 Real-window Capsule 的 geometry contract | ✅ | `examples/notes/vision-mcp.yaml` 等 `mode: real_window`；窗口固定主屏稳定位置 |
 | 已有第二显示器存在时迁入工作区 | ✅ | `pickStableDisplay` 优先用窗口当前所在 display（用户已拖到副屏的窗口保留在副屏） |
 | 权限缺失 / 全屏 / 不支持窗口有错误提示 | ✅ | 错误码 `PERMISSION_DENIED` / `GEOMETRY_MISMATCH`，详见 `docs/errors.md` |
 
@@ -35,8 +35,8 @@
 | 错误码文档 | ✅ | `docs/errors.md` |
 | 用户权限说明 | ✅ | `docs/permissions.md` |
 | 部署/卸载说明 | ✅ | `docs/deployment.md` |
-| 2 个示例应用 map | ✅ | `examples/example-erp`（设计文档配套虚构 demo）+ 真实可跑案例：`apps/apple-music`、`apps/notes`、`apps/activity-monitor` |
-| 2 条 workflow | ✅ | `example-erp.login_and_create_invoice`、`apps/notes.write_intro`、`apps/apple-music.search_and_play_top_song` |
+| 2 个示例应用 map | ✅ | `examples/example-erp`（设计文档配套虚构 demo）+ 真实可跑案例：`examples/apple-music`、`examples/notes`、`examples/activity-monitor` |
+| 2 条 workflow | ✅ | `example-erp.login_and_create_invoice`、`examples/notes.write_intro`、`examples/apple-music.search_and_play_top_song` |
 | trace 样例 | ✅ | `examples/example-erp/traces/sample-session.jsonl` |
 | repair patch 样例 | ✅ | `examples/example-erp/patches/2026-05-26-invoice-submit-relocated.yaml` |
 

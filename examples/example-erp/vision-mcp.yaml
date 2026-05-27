@@ -19,9 +19,9 @@ app:
 
     ⚠️ 这是 hypothetical demo（target=erp.exe），不能直接对真实软件跑。
     真实可跑案例见仓库 apps/ 目录：
-      - apps/apple-music/        macOS：region + collection + 双轨 locator
-      - apps/notes/              macOS：SwiftUI 自绘 + kbd region 案例
-      - apps/activity-monitor/   macOS：table view + 列排序
+      - examples/apple-music/        macOS：region + collection + 双轨 locator
+      - examples/notes/              macOS：SwiftUI 自绘 + kbd region 案例
+      - examples/activity-monitor/   macOS：table view + 列排序
 
 visual_box:
   id: erp-capsule-1

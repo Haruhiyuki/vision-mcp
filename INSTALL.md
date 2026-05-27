@@ -143,16 +143,17 @@ VISION_MCP_NATIVE_HELPER = "/usr/local/lib/node_modules/@vision-mcp/cli/native/m
 
 ### B.4 准备 apps 目录
 
-`--apps-root` 指向放 `vision-mcp.yaml` 的目录。仓库的 `apps/` 提供了示例：
-- `apps/apple-music/` — Apple Music
-- `apps/notes/` — macOS 备忘录
-- `apps/activity-monitor/` — 活动监视器
+`--apps-root` 指向放 `vision-mcp.yaml` 的目录（用户自己的 map data；仓库 `apps/` 已加进 .gitignore，是用户专属工作区）。仓库 `examples/` 提供了参考 maps：
+- `examples/apple-music/` — Apple Music
+- `examples/notes/` — macOS 备忘录
+- `examples/activity-monitor/` — 活动监视器
+- `examples/example-erp/` — 虚构 Windows ERP demo（架构完整展示）
 
 复制示例到你的 apps-root：
 
 ```bash
 mkdir -p ~/.vision-mcp/apps
-cp -r ./apps/* ~/.vision-mcp/apps/
+cp -r ./examples/* ~/.vision-mcp/apps/
 ```
 
 ---

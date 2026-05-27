@@ -24,7 +24,7 @@
 | **macOS SCKit window capture** | ✅ 完整 | `capture.window` 用 ScreenCaptureKit 抓窗口（2560×1600 retina） |
 | **macOS AX-press**（高级输入） | ✅ 完整 | `input.ax_press` BFS 找窗口元素发 AXPerformAction("AXPress")，对有 AXPress action 的元素零鼠标干预 |
 | **CLI 命令族** | ✅ 完整 | `vision-mcp displays / capsule / restore / live-view / ax-press` |
-| Skill 文档 / 示例 map / trace 样例 | ✅ 完整 | `skills/vision-mcp/`、`examples/`、`apps/activity-monitor/` |
+| Skill 文档 / 示例 map / trace 样例 | ✅ 完整 | `skills/vision-mcp/`、`examples/`、`examples/activity-monitor/` |
 | 测试覆盖（schema, capsule, locator, runtime, repair, trace, workspace, MCP server e2e） | ✅ 43 个 vitest 测试全部通过 | `packages/*/tests/*.test.ts` |
 
 不在交付范围内（设计文档明示 P2 / 长期研究项）：
@@ -66,12 +66,12 @@ vision-mcp/
 │   ├── core/                 # 数据模型 / Capsule / Runtime / Repair / Locator / Trace / Builder
 │   ├── server/               # MCP server：tools + resources + stdio transport
 │   └── cli/                  # vision-mcp CLI
-├── apps/                     # 真实可跑案例（实测建图）
+├── examples/                 # 项目自带参考 maps（入 git；用户复制到自己的 apps/ 工作）
 │   ├── apple-music/          # macOS Apple Music：region/collection 抽象 + 双轨 locator
-│   ├── notes/                # macOS 备忘录：SwiftUI 自绘 + AX 不暴露案例
-│   └── activity-monitor/     # macOS 活动监视器：table view + 列排序
-├── examples/
+│   ├── notes/                # macOS 备忘录：SwiftUI 自绘 + kbd region 案例
+│   ├── activity-monitor/     # macOS 活动监视器：table view + 列排序
 │   └── example-erp/          # 虚构 Windows ERP（设计文档配套 demo，含 patch + trace 样例）
+# apps/ 是用户工作区（VISION_MCP_APPS_ROOT 默认），已加进 .gitignore
 ├── .claude-plugin/
 │   └── plugin.json           # Claude Code Plugin manifest（一键安装入口）
 ├── .mcp.json                 # Plugin 加载时使用的 MCP server 配置

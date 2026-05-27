@@ -6,7 +6,7 @@
         "${CLAUDE_PLUGIN_ROOT}/packages/cli/dist/index.js",
         "serve",
         "--apps-root",
-        "${CLAUDE_PLUGIN_ROOT}/apps"
+        "${CLAUDE_PLUGIN_ROOT}/examples"
       ],
       "env": {
         "VISION_MCP_NATIVE_HELPER": "${CLAUDE_PLUGIN_ROOT}/native/macos/vision-mcp-helper",

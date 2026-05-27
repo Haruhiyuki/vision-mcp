@@ -23,15 +23,16 @@ trace.db-journal
 .vision-mcp/runtime-cache
 
 # ============ vision-mcp 运行时产物（不入库） ============
+# 用户的 map data 目录（VISION_MCP_APPS_ROOT 默认指向）。参考 maps 在 examples/，
+# 用户应自己 copy 一份到 apps/（或任意位置）作为工作目录。
+/apps/
+
 # 实测/CI 产生的 trace（包括 events / sessions / 截图 assets）
 **/.traces/
 # 探索阶段截图 / dump
-apps/*/.explore*/
-apps/*/.record/
-apps/*/.discover/
-examples/*/.explore*/
-examples/*/.record/
-examples/*/.discover/
+**/.explore*/
+**/.record/
+**/.discover/
 .explore/
 
 # 临时 / 调试输出
