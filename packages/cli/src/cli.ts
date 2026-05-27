@@ -121,6 +121,8 @@ function usage(): string {
     "       直接 type 文本（支持中文）。等同于 MCP tool vision_map.type_text",
     "  key <app_id> --combo <combo>",
     "       直接发键盘组合（return / cmd+f / Escape）。等同于 MCP tool vision_map.press_key",
+    "  scroll <app_id> --norm <x,y> [--dy 120] [--dx 0]",
+    "       在 norm 坐标发滚轮。dy 正=向下（一格=120 WHEEL_DELTA）",
     "  click-text <app_id> --text <s> [--region x,y,w,h] [--match exact|contains|regex]",
     "       用 OCR 找文字位置 click（视觉为主流程的核心工具）",
     "  hover <app_id> --norm <x,y> [--hold-ms 300]",
@@ -244,6 +246,9 @@ async function main() {
         return;
       case "click-fuzzy":
         await cmdClickFuzzy(args);
+        return;
+      case "scroll":
+        await cmdRawScroll(args);
         return;
       case "scroll-until-text":
         await cmdScrollUntilText(args);
@@ -1031,10 +1036,16 @@ async function openCapsuleForRaw(args: ParsedArgs) {
   const adapter = await createPlatformAdapter({ platform: (args.flags.platform as never) ?? "auto" });
   const { Capsule } = await import("@vision-mcp/core");
   const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
-  // 默认仅 attach 不 migrate，避免反复把窗口拉回主屏。
-  // migrate 只在显式传 --migrate 时执行（snapshot/click 等通常不需要）。
+  // attach + ensureDisplay（轻量：Windows / macOS 都只是挑稳定 display，不创建虚拟器）。
+  // ensureDisplay 是 validateGeometry 的前置条件，click/hover/scroll 等都会用到。
+  // 默认不 migrate（不重排窗口位置），避免反复把屏外 workspace 拉回主屏；--migrate 显式触发。
   if (loaded.effective.visual_box.target_window) {
     await capsule.attach({ target: loaded.effective.visual_box.target_window });
+    await capsule.ensureDisplay({
+      geometry: loaded.effective.visual_box.display,
+      mode: loaded.effective.visual_box.mode,
+      fallbacks: loaded.effective.visual_box.fallbacks,
+    });
     if (args.flags.migrate === true) {
       const display = await capsule.ensureDisplay({
         geometry: loaded.effective.visual_box.display,
@@ -1203,10 +1214,15 @@ async function cmdAxPress(args: ParsedArgs) {
   const status = await capsule.status();
   const handle = status.attached_window?.native_handle;
   if (!handle) throw new Error("ax-press 需要 attach 窗口");
-  if (adapter.platform !== "macos") throw new Error("ax-press 仅支持 macOS（其他平台用 click 即可）");
-  // 仅 DarwinHelperAdapter 有 axPressInWindow 方法
+  // macOS（swift helper）和 Windows（UIA InvokePattern）都实现了 axPressInWindow。
+  // osascript adapter 没有；mock 也没有。
   const a = adapter as unknown as { axPressInWindow?: (h: string, n: [number, number]) => Promise<unknown> };
-  if (!a.axPressInWindow) throw new Error("当前 macOS adapter 不支持 ax_press（需重新编译 swift helper）");
+  if (!a.axPressInWindow) {
+    throw new Error(
+      `当前 adapter (${adapter.platform}) 不支持 ax-press。` +
+      `macOS 需 swift helper（不是 osascript）；Windows 需 helper.ps1 (helperRequest input.ax_press)。`,
+    );
+  }
   const r = await a.axPressInWindow(handle, [nx, ny]);
   console.log(JSON.stringify(r, null, 2));
   await adapter.dispose?.();
@@ -1219,6 +1235,25 @@ async function cmdRawType(args: ParsedArgs) {
   await capsule.raise().catch(() => {});
   await adapter.typeText({ text, clear_first: Boolean(args.flags["clear-first"]) });
   console.log(JSON.stringify({ ok: true, length: text.length }));
+  await adapter.dispose?.();
+}
+
+/**
+ * scroll: 在 norm 坐标位置发滚轮。
+ * dy 正值 = 向下滚（屏幕内容上移），与 macOS 一致；一格 = 120（Windows WHEEL_DELTA）。
+ */
+async function cmdRawScroll(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const [nxs, nys] = String(args.flags.norm ?? "0.5,0.5").split(",");
+  const nx = Number(nxs), ny = Number(nys);
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw new Error("--norm 形式：x,y（归一化 0-1）");
+  const dy = Number(args.flags.dy ?? 120);
+  const dx = Number(args.flags.dx ?? 0);
+  await capsule.raise().catch(() => {});
+  const cr = (await capsule.validateGeometry()).client_rect_px;
+  const pt = { x: Math.round(cr.x + nx * cr.width), y: Math.round(cr.y + ny * cr.height) };
+  await adapter.scroll(pt, { dy_px: dy, dx_px: dx });
+  console.log(JSON.stringify({ ok: true, point: pt, dy, dx }));
   await adapter.dispose?.();
 }
 

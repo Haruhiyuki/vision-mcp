@@ -50,6 +50,10 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+# WindowsBase 才有 System.Windows.Point —— UIA-Invoke-At-Point 需要。
+# UIAutomationClient 不自动拉 WindowsBase。
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName PresentationCore
 
 # Win32 互操作：窗口/输入/DPI/HDC
 Add-Type @"
@@ -71,6 +75,9 @@ public class Win32 {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+    // SwitchToThisWindow 是 Windows 自己 Alt+Tab 用的 API（undocumented but stable since XP）；
+    // 在 Win10+ UIPI 锁前台时仍能把窗口拉到前台
+    [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fUnknown);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
@@ -285,19 +292,53 @@ function Move-Window-By-Handle($handle, $rect) {
     }
 }
 
-# 强力 raise：直接 SetForegroundWindow 不一定成功（前台锁定保护）；
-# 用 AttachThreadInput 把当前线程"附加"到目标窗口的输入队列再 raise。
+# 强力 raise：直接 SetForegroundWindow 在 Win10+ 经常被 UIPI（前台锁定保护）拒绝。
+# 用 4 招由轻到重逐个尝试，命中即停：
+#   1. SetForegroundWindow 直来直去
+#   2. AttachThreadInput hack（附到当前前台窗口的输入队列）
+#   3. Alt-key 抖动 hack：Win32 把 Alt 按下视为"用户主动操作"，会重置前台锁定
+#      计时器 → 下一次 SetForegroundWindow 几乎一定成功
+#   4. Minimize + Restore 翻一翻（最后兜底，会有视觉跳动）
 function Raise-Window-Strong($hwnd) {
+    [Win32]::ShowWindow($hwnd, 9) | Out-Null  # SW_RESTORE（去最小化）
+    # 1. SwitchToThisWindow（Alt+Tab 用的同一条 API，对 CEF/Steam/Discord 这种
+    #    显式拒 SetForegroundWindow 的 app 也能生效；视觉上和 Alt+Tab 完全一样）
+    [Win32]::SwitchToThisWindow($hwnd, $true)
+    Start-Sleep -Milliseconds 50
+    if ([Win32]::GetForegroundWindow() -eq $hwnd) { return }
+
     [Win32]::SetForegroundWindow($hwnd) | Out-Null
-    if ([Win32]::GetForegroundWindow() -ne $hwnd) {
-        $fgPid = 0
-        $fgThread = [Win32]::GetWindowThreadProcessId([Win32]::GetForegroundWindow(), [ref]$fgPid)
-        $curThread = [Win32]::GetCurrentThreadId()
-        [Win32]::AttachThreadInput($curThread, $fgThread, $true) | Out-Null
-        [Win32]::BringWindowToTop($hwnd) | Out-Null
-        [Win32]::SetForegroundWindow($hwnd) | Out-Null
-        [Win32]::AttachThreadInput($curThread, $fgThread, $false) | Out-Null
-    }
+    if ([Win32]::GetForegroundWindow() -eq $hwnd) { return }
+
+    # 2. AttachThreadInput
+    $fgPid = 0
+    $fgWnd = [Win32]::GetForegroundWindow()
+    $fgThread = [Win32]::GetWindowThreadProcessId($fgWnd, [ref]$fgPid)
+    $curThread = [Win32]::GetCurrentThreadId()
+    [Win32]::AttachThreadInput($curThread, $fgThread, $true) | Out-Null
+    [Win32]::BringWindowToTop($hwnd) | Out-Null
+    [Win32]::SetForegroundWindow($hwnd) | Out-Null
+    [Win32]::AttachThreadInput($curThread, $fgThread, $false) | Out-Null
+    if ([Win32]::GetForegroundWindow() -eq $hwnd) { return }
+
+    # 3. Alt-key 抖动：SendInput Alt down+up，把"用户最后输入"重置成本进程的事件
+    #    然后立刻 SetForegroundWindow 几乎必成
+    $altDown = New-Object Win32+INPUT
+    $altDown.type = 1; $altDown.u.ki.wVk = 0x12; $altDown.u.ki.wScan = 0; $altDown.u.ki.dwFlags = 0; $altDown.u.ki.time = 0
+    $altUp = New-Object Win32+INPUT
+    $altUp.type = 1; $altUp.u.ki.wVk = 0x12; $altUp.u.ki.wScan = 0; $altUp.u.ki.dwFlags = 0x0002; $altUp.u.ki.time = 0
+    $arr = New-Object 'Win32+INPUT[]' 2
+    $arr[0] = $altDown; $arr[1] = $altUp
+    [Win32]::SendInput(2, $arr, [System.Runtime.InteropServices.Marshal]::SizeOf([Type][Win32+INPUT])) | Out-Null
+    Start-Sleep -Milliseconds 30
+    [Win32]::SetForegroundWindow($hwnd) | Out-Null
+    if ([Win32]::GetForegroundWindow() -eq $hwnd) { return }
+
+    # 4. 最后兜底：minimize + restore（视觉跳动）
+    [Win32]::ShowWindow($hwnd, 6) | Out-Null  # SW_MINIMIZE
+    Start-Sleep -Milliseconds 50
+    [Win32]::ShowWindow($hwnd, 9) | Out-Null  # SW_RESTORE
+    [Win32]::SetForegroundWindow($hwnd) | Out-Null
 }
 
 # ---------- Capture ----------
