@@ -1,0 +1,2 @@
+# native/ 是 prepublishOnly 从 ../../native 复制来的，仅 npm publish 时存在
+native/

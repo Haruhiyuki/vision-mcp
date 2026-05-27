@@ -2146,60 +2146,107 @@ async function encodeFrameAsPng(frame: { width_px: number; height_px: number; pi
 
 async function cmdInstallHelper(args: ParsedArgs) {
   const force = Boolean(args.flags.force);
+  const silent = Boolean(args.flags.silent);   // 静默模式：失败不抛错，给 postinstall 用
   const platform = process.platform;
-  const prefix = args.flags.prefix
-    ? String(args.flags.prefix)
-    : path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "..", "native");
+  // prefix 解析：
+  //   1. 用户 --prefix 显式指定
+  //   2. cli 包内的 native/（npm install 后 prepublishOnly 把仓库 native/ 复制进来）
+  //   3. 仓库根 ../../native（源码 dev 模式）
+  const cliDir = path.dirname(new URL(import.meta.url).pathname);
+  const candidates = args.flags.prefix
+    ? [String(args.flags.prefix)]
+    : [
+        path.resolve(cliDir, "..", "..", "native"),   // packages/cli/native（npm 安装路径）
+        path.resolve(cliDir, "..", "..", "..", "native"), // 仓库根 native（源码 dev）
+      ];
+  let prefix = candidates[0];
+  for (const c of candidates) {
+    try {
+      await fs.access(c);
+      prefix = c;
+      break;
+    } catch { /* try next */ }
+  }
+
+  const log = silent ? () => {} : console.log.bind(console);
+  const fail = (msg: string) => {
+    if (silent) {
+      console.warn(`[vision-mcp install-helper] ${msg.split("\n")[0]}`);
+      console.warn(`[vision-mcp install-helper] 详细指引请运行：vision-mcp install-helper`);
+      return; // silent 模式不抛
+    }
+    throw new Error(msg);
+  };
 
   if (platform === "darwin") {
     const helperPath = path.join(prefix, "macos", "vision-mcp-helper");
     const srcPath = path.join(prefix, "macos", "src", "main.swift");
+    let exists = false;
     try {
-      await fs.access(helperPath);
-      if (!force) {
-        console.log(`✅ macOS helper 已存在：${helperPath}`);
-        console.log(`   重新编译请加 --force`);
-        return;
+      await fs.access(helperPath, fs.constants.X_OK);
+      exists = true;
+    } catch { /* not exists */ }
+    if (exists && !force) {
+      log(`✅ macOS helper 已就绪：${helperPath}`);
+      if (!silent) {
+        log(`   重新编译请加 --force`);
+        log(`📋 配置环境变量（若 host 未自动检测）：`);
+        log(`   export VISION_MCP_NATIVE_HELPER="${helperPath}"`);
       }
-    } catch {
-      // not exists, build
+      return;
     }
     try {
       await fs.access(srcPath);
     } catch {
-      throw new Error(`找不到 swift 源码 ${srcPath}。请确保安装了完整源码（npm tarball 或 git clone）`);
+      return fail(`找不到 swift 源码 ${srcPath}。请确保完整安装（npm tarball / git clone）。`);
     }
+    // 检测 swiftc
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
     const exec = promisify(execFile);
-    console.log(`🔨 编译 macOS helper：swiftc -O -o ${helperPath} ${srcPath} ...`);
     try {
-      await exec("swiftc", [
-        "-O",
-        "-o", helperPath,
-        srcPath,
-        "-framework", "AppKit",
-        "-framework", "ApplicationServices",
-        "-framework", "CoreGraphics",
-        "-framework", "IOKit",
-        "-framework", "Vision",
-        "-framework", "CoreImage",
-        "-framework", "ScreenCaptureKit",
-      ]);
-    } catch (err) {
-      throw new Error(
-        `swiftc 编译失败：${(err as Error).message}\n` +
-          `请确认已安装 Xcode Command Line Tools：\n` +
+      await exec("which", ["swiftc"]);
+    } catch {
+      return fail(
+        `未找到 swiftc。请先安装 Xcode Command Line Tools：\n` +
           `   xcode-select --install\n` +
-          `如果 helper 已存在但版本旧，加 --force 重编。`,
+          `完成后重新运行：vision-mcp install-helper`,
       );
     }
-    console.log(`✅ 编译完成：${helperPath}`);
-    console.log(`📋 配置环境变量：`);
-    console.log(`   export VISION_MCP_NATIVE_HELPER="${helperPath}"`);
-    console.log(`\n⚠️  第一次运行时请到 系统设置 → 隐私 中授予：`);
-    console.log(`   1. 屏幕录制（Screen Recording）`);
-    console.log(`   2. 辅助功能（Accessibility）`);
+    log(`🔨 编译 macOS helper（首次约 5–10 秒）...`);
+    try {
+      await exec(
+        "swiftc",
+        [
+          "-O",
+          "-o", helperPath,
+          srcPath,
+          "-framework", "AppKit",
+          "-framework", "ApplicationServices",
+          "-framework", "CoreGraphics",
+          "-framework", "IOKit",
+          "-framework", "Vision",
+          "-framework", "CoreImage",
+          "-framework", "ScreenCaptureKit",
+        ],
+        { maxBuffer: 10 * 1024 * 1024 },
+      );
+    } catch (err) {
+      return fail(
+        `swiftc 编译失败：${(err as Error).message}\n` +
+          `请确认已安装 Xcode Command Line Tools：\n` +
+          `   xcode-select --install`,
+      );
+    }
+    log(`✅ 编译完成：${helperPath}`);
+    if (!silent) {
+      log(`📋 host 配置环境变量（Claude Code Plugin 已自动）：`);
+      log(`   export VISION_MCP_NATIVE_HELPER="${helperPath}"`);
+      log(`\n⚠️  第一次操作真窗口时，macOS 会弹两个授权对话框：`);
+      log(`   1. 屏幕录制（Screen Recording）`);
+      log(`   2. 辅助功能（Accessibility）`);
+      log(`   都授权后重启 MCP host 让权限生效。`);
+    }
     return;
   }
 
@@ -2209,35 +2256,71 @@ async function cmdInstallHelper(args: ParsedArgs) {
     try {
       await fs.access(ps1Path);
     } catch {
-      throw new Error(`找不到 PowerShell 脚本 ${ps1Path}。请确保安装了完整源码（npm tarball 或 git clone）`);
+      return fail(`找不到 PowerShell 脚本 ${ps1Path}。请确保完整安装。`);
     }
+    let exeExists = false;
     try {
       await fs.access(exePath);
-      if (!force) {
-        console.log(`✅ Windows helper.exe 已存在：${exePath}`);
-        console.log(`   重新编译请加 --force`);
-        console.log(`\n📋 配置环境变量：`);
-        console.log(`   $env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
+      exeExists = true;
+    } catch { /* not exists */ }
+    if (exeExists && !force) {
+      log(`✅ Windows helper.exe 已就绪：${exePath}`);
+      if (!silent) {
+        log(`📋 host 配置环境变量：`);
+        log(`   $env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
+      }
+      return;
+    }
+    // 尝试 ps2exe 自动编译
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const exec = promisify(execFile);
+    try {
+      const psCheck = await exec("powershell", [
+        "-NoProfile", "-Command",
+        "if (Get-Module -ListAvailable -Name ps2exe) { 'ok' } else { 'missing' }",
+      ]);
+      if ((psCheck.stdout || "").trim() === "ok") {
+        log(`🔨 用 ps2exe 编译 Windows helper.exe...`);
+        await exec("powershell", [
+          "-NoProfile", "-Command",
+          `Invoke-ps2exe "${ps1Path}" "${exePath}" -noConsole`,
+        ], { maxBuffer: 10 * 1024 * 1024 });
+        log(`✅ 编译完成：${exePath}`);
+        if (!silent) {
+          log(`📋 host 配置：$env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
+        }
         return;
       }
     } catch {
-      // not exists
+      // ps2exe 不可用，fall through 到指引
     }
-    console.log(`📝 Windows helper 部署说明`);
-    console.log(`\n⚙️  开发期（直接运行 .ps1，启动 ~400ms）：`);
-    console.log(`   $env:VISION_MCP_NATIVE_HELPER = "${ps1Path}"`);
-    console.log(`\n🔨 生产（编译为 .exe，启动 ~10ms）：`);
-    console.log(`   Install-Module -Name ps2exe -Scope CurrentUser`);
-    console.log(`   Invoke-ps2exe "${ps1Path}" "${exePath}" -noConsole`);
-    console.log(`   $env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
-    console.log(`\n⚠️  权限要求：`);
-    console.log(`   - 高完整度 app（任务管理器/反作弊）：helper 需以管理员身份运行才能注入输入`);
-    console.log(`   - 普通用户级 app：直接跑即可`);
-    console.log(`\n📖 详细 RPC 协议见 native/windows/README.md`);
+    // ps2exe 不可用 / 调用失败 → 给出指引
+    if (silent) {
+      // 静默模式下：fallback 到指向 .ps1（功能可用，仅启动慢）
+      console.warn(`[vision-mcp install-helper] Windows: ps2exe 未安装，将用 .ps1 模式（启动较慢 ~400ms）`);
+      console.warn(`[vision-mcp install-helper] 加速 .exe 编译：vision-mcp install-helper`);
+      return;
+    }
+    log(`📝 Windows helper 部署说明`);
+    log(`\n⚙️  开发期（直接运行 .ps1，启动 ~400ms）：`);
+    log(`   $env:VISION_MCP_NATIVE_HELPER = "${ps1Path}"`);
+    log(`\n🔨 生产（编译为 .exe，启动 ~10ms）：`);
+    log(`   Install-Module -Name ps2exe -Scope CurrentUser`);
+    log(`   完成后重新运行：vision-mcp install-helper（自动 ps2exe 编译）`);
+    log(`\n⚠️  权限要求：`);
+    log(`   - 高完整度 app（任务管理器 / 反作弊）：helper 需以管理员身份运行才能注入输入`);
+    log(`   - 普通用户级 app：直接跑即可`);
+    log(`\n📖 详细 RPC 协议见 native/windows/README.md`);
     return;
   }
 
-  throw new Error(`install-helper 只支持 macOS / Windows，当前 platform=${platform}`);
+  // Linux / 其他平台：mock-only
+  if (silent) {
+    console.warn(`[vision-mcp install-helper] 当前 platform=${platform} 不支持 native helper；运行时仅 mock 模式可用`);
+    return;
+  }
+  fail(`install-helper 只支持 macOS / Windows，当前 platform=${platform}`);
 }
 
 main().catch((err) => {

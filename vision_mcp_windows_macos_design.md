@@ -6,13 +6,111 @@
 
 范围：Windows 与 macOS 桌面应用；不覆盖 Linux、移动端、Web-only Headless 场景
 
-版本：v0.1 概念设计稿；日期：2026-05-26
+版本：v0.1 概念设计稿（日期：2026-05-26）+ v1.0 实测修订（日期：2026-05-28，见下方 errata）
 
 ## 一句话定义
 
-Vision-MCP 是一套把真实 GUI 应用“吸入”稳定视觉胶囊，扫描并编译成可复用交互地图，然后通过 MCP 工具让各类 agent 安全、低成本、可审计地操作软件的系统。
+Vision-MCP 是一套把真实 GUI 应用"吸入"稳定视觉胶囊，扫描并编译成可复用交互地图，然后通过 MCP 工具让各类 agent 安全、低成本、可审计地操作软件的系统。
 
-核心创新不在于“让 agent 看图点击”，而在于把一次或少量视觉理解结果转化为 state graph、locator、相对坐标、校验规则与修复策略，使后续操作尽量不再依赖昂贵的视觉推理。
+核心创新不在于"让 agent 看图点击"，而在于把一次或少量视觉理解结果转化为 state graph、locator、相对坐标、校验规则与修复策略，使后续操作尽量不再依赖昂贵的视觉推理。
+
+---
+
+# v1.0 实测修订（errata 章节）
+
+> 本文档原写于 2026-05-26（v0.1 设计稿）。v0.2–v1.0 实测后多个核心设计已修订；
+> 本节列出关键变更供读者优先阅读，后续 §1–§19 保留为 v0.1 设计原文（架构 reference）。
+> 详细演化路径见 git history。
+
+## A. 关键设计变更
+
+| v0.1 设计 | v1.0 实现 | 原因 |
+|----------|-----------|------|
+| **Virtual Display Capsule**（§7）创建专用虚拟显示器 | **Stable Window Capsule**：窗口固定主屏 display 工作区中心，完整可见 | macOS public API 不支持；Windows IDD 需驱动签名 + 企业部署。实测 off-screen / virtual cursor / peek-corner 体感差（窗口反复 flash） |
+| **Windows IDD 虚拟显示驱动**（§8.2） | **未实现**。PowerShell + Win32 + UIA helper 直接迁窗口到主屏稳定位置 | 同上 |
+| **macOS existing-display / third-party virtual**（§9.2） | **统一 `pickStableDisplay` 算法**：优先窗口当前 display；副屏自然保留 | 不需要专门 workspace 概念 |
+| **Builder Mode**（§11.1）作为单独阶段 | **任务驱动 ⭐ + 探索驱动**两种入口，路径上混合 | 实战发现先建后用太死板；任务驱动下的"探索副产品"让 map 随使用自然完善 |
+| **Repair Mode**（§11.3）只在 runtime 自动 | **新增 agent 主动 patch**：实战发现偏差时 `vision-mcp patch` 一行命令固化 | 让 map 越用越准；持续修正机制 |
+| 未提分发 | **Claude Code Plugin + npm `@vision-mcp/{core,server,cli}` 双渠道**；postinstall 自动 swiftc/ps2exe | 实测后补 |
+
+## B. 新增能力（v0.1 未规划）
+
+- **持续修正机制**：agent 主动写 patch；trust 三级渐进（`session_only` → `trusted` → `untrusted_proposal`）
+- **任务驱动 / 探索驱动两种用户意图**：用户给具体任务 → 路径上按需补 map；用户说"建立 X 的 vision-mcp" → 系统覆盖
+- **探索副产品原则**：snapshot 已截就顺带把整页 candidates 一起 commit，边际成本为零
+- **跨平台 helper 同协议**：
+  - macOS Swift（1091 行）：SCKit window capture / AXPress / IOKit per-monitor DPI / Vision OCR
+  - Windows PowerShell（641 行）：PrintWindow / UIA InvokePattern / AttachThreadInput hack / System.Drawing annotated 截图
+- **region / collection / kbd 抽象**：跨 state 共享 UI 区域；N 元素单条声明；快捷键当 control 可寻址
+- **跟 Anthropic Computer Use 的定位**：MCP server 路径，独立于哪个模型；产物是 map，跨任务复用；与 Computer Use（模型协议路径，每次全视觉）互补
+- **成本优化原则**：执行模式默认不 snapshot；仅 4 个时机看图（任务起点 / 关键决策 / 失败诊断 / 任务结束）
+- **examples/ vs apps/ 二分**：参考 maps 入 git；用户工作区 `.gitignore`
+- **Claude Skill 集成**：`skills/vision-mcp/SKILL.md` 精简到 ~100 行（progressive disclosure → references/）
+
+## C. 已修订章节对照
+
+| 原章节 | v1.0 状态 |
+|--------|-----------|
+| §7 Virtual Display Capsule | 整体改为 Stable Window Capsule；§7.5 Geometry Contract / §7.6 Input Lease 保留 |
+| §7.1–§7.4（虚拟显示器生命周期 / attach-after-launch） | 简化为 `vision-mcp capsule <app>` 一键 attach + migrate |
+| §8.2 Windows 组件（IDD 驱动）| 删 IDD；保留 SendInput / UIA / DXGI capture 描述（已用 PrintWindow 实现） |
+| §9.2 macOS 支持模式（existing-display / third-party virtual） | 删；统一 stable display |
+| §9.5 macOS 风险与对策（虚拟显示器能力不稳定）| 已通过架构选择规避 |
+| §11.1 Builder Mode（独立阶段）| 拆为任务驱动 / 探索驱动；详见 [`skills/vision-mcp/references/workflow.md`](skills/vision-mcp/references/workflow.md) |
+| §11.3 Repair Mode | 保留 runtime 自动 repair；新增 agent 主动 patch（详见 [`skills/vision-mcp/references/patches.md`](skills/vision-mcp/references/patches.md)） |
+| §13.4 Skill 内容 | 已实现完整 Skill 体系；SKILL.md + 7 个 references/ + 2 个 assets/ |
+| §16.2 里程碑 | M1 macOS helper / M4 macOS 完善已交付；M1 Windows helper 骨架已交付（实测待 Windows 分支） |
+| §17 验收标准 | 见 [`docs/acceptance.md`](docs/acceptance.md)（含 v1.0 对照） |
+
+## D. 实测案例（v0.1 未规划）
+
+`examples/` 收纳 4 个实测验证过的参考 maps：
+
+| App | 平台 | 验证的架构能力 |
+|-----|------|-----------------|
+| `apple-music/` | macOS | region + collection + 双轨 locator（AX + 视觉）+ trusted patch（sidebar 偏差修正） |
+| `notes/` | macOS | SwiftUI 自绘 + kbd region + editor.focus type-first 修正 |
+| `activity-monitor/` | macOS | table view + 列排序（cmd+delete destructive） |
+| `example-erp/` | Windows（虚构） | 完整架构 demo：3 regions + 2 collections + 4 states + 3 workflows + 2 patches（含 region-scope patch） |
+
+## E. 分发架构（v0.1 未涉及）
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Claude Code / Codex CLI / Cursor / Cline / OpenClaw    │
+└──────────────────────┬──────────────────────────────────┘
+                       │ MCP stdio
+        ┌──────────────▼──────────────┐
+        │ @vision-mcp/server          │ (npm)
+        │   capsule.* / vision_map.*  │
+        └──────────────┬──────────────┘
+                       │
+        ┌──────────────▼──────────────┐
+        │ @vision-mcp/core            │ (npm)
+        │   Capsule / Runtime / Map   │
+        │   Locator / Repair / Trace  │
+        └──────────────┬──────────────┘
+                       │ JSON-RPC stdio
+   ┌───────────────────┴───────────────────┐
+   │                                       │
+┌──▼──────────────┐               ┌────────▼────────┐
+│ macOS helper    │               │ Windows helper  │
+│ Swift 1091 行   │               │ PowerShell 641  │
+│ SCKit / AX /    │               │ PrintWindow /   │
+│ Vision / IOKit  │               │ UIA / Win32     │
+└─────────────────┘               └─────────────────┘
+```
+
+分发渠道：
+- **Claude Code Plugin**（推荐）：`.claude-plugin/plugin.json` + `.mcp.json` + `skills/vision-mcp/`；`/plugin install` 一条命令
+- **npm**：`@vision-mcp/{core,server,cli}`；postinstall 自动 `vision-mcp install-helper`（swiftc / ps2exe）
+- **源码**：git clone + `npm install && npm run build`
+
+详见 [`INSTALL.md`](INSTALL.md)。
+
+---
+
+> 以下章节 §1–§19 为 v0.1 设计原文，保留作为架构 reference。涉及虚拟显示器 / Builder Mode 等内容请对照上方 errata 阅读。
 
 # 目录
 
@@ -165,6 +263,8 @@ Target Application Window
 
 # 7. Virtual Display Capsule 设计
 
+> **⚠️ v1.0 已修订**：整体改为 **Stable Window Capsule**。不创建虚拟显示器（macOS public API 不可靠 / Windows IDD 需驱动签名）；改为 `pickStableDisplay` 把窗口固定到主屏 display 工作区中心**完整可见**。§7.5 Geometry Contract / §7.6 Input Lease 仍有效。详见顶部 errata。
+
 ## 7.1 定义
 
 Virtual Display Capsule 是同一 OS 用户会话中的 agent 专用显示器。目标应用窗口仍是用户真实会话中的真实窗口，可从物理显示器迁入虚拟显示器；用户通过 Live View 观看并可接管。它不是 headless browser，也不是独立 VM/RDP 会话。
@@ -254,6 +354,8 @@ Windows 是 Virtual Display Capsule 的首发平台。原因是 Windows 有明�
 
 ## 8.2 Windows 组件
 
+> **⚠️ v1.0 已修订**：删 IDD 虚拟显示驱动。保留 SendInput / UIA / 截图描述；实际实现用 `PrintWindow(PW_RENDERFULLCONTENT)` 抓窗口、UIA `InvokePattern` 等价 macOS AXPress。详见 [`skills/vision-mcp/references/platform-windows.md`](skills/vision-mcp/references/platform-windows.md)。
+
 | 子系统 | 建议技术 | 职责 |
 | --- | --- | --- |
 | 虚拟显示器 | Windows Indirect Display Driver / IddCx | 创建系统识别的虚拟 monitor，固定分辨率与刷新率。 |
@@ -307,6 +409,8 @@ macOS 首发不应承诺“自动创建系统级虚拟显示器并迁移所有�
 macOS 的公开能力非常适合窗口捕获和辅助功能控制：ScreenCaptureKit 用于高性能捕获屏幕/窗口内容，SCContentFilter 可限定捕获指定内容；AXUIElement 相关 API 允许辅助功能应用与正在运行的可访问应用通信和控制。
 
 ## 9.2 macOS 支持模式
+
+> **⚠️ v1.0 已修订**：删 existing-display / third-party virtual / native virtual display 多模式分支。统一用 `pickStableDisplay`：优先窗口当前所在 display（自然支持副屏），其次 primary。实测虚拟显示器路线（v0.4 explored workspace 体系）已砍掉，详见 errata。
 
 | 模式 | 描述 | 首发建议 |
 | --- | --- | --- |
@@ -449,6 +553,8 @@ workflows:
 
 ## 11.1 Builder Mode
 
+> **⚠️ v1.0 已修订**：拆为**任务驱动 ⭐**（默认）+ **探索驱动**两种用户意图入口，路径上混合。任务驱动下"探索副产品"原则让 map 随使用自然完善，不需要独立的 Builder 阶段。详见 [`skills/vision-mcp/references/workflow.md`](skills/vision-mcp/references/workflow.md)。
+
 1. 绑定目标应用窗口，并建立 capsule / geometry contract。
 1. 捕获当前窗口或显示器帧，同时尝试读取 UIA/AX/accessibility 结构。
 1. 识别当前 state：标题、OCR 文本、视觉 layout、结构化节点。
@@ -473,6 +579,8 @@ load map
 ```
 
 ## 11.3 Repair Mode
+
+> **⚠️ v1.0 新增**：保留 runtime 自动 L0–L3 repair；新增 **agent 主动 patch** 路径。实战中 agent 发现 map 偏差时直接 `vision-mcp patch` 一行命令固化修正，trust 三级渐进（`session_only` → `trusted` → `untrusted_proposal`）。详见 [`skills/vision-mcp/references/patches.md`](skills/vision-mcp/references/patches.md)。
 
 Repair Mode 不应默认进入完整重扫，而应由 runtime 按 repair ladder 自动尝试低成本修复。只有涉及状态新增、高风险动作、低置信度 relocation 或全量重建时，才交给 agent 或用户决策。
 

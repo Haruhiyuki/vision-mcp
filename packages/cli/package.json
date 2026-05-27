@@ -27,13 +27,15 @@
   },
   "files": [
     "dist",
+    "native",
     "README.md"
   ],
   "scripts": {
     "build": "tsc -b",
     "clean": "rimraf dist *.tsbuildinfo",
     "test": "vitest run",
-    "prepublishOnly": "npm run clean && npm run build && find dist \\( -name '*tsbuildinfo' -o -name '*.map' \\) -delete"
+    "postinstall": "node ./dist/index.js install-helper --silent || true",
+    "prepublishOnly": "npm run clean && npm run build && find dist \\( -name '*tsbuildinfo' -o -name '*.map' \\) -delete && rm -rf native && cp -R ../../native ./native && rm -f ./native/macos/vision-mcp-helper ./native/windows/vision-mcp-helper.exe"
   },
   "dependencies": {
     "@vision-mcp/core": "0.1.0",
