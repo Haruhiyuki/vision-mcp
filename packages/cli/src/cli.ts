@@ -106,6 +106,10 @@ function usage(): string {
     "       hover 到归一化坐标（用于触发 hover-only ▶ 按钮）",
     "  click-fuzzy <app_id> --norm <x,y> [--jitter-px 8] [--attempts 5]",
     "       click 失败时自动 ±jitter 多次重试（小按钮兜底）",
+    "  scroll-until-text <app_id> --text <s> [--region x,y,w,h] [--dy -200] [--max-scrolls 20] [--click]",
+    "       在 region 内反复滚动 + OCR 找文字；找到后返回 bbox 或直接 click",
+    "  hover-probe <app_id> --norm <x,y> [--hold-ms 600] [--out probe.png]",
+    "       hover 后截图与原图 diff，找出 hover 触发的新元素位置",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -183,6 +187,12 @@ async function main() {
         return;
       case "click-fuzzy":
         await cmdClickFuzzy(args);
+        return;
+      case "scroll-until-text":
+        await cmdScrollUntilText(args);
+        return;
+      case "hover-probe":
+        await cmdHoverProbe(args);
         return;
       case "serve":
         await cmdServe(args);
@@ -1194,6 +1204,219 @@ async function cmdClickFuzzy(args: ParsedArgs) {
   console.log(JSON.stringify({ ok: false, reason: "no visual change after all attempts", attempts }));
   await adapter.dispose?.();
   process.exit(2);
+}
+
+/**
+ * scroll-until-text: 在 region 内反复滚动 + OCR 找目标文字。
+ *
+ * 用法："从播放列表里找'黑色游行'并播放" →
+ *   vision-mcp scroll-until-text apple-music --text "黑色游行" --region "0.17,0.05,0.6,0.85" --click
+ *
+ * 算法：
+ *   1. 在 region 内做 OCR；命中目标文本 → 返回 / click（可选）。
+ *   2. 没命中 → 在 region 中点 scroll dy；记录该次 OCR token signature。
+ *   3. 若连续两次 scroll 后 token signature 不变 → 列表到底，停止。
+ *   4. 超过 max-scrolls → 报失败。
+ *
+ * 对纯视觉路线至关重要：无 AX 的列表元素也能找到。
+ */
+async function cmdScrollUntilText(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const text = String(args.flags.text ?? "");
+  if (!text) throw new Error("scroll-until-text 需要 --text");
+  const { DarwinHelperAdapter: HA, DarwinOcrProvider } = await import("@vision-mcp/core");
+  if (!(adapter instanceof HA)) throw new Error("scroll-until-text 需要 swift helper (OCR)");
+  const ocr = new DarwinOcrProvider(adapter);
+  const cr = (await capsule.validateGeometry()).client_rect_px;
+  let region = cr;
+  if (args.flags.region) {
+    const [nx, ny, nw, nh] = String(args.flags.region).split(",").map(Number);
+    region = {
+      x: Math.round(cr.x + nx * cr.width),
+      y: Math.round(cr.y + ny * cr.height),
+      width: Math.round(nw * cr.width),
+      height: Math.round(nh * cr.height),
+    };
+  }
+  const dy = Number(args.flags.dy ?? -200);  // 负值向下滚（屏幕内容上移）
+  const maxScrolls = Number(args.flags["max-scrolls"] ?? 20);
+  const shouldClick = Boolean(args.flags.click);
+  const matchMode = (args.flags.match as "exact" | "contains" | "regex") ?? "contains";
+
+  const compare = (a: string, b: string) => {
+    if (matchMode === "regex") {
+      try { return new RegExp(b).test(a); } catch { return false; }
+    }
+    const A = a.replace(/\s+/g, "").toLowerCase();
+    const B = b.replace(/\s+/g, "").toLowerCase();
+    return matchMode === "exact" ? A === B : A.includes(B);
+  };
+
+  const scrollCenter = {
+    x: Math.round(region.x + region.width / 2),
+    y: Math.round(region.y + region.height / 2),
+  };
+  // 滚动前先 hover 到 region 中央，避免 scroll 事件被发到错误窗口
+  await capsule.raise().catch(() => {});
+
+  let lastSignature = "";
+  let stuckCount = 0;
+  for (let attempt = 0; attempt <= maxScrolls; attempt++) {
+    const tokens = await ocr.recognizeRect(region, { nocache: true });
+    let hit = tokens.find((t) => compare(t.text, text));
+    if (!hit) {
+      // 尝试拼接相邻 token
+      for (let i = 0; i < tokens.length; i++) {
+        let combined = tokens[i].text;
+        for (let j = i + 1; j < Math.min(i + 4, tokens.length); j++) {
+          combined += tokens[j].text;
+          if (compare(combined, text)) {
+            hit = { ...tokens[i], text: combined };
+            break;
+          }
+        }
+        if (hit) break;
+      }
+    }
+    if (hit) {
+      const [bx, by, bw, bh] = hit.bbox_norm;
+      const pt = {
+        x: Math.round(region.x + (bx + bw / 2) * region.width),
+        y: Math.round(region.y + (by + bh / 2) * region.height),
+      };
+      if (shouldClick) {
+        await capsule.raise().catch(() => {});
+        await adapter.click(pt, { click_count: Number(args.flags["click-count"] ?? 1) });
+      }
+      console.log(
+        JSON.stringify({
+          ok: true,
+          attempts: attempt,
+          matched_text: hit.text,
+          confidence: hit.confidence,
+          point: pt,
+          clicked: shouldClick,
+        }),
+      );
+      await adapter.dispose?.();
+      return;
+    }
+    // signature：当前 OCR 看到的前 8 个 token，用于判断列表是否还在变
+    const sig = tokens.slice(0, 8).map((t) => t.text).join("|");
+    if (sig === lastSignature) {
+      stuckCount++;
+      if (stuckCount >= 2) {
+        console.log(
+          JSON.stringify({ ok: false, reason: "scroll stuck (end of list?)", attempts: attempt, last_signature_tokens: 8 }),
+        );
+        await adapter.dispose?.();
+        process.exit(2);
+      }
+    } else {
+      stuckCount = 0;
+    }
+    lastSignature = sig;
+    if (attempt < maxScrolls) {
+      await adapter.scroll(scrollCenter, { dy_px: dy, dx_px: 0 });
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  console.log(JSON.stringify({ ok: false, reason: "max-scrolls exceeded", attempts: maxScrolls }));
+  await adapter.dispose?.();
+  process.exit(2);
+}
+
+/**
+ * hover-probe: hover 到目标坐标 + 等待，然后截图 vs hover 前对比，
+ * 找出 hover 触发出现的新元素（如卡片浮动 ▶ 按钮）。
+ *
+ * 算法：
+ *   1. 截图 baseline。
+ *   2. 把鼠标移到目标坐标 + 等 hold-ms。
+ *   3. 截图 after。
+ *   4. 对 hover 中心附近一定半径内的区域逐块对比像素 diff，找到变化最大的子区域。
+ *   5. 输出 {新出现的元素 bbox_norm（相对 client_rect）} 供 agent 决定是否 click。
+ */
+async function cmdHoverProbe(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const [nxs, nys] = String(args.flags.norm ?? "").split(",");
+  const nx = Number(nxs), ny = Number(nys);
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw new Error("hover-probe 需要 --norm x,y");
+  const holdMs = Number(args.flags["hold-ms"] ?? 600);
+  const outPath = args.flags.out ? String(args.flags.out) : undefined;
+  await capsule.raise().catch(() => {});
+  const cr = (await capsule.validateGeometry()).client_rect_px;
+  // baseline frame：先把鼠标移到 region 外（左上角附近）
+  const safePt = { x: cr.x + 5, y: cr.y + 5 };
+  await adapter.drag(safePt, { to_point_px: safePt, steps: 1, duration_ms: 100 });
+  await new Promise((r) => setTimeout(r, 200));
+  const baseFrame = await capsule.capture();
+  // hover 到目标
+  const hoverPt = { x: Math.round(cr.x + nx * cr.width), y: Math.round(cr.y + ny * cr.height) };
+  await adapter.drag(hoverPt, { to_point_px: hoverPt, steps: 1, duration_ms: holdMs });
+  await new Promise((r) => setTimeout(r, holdMs));
+  const afterFrame = await capsule.capture();
+
+  // 像素 diff：在 hover 中心 ±200 norm 范围内分块统计
+  const w = baseFrame.width_px;
+  const h = baseFrame.height_px;
+  const radiusXPx = Math.round(0.15 * cr.width * 2);  // 区域宽
+  const radiusYPx = Math.round(0.15 * cr.height * 2);
+  // hover 屏幕坐标 → frame 坐标（frame 是 client_rect 内容，origin = client_rect.xy）
+  const fx = Math.max(0, Math.round((hoverPt.x - cr.x) / cr.width * w));
+  const fy = Math.max(0, Math.round((hoverPt.y - cr.y) / cr.height * h));
+  const x0 = Math.max(0, fx - radiusXPx);
+  const y0 = Math.max(0, fy - radiusYPx);
+  const x1 = Math.min(w, fx + radiusXPx);
+  const y1 = Math.min(h, fy + radiusYPx);
+
+  const blockSize = 20;
+  let maxDiff = 0;
+  let hotBlock = { x: 0, y: 0, score: 0 };
+  for (let by = y0; by < y1 - blockSize; by += blockSize) {
+    for (let bx = x0; bx < x1 - blockSize; bx += blockSize) {
+      let d = 0;
+      for (let yy = 0; yy < blockSize; yy++) {
+        for (let xx = 0; xx < blockSize; xx++) {
+          const idx = ((by + yy) * w + (bx + xx)) * 4;
+          const dr = (baseFrame.pixels[idx] ?? 0) - (afterFrame.pixels[idx] ?? 0);
+          const dg = (baseFrame.pixels[idx + 1] ?? 0) - (afterFrame.pixels[idx + 1] ?? 0);
+          const db = (baseFrame.pixels[idx + 2] ?? 0) - (afterFrame.pixels[idx + 2] ?? 0);
+          d += Math.abs(dr) + Math.abs(dg) + Math.abs(db);
+        }
+      }
+      if (d > maxDiff) {
+        maxDiff = d;
+        hotBlock = { x: bx, y: by, score: d };
+      }
+    }
+  }
+  const hotBboxNorm = [
+    hotBlock.x / w,
+    hotBlock.y / h,
+    blockSize / w,
+    blockSize / h,
+  ];
+  // 输出 after 截图，便于 agent 看
+  if (outPath) {
+    const { encodeRgbaToPng } = await import("@vision-mcp/core");
+    await fs.writeFile(outPath, encodeRgbaToPng(w, h, afterFrame.pixels));
+  }
+  const significantChange = maxDiff > 5000; // 总像素差阈值
+  console.log(
+    JSON.stringify({
+      ok: significantChange,
+      hover_point_norm: [nx, ny],
+      hot_block_bbox_norm: hotBboxNorm.map((v) => Number(v.toFixed(4))),
+      max_block_diff: maxDiff,
+      threshold: 5000,
+      after_image: outPath,
+      hint: significantChange
+        ? `hover 触发了新元素出现在 ~(${hotBboxNorm[0].toFixed(3)}, ${hotBboxNorm[1].toFixed(3)})`
+        : "hover 后没有明显视觉变化",
+    }),
+  );
+  await adapter.dispose?.();
 }
 
 async function cmdServe(args: ParsedArgs) {

@@ -19,6 +19,8 @@
 | **`vision-mcp click-fuzzy`** (v0.3) | click 失败时围绕 ±jitter 多次试，按视觉变化判定成功 | { ok, point, offset, visual_diff } |
 | **`vision-mcp hover`** (v0.3) | 移到坐标 + 等待，触发 hover-only 控件（如卡片浮动 ▶） | { ok } |
 | **`vision-mcp trace-viewer`** (v0.3) | 生成 HTML 时间线，每个 action 含前后截图（自动保存） | { out, events_with_screenshot } |
+| **`vision-mcp scroll-until-text`** (v0.3) | 在 region 内反复滚动 + OCR 找文字（如"播放列表里找黑色游行"） | { ok, attempts, matched_text, point } |
+| **`vision-mcp hover-probe`** (v0.3) | hover 后 vs hover 前像素 diff，找 hover 触发的新元素位置 | { ok, hot_block_bbox_norm, max_block_diff } |
 | `vision_map.click_at` | 在归一化坐标 click（建图原始动作） | { ok, point_screen } |
 | `vision_map.type_text` | 在当前焦点 type 文本（支持中文，走粘贴） | { ok, length } |
 | `vision_map.press_key` | 发键盘组合（return / cmd+f / Escape / cmd+left ...） | { ok } |
