@@ -14,6 +14,11 @@
 | 工具 | 用途 | 返回 |
 | ---- | ---- | ---- |
 | `vision_map.snapshot` | **核心**：一次拿截图 + 可交互 AX 候选 + 已知 state 匹配 | base64 PNG + candidates + state_match + visual_hash |
+| **`vision-mcp annotated`** (v0.3) | 截图叠加网格 + 候选框 + 序号；agent 看图后说"click #7"而非估坐标 | PNG 文件 + box_count |
+| **`vision-mcp click-text`** (v0.3) | OCR 找文字 → click 其中心；视觉路线核心工具 | { matched_text, confidence, point } |
+| **`vision-mcp click-fuzzy`** (v0.3) | click 失败时围绕 ±jitter 多次试，按视觉变化判定成功 | { ok, point, offset, visual_diff } |
+| **`vision-mcp hover`** (v0.3) | 移到坐标 + 等待，触发 hover-only 控件（如卡片浮动 ▶） | { ok } |
+| **`vision-mcp trace-viewer`** (v0.3) | 生成 HTML 时间线，每个 action 含前后截图（自动保存） | { out, events_with_screenshot } |
 | `vision_map.click_at` | 在归一化坐标 click（建图原始动作） | { ok, point_screen } |
 | `vision_map.type_text` | 在当前焦点 type 文本（支持中文，走粘贴） | { ok, length } |
 | `vision_map.press_key` | 发键盘组合（return / cmd+f / Escape / cmd+left ...） | { ok } |

@@ -49,6 +49,7 @@ export class MapBuilder {
         ...status,
         id: opts.visualBoxId ?? status.id,
       },
+      regions: [],
       states: [],
       transitions: [],
       workflows: [],
@@ -150,6 +151,7 @@ export class MapBuilder {
           ],
       match_policy: "any_anchor",
       controls,
+      inherit_regions: [],
       variants: [],
     };
     // 去重：相同 id 直接覆盖
@@ -230,6 +232,7 @@ function buildControlsFromAccessibility(
       n.bbox_norm[1] + n.bbox_norm[3] / 2,
     ];
     const control: Control = {
+      kind: "control",
       id,
       role: simplifyRole(role),
       label: n.name,

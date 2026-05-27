@@ -144,12 +144,19 @@ export async function ensureRuntime(
   const capsule = await ensureCapsule(ctx, app);
   app.trace ??= new FileTraceStore(path.join(ctx.traceDir, app.app_id));
   await app.trace.ensure();
+  // 每次 ensureRuntime 启一个新 session，方便 trace-viewer 看最近一次操作
+  const session = await app.trace.startSession({
+    app_id: app.app_id,
+    visual_box_id: app.effective.visual_box.id,
+    mode: app.effective.visual_box.mode,
+  });
   const runtime = new RuntimeExecutor({
     map: app.effective,
     mapBaseDir: app.baseDir,
     capsule,
     providers: ctx.providers,
     trace: app.trace,
+    sessionId: session.id,
     approval: ctx.approvalCallback
       ? new CallbackApprovalResolver(ctx.approvalCallback)
       : undefined,

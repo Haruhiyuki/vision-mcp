@@ -3,6 +3,7 @@ export * from "./locator.js";
 export * from "./condition.js";
 export * from "./visual.js";
 export * from "./control.js";
+export * from "./region.js";
 export * from "./state.js";
 export * from "./workflow.js";
 export * from "./capsule.js";

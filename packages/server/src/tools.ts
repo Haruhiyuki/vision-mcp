@@ -672,18 +672,21 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       try {
         return await withApp(ctx, app_id, (app) => {
           const parsed = parseActionId(action_id);
-          const hit = findControl(app.effective, parsed.stateId, parsed.controlId);
+          const hit = findControl(app.effective, parsed.ownerId, parsed.controlId);
           if (!hit) {
             throw new VisionMcpError(
               "ACTION_NOT_FOUND",
               `action_id "${action_id}" 未找到`,
             );
           }
+          const owner = hit.kind === "state"
+            ? { kind: "state", id: hit.state.id, state_kind: hit.state.kind }
+            : { kind: "region", id: hit.region.id };
           return Promise.resolve(
             StructuredOk(
               {
                 action_id,
-                state: { id: hit.state.id, kind: hit.state.kind },
+                owner,
                 control: hit.control,
               },
               `${action_id} → ${hit.control.role}/${hit.control.label ?? hit.control.id}`,

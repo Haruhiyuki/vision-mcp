@@ -15,6 +15,8 @@ export interface ConditionContext {
   /** capsule.attach 取得的窗口 title，用于 window_title_should_match。 */
   window_title?: string;
   recent_controls?: LocatorMatch[];
+  /** 动作前的 frame visual_hash；visual_diff_should_be 用。 */
+  baseline_visual_hash?: string;
 }
 
 export async function evaluateCondition(
@@ -131,6 +133,31 @@ async function evaluateAtom(
       return {
         ok: similarity >= (atom.min_similarity ?? 0.82),
         reason: `visual_similarity=${similarity.toFixed(3)} (≥${atom.min_similarity})`,
+      };
+    }
+    case "visual_diff_should_be": {
+      // 由 waitForCondition 调用方负责取"动作前 baseline frame"。这里只判断当前
+      // visual_hash 与 ctx.baseline_visual_hash 的差异是否超过阈值。
+      const baseline = ctx.baseline_visual_hash;
+      if (!baseline || !ctx.insights.visual_hash) {
+        return { ok: false, reason: "visual_diff: baseline 或当前 hash 缺失" };
+      }
+      const sim = 1 - hamming(baseline, ctx.insights.visual_hash) / 64;
+      return {
+        ok: sim <= atom.max_similarity,
+        reason: `visual_diff similarity=${sim.toFixed(3)} (≤${atom.max_similarity}=变化)`,
+      };
+    }
+    case "ocr_should_appear": {
+      // ocr_should_appear 与 text_should_appear 实现一致；语义差异在 schema 文档
+      const r = matchText(ctx.insights.ocr, {
+        text: atom.text,
+        match: atom.match,
+        min_confidence: atom.min_confidence,
+      });
+      return {
+        ok: !!r,
+        reason: `ocr_should_appear="${atom.text}" → ${r ? `found(conf=${r.confidence.toFixed(2)})` : "not found"}`,
       };
     }
   }

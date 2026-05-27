@@ -17,6 +17,8 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import IOKit.graphics
+import Vision
+import CoreImage
 
 // ---------- JSON helpers ----------
 
@@ -514,7 +516,141 @@ func moveWindow(handle: String, rect: CGRect) -> [String: Any]? {
     return nil
 }
 
+// ---------- Annotated snapshot ----------
+
+struct AnnotationBox {
+    let xNorm: Double
+    let yNorm: Double
+    let wNorm: Double
+    let hNorm: Double
+    let label: String?
+    let color: NSColor
+}
+
+/// 在原始截图上叠加：网格 + 彩色 bbox + 序号 label。
+/// Agent 拿到带网格的图后能说"click #7"或"区域 [0.3, 0.5]"，比凭空估坐标准得多。
+func captureAnnotated(rect: CGRect, boxes: [AnnotationBox], gridStep: Double) -> Data? {
+    guard let pngData = capture(rect: rect),
+          let image = NSImage(data: pngData) else { return nil }
+    let size = image.size
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: Int(size.width),
+        pixelsHigh: Int(size.height),
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 32
+    ) else { return nil }
+    NSGraphicsContext.saveGraphicsState()
+    defer { NSGraphicsContext.restoreGraphicsState() }
+    guard let gc = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+    NSGraphicsContext.current = gc
+    image.draw(at: .zero, from: NSRect(origin: .zero, size: size), operation: .copy, fraction: 1.0)
+
+    if gridStep > 0 {
+        NSColor.systemGray.withAlphaComponent(0.35).setStroke()
+        let gridPath = NSBezierPath()
+        gridPath.lineWidth = 1
+        var t = gridStep
+        while t < 1.0 {
+            let xPx = t * size.width
+            let yPx = t * size.height
+            gridPath.move(to: NSPoint(x: xPx, y: 0))
+            gridPath.line(to: NSPoint(x: xPx, y: size.height))
+            gridPath.move(to: NSPoint(x: 0, y: yPx))
+            gridPath.line(to: NSPoint(x: size.width, y: yPx))
+            t += gridStep
+        }
+        gridPath.stroke()
+        let labelAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.systemBlue.withAlphaComponent(0.9),
+        ]
+        var tl = 0.0
+        while tl <= 1.0 {
+            let xPx = tl * size.width
+            let yPx = tl * size.height
+            let str = String(format: "%.2f", tl)
+            // PNG/NSBitmap 原点左下；用户视角原点左上 → 顶部 label = y = size.height - 12
+            str.draw(at: NSPoint(x: xPx + 2, y: size.height - 14), withAttributes: labelAttrs)
+            str.draw(at: NSPoint(x: 2, y: size.height - yPx - 12), withAttributes: labelAttrs)
+            tl += gridStep * 2
+        }
+    }
+
+    for (i, box) in boxes.enumerated() {
+        let xPx = box.xNorm * size.width
+        let yPxTop = box.yNorm * size.height
+        let wPx = box.wNorm * size.width
+        let hPx = box.hNorm * size.height
+        // Bitmap 原点左下 → 矩形 y 要翻转
+        let yPx = size.height - yPxTop - hPx
+        let r = NSRect(x: xPx, y: yPx, width: wPx, height: hPx)
+        box.color.setStroke()
+        let p = NSBezierPath(rect: r)
+        p.lineWidth = 2
+        p.stroke()
+        let tag = box.label.map { "#\(i + 1) \($0)" } ?? "#\(i + 1)"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.boldSystemFont(ofSize: 12),
+            .foregroundColor: NSColor.white,
+            .backgroundColor: box.color.withAlphaComponent(0.85),
+        ]
+        tag.draw(at: NSPoint(x: xPx + 2, y: yPx + hPx - 16), withAttributes: attrs)
+    }
+    return rep.representation(using: .png, properties: [:])
+}
+
 // ---------- Capture ----------
+
+// ---------- OCR (Vision framework) ----------
+
+/// 对指定屏幕矩形做 OCR。返回每个文本块的 `{text, confidence, bbox}`，bbox 已归一化到该矩形内。
+/// 用 VNRecognizeTextRequest（accurate 路径），自动识别中英文。
+/// 性能：1280×800 区域 ~150-300ms（CPU），首次冷启动多 200ms。
+func ocrRect(_ rect: CGRect, languages: [String]) -> [[String: Any]] {
+    guard let pngData = capture(rect: rect),
+          let image = NSImage(data: pngData),
+          let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        return []
+    }
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = true
+    if !languages.isEmpty {
+        request.recognitionLanguages = languages
+    } else {
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+    }
+    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+    do {
+        try handler.perform([request])
+    } catch {
+        return []
+    }
+    let observations = request.results ?? []
+    var out: [[String: Any]] = []
+    for obs in observations {
+        guard let candidate = obs.topCandidates(1).first else { continue }
+        // Vision 的 boundingBox 原点在左下、归一化到 [0,1]。转成 vision-mcp 的 [x,y,w,h]，
+        // 原点左上（屏幕坐标系）。
+        let bb = obs.boundingBox
+        let x = bb.minX
+        let y = 1.0 - bb.maxY
+        let w = bb.width
+        let h = bb.height
+        out.append([
+            "text": candidate.string,
+            "confidence": Double(candidate.confidence),
+            "bbox_norm": [x, y, w, h],  // 归一化到调用方传入的 rect 内
+        ])
+    }
+    return out
+}
 
 /// 截图：macOS 15+ 弃用了 CGWindowListCreateImage，统一用 /usr/sbin/screencapture
 /// 子进程。子进程 fork 约 ~300ms。后续可切到 ScreenCaptureKit（需要 async/Stream API）。
@@ -600,6 +736,55 @@ func handle(method: String, params: [String: Any]) -> Any {
             "width": Int(w),
             "height": Int(h),
         ]
+    case "capture.rect_annotated":
+        guard let r = params["rect"] as? [String: Any],
+              let x = (r["x"] as? NSNumber)?.doubleValue,
+              let y = (r["y"] as? NSNumber)?.doubleValue,
+              let w = (r["width"] as? NSNumber)?.doubleValue,
+              let h = (r["height"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
+        let gridStep = (params["grid_step"] as? NSNumber)?.doubleValue ?? 0.1
+        let boxesRaw = (params["boxes"] as? [[String: Any]]) ?? []
+        let palette: [NSColor] = [
+            .systemRed, .systemBlue, .systemGreen, .systemOrange,
+            .systemPurple, .systemTeal, .systemPink, .systemBrown,
+        ]
+        var boxes: [AnnotationBox] = []
+        for (i, b) in boxesRaw.enumerated() {
+            guard let bbox = b["bbox_norm"] as? [Double], bbox.count == 4 else { continue }
+            let label = b["label"] as? String
+            let colorHex = b["color"] as? String
+            let color: NSColor
+            if let h = colorHex, h.hasPrefix("#"), h.count == 7,
+               let rv = Int(h.dropFirst().prefix(2), radix: 16),
+               let gv = Int(h.dropFirst(3).prefix(2), radix: 16),
+               let bv = Int(h.dropFirst(5).prefix(2), radix: 16) {
+                color = NSColor(srgbRed: CGFloat(rv)/255, green: CGFloat(gv)/255, blue: CGFloat(bv)/255, alpha: 1)
+            } else {
+                color = palette[i % palette.count]
+            }
+            boxes.append(AnnotationBox(
+                xNorm: bbox[0], yNorm: bbox[1], wNorm: bbox[2], hNorm: bbox[3],
+                label: label, color: color
+            ))
+        }
+        guard let png = captureAnnotated(rect: CGRect(x: x, y: y, width: w, height: h), boxes: boxes, gridStep: gridStep) else {
+            return ["error": "annotate failed"]
+        }
+        return [
+            "png_base64": png.base64EncodedString(),
+            "width": Int(w),
+            "height": Int(h),
+            "box_count": boxes.count,
+        ]
+    case "ocr.recognize_rect":
+        guard let r = params["rect"] as? [String: Any],
+              let x = (r["x"] as? NSNumber)?.doubleValue,
+              let y = (r["y"] as? NSNumber)?.doubleValue,
+              let w = (r["width"] as? NSNumber)?.doubleValue,
+              let h = (r["height"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
+        let langs = (params["languages"] as? [String]) ?? []
+        let tokens = ocrRect(CGRect(x: x, y: y, width: w, height: h), languages: langs)
+        return ["tokens": tokens]
     case "input.click":
         guard let p = params["point"] as? [String: Any],
               let x = (p["x"] as? NSNumber)?.doubleValue,

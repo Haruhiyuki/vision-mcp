@@ -48,6 +48,11 @@ export const State = z.object({
     .describe("状态识别锚点；任一锚点命中即可，但应优先多锚点全命中"),
   match_policy: z.enum(["any_anchor", "all_anchors", "score"]).default("any_anchor"),
   controls: z.array(Control).default([]),
+  /**
+   * 引用顶层 regions[] 中的 id；该 state 上额外可见的"全局区域 controls"。
+   * runtime 解析 action_id 找 control 时会先查 state.controls，再依次查 inherit_regions。
+   */
+  inherit_regions: z.array(z.string()).default([]),
   parent_state_id: z.string().optional(),
   variants: z.array(z.string()).default([]),
   notes: z.string().optional(),

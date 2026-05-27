@@ -4,5 +4,6 @@ export * from "./macos.js";
 export * from "./darwin-osascript.js";
 export * from "./darwin-helper.js";
 export * from "./darwin-accessibility.js";
+export * from "./darwin-ocr.js";
 export * from "./factory.js";
 export * from "./native-bridge.js";

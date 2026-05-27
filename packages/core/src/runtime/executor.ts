@@ -26,6 +26,7 @@ import {
   TraceEventBase,
 } from "../trace/index.js";
 import { RepairEngine } from "../repair/engine.js";
+import { encodeRgbaToPng } from "./png.js";
 
 export class RuntimeExecutor {
   private resolver: LocatorResolver;
@@ -93,18 +94,20 @@ export class RuntimeExecutor {
     actionId: string,
     params: ActionParams = {},
   ): Promise<ActionResult> {
-    const { state, control, actionType } = findAction(this.opts.map, actionId);
+    const resolved = findAction(this.opts.map, actionId);
+    const { state, control, effectiveControl, actionType } = resolved;
+    // 用 effectiveControl 给 runtime —— 对 collection 而言是动态算出的 cell。
     let ctx: ActionContext = {
       action_id: actionId,
-      state,
-      control,
+      state: state ?? this.opts.map.states[0],
+      control: effectiveControl,
       actionType: actionType as ActionContext["actionType"],
       params,
-      risk_level: control.risk_level,
+      risk_level: effectiveControl.risk_level,
       approval_required:
-        control.approval_required ||
+        effectiveControl.approval_required ||
         this.opts.map.safety_policy.require_approval_for_risk_levels.includes(
-          control.risk_level as "requires_confirmation" | "destructive",
+          effectiveControl.risk_level as "requires_confirmation" | "destructive",
         ),
     };
     if (this.opts.onBeforeAction) {
@@ -288,10 +291,22 @@ export class RuntimeExecutor {
       }
 
       // 6. 执行动作
+      // 6a. before-screenshot 写 trace asset
+      let beforeAssetPath: string | undefined;
+      if (this.opts.trace) {
+        beforeAssetPath = await this.saveActionScreenshot("before", actionId);
+      }
       await this.dispatch(ctx, match);
       // 动作完成后失效 AX 缓存：postcondition 必须看到新页面
       if (this.opts.providers.accessibility?.invalidate) {
         this.opts.providers.accessibility.invalidate();
+      }
+      // 6b. after-screenshot
+      let afterAssetPath: string | undefined;
+      if (this.opts.trace) {
+        // 给 UI 一点时间响应
+        await new Promise((r) => setTimeout(r, 250));
+        afterAssetPath = await this.saveActionScreenshot("after", actionId);
       }
 
       // 7. 等待 postcondition
@@ -347,6 +362,7 @@ export class RuntimeExecutor {
           action_id: actionId,
           state_id: stateAfter?.state_id,
           bbox_norm: match?.bbox_norm,
+          asset_refs: [beforeAssetPath, afterAssetPath].filter(Boolean) as string[],
         }),
       );
     } catch (err) {
@@ -494,6 +510,23 @@ export class RuntimeExecutor {
         );
       case "noop":
         return;
+    }
+  }
+
+  /**
+   * 截一帧并以 PNG 写入 trace asset 目录，返回相对路径。
+   * 用 frame 自带 RGBA 转 PNG（避免再 fork screencapture）。
+   */
+  private async saveActionScreenshot(stage: "before" | "after", actionId: string): Promise<string | undefined> {
+    if (!this.opts.trace) return undefined;
+    try {
+      const frame = await this.opts.capsule.capture();
+      const png = encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels);
+      const safeAction = actionId.replace(/[^a-zA-Z0-9_.\-]/g, "_");
+      const filename = `${this.sessionId}-${stage}-${safeAction}.png`;
+      return await this.opts.trace.writeAsset(filename, png);
+    } catch {
+      return undefined;
     }
   }
 

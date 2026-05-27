@@ -184,6 +184,18 @@ export class DarwinHelperAdapter implements PlatformAdapter {
     });
   }
 
+  /**
+   * 通用 RPC：让其他 provider（如 OCR）直接走 helper bridge 调任意方法。
+   * 这是个相对低层的开口；公开它而非 bridge 本身，避免外部直接干预 bridge 生命周期。
+   */
+  async helperRequest<T = unknown>(
+    method: string,
+    params: unknown = {},
+    timeoutMs = 15_000,
+  ): Promise<T> {
+    return this.bridge.request<T>(method, params, timeoutMs);
+  }
+
   async dispose(): Promise<void> {
     await this.bridge.dispose();
   }

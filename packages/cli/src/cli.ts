@@ -82,6 +82,8 @@ function usage(): string {
     "       触发 repair L0-Lmax 自动修复",
     "  trace <app_id> [--session <id>] [--limit 100]",
     "       打印最近 trace 事件",
+    "  trace-viewer <app_id> [--out trace.html] [--session <id>]",
+    "       生成 HTML 时间线（每个 action 含前后截图、locator、postcondition）",
     "  explore <app_id> [--out <dir>] [--no-migrate]",
     "       绑定 capsule 后截图 + dump AX 树到目录，便于人类审阅与建图",
     "  record <app_id> --plan <plan.json> [--out <dir>]",
@@ -90,12 +92,20 @@ function usage(): string {
     "       自动 BFS 探索 UI 拓扑：每个可交互节点 click → 截图比较 → 自动找返回路径 → 生成 draft map",
     "  snapshot <app_id> [--out frame.png] [--no-image] [--max-candidates 60]",
     "       Agent 视角：一次拿截图 + AX 候选 + state match。等同于 MCP tool vision_map.snapshot",
+    "  annotated <app_id> [--out frame.png] [--grid-step 0.1]",
+    "       叠加网格 + 候选框 + 序号的截图：agent 看图后能说『click #7』而非估坐标",
     "  click <app_id> --norm <x,y> [--button left|right|middle] [--count 1]",
     "       直接 click 归一化坐标。等同于 MCP tool vision_map.click_at",
     "  type <app_id> --text <s> [--clear-first]",
     "       直接 type 文本（支持中文）。等同于 MCP tool vision_map.type_text",
     "  key <app_id> --combo <combo>",
     "       直接发键盘组合（return / cmd+f / Escape）。等同于 MCP tool vision_map.press_key",
+    "  click-text <app_id> --text <s> [--region x,y,w,h] [--match exact|contains|regex]",
+    "       用 OCR 找文字位置 click（视觉为主流程的核心工具）",
+    "  hover <app_id> --norm <x,y> [--hold-ms 300]",
+    "       hover 到归一化坐标（用于触发 hover-only ▶ 按钮）",
+    "  click-fuzzy <app_id> --norm <x,y> [--jitter-px 8] [--attempts 5]",
+    "       click 失败时自动 ±jitter 多次重试（小按钮兜底）",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -138,6 +148,9 @@ async function main() {
       case "trace":
         await cmdTrace(args);
         return;
+      case "trace-viewer":
+        await cmdTraceViewer(args);
+        return;
       case "explore":
         await cmdExplore(args);
         return;
@@ -150,6 +163,9 @@ async function main() {
       case "snapshot":
         await cmdSnapshot(args);
         return;
+      case "annotated":
+        await cmdAnnotated(args);
+        return;
       case "click":
         await cmdRawClick(args);
         return;
@@ -158,6 +174,15 @@ async function main() {
         return;
       case "key":
         await cmdRawKey(args);
+        return;
+      case "click-text":
+        await cmdClickText(args);
+        return;
+      case "hover":
+        await cmdHover(args);
+        return;
+      case "click-fuzzy":
+        await cmdClickFuzzy(args);
         return;
       case "serve":
         await cmdServe(args);
@@ -298,12 +323,19 @@ async function openAppRuntime(
       throw err;
     }
   }
+  // 每次 openAppRuntime 启新 session，让 trace-viewer 默认指向本次操作
+  const session = await trace.startSession({
+    app_id: appId,
+    visual_box_id: loaded.effective.visual_box.id,
+    mode: loaded.effective.visual_box.mode,
+  });
   const runtime = new RuntimeExecutor({
     map: loaded.effective,
     mapBaseDir: loaded.baseDir,
     capsule,
     providers,
     trace,
+    sessionId: session.id,
     approval: opts.approveAll
       ? new CallbackApprovalResolver(async () => "granted")
       : new CallbackApprovalResolver(askApprovalViaStdin),
@@ -313,7 +345,7 @@ async function openAppRuntime(
       loaded.effective = applyPatches(loaded.baseline, loaded.patches);
     },
   });
-  return { runtime, capsule, loaded, trace, adapter };
+  return { runtime, capsule, loaded, trace, adapter, session };
 }
 
 async function cmdBuild(args: ParsedArgs) {
@@ -768,6 +800,70 @@ async function openCapsuleForRaw(args: ParsedArgs) {
   return { adapter, capsule, loaded };
 }
 
+/**
+ * 用 swift helper 的 capture.rect_annotated 生成带网格 + 候选框 + 序号的 PNG。
+ * 优先用 AX 候选（无 AX 时退化用 OCR token）作为候选 boxes。
+ */
+async function cmdAnnotated(args: ParsedArgs) {
+  const { adapter, capsule, loaded } = await openCapsuleForRaw(args);
+  const outPath = String(args.flags.out ?? "/tmp/annotated.png");
+  const gridStep = Number(args.flags["grid-step"] ?? 0.1);
+  const status = await capsule.status();
+  const cr = status.geometry?.client_rect_px;
+  if (!cr) throw new Error("client_rect missing");
+  if (!isDarwinAdapter(adapter)) throw new Error("annotated 当前仅支持 macOS helper");
+
+  // 收集候选 boxes：优先 AX，其次 OCR
+  let boxes: { bbox_norm: [number, number, number, number]; label?: string }[] = [];
+  let source = "none";
+  const ax = new DarwinAccessibilityProvider(adapter);
+  if (status.attached_window) {
+    const nodes = await ax.snapshot(status.attached_window.native_handle);
+    const interactive = nodes
+      .filter((n) => {
+        const r = n.role ?? "";
+        return /(AXButton|AXTextField|AXSearchField|AXPopUpButton|AXMenuItem|AXTab|AXLink|AXCheckBox|AXRadioButton)/.test(r)
+          || (r === "AXCell" && (n.name || n.description));
+      })
+      .slice(0, 40);
+    boxes = interactive.map((n) => ({
+      bbox_norm: n.bbox_norm,
+      label: (n.name || n.description || n.role || "?").slice(0, 12),
+    }));
+    source = `ax (${boxes.length})`;
+  }
+  // helper 调 annotated
+  const { DarwinHelperAdapter: HA } = await import("@vision-mcp/core");
+  if (!(adapter instanceof HA)) {
+    throw new Error("annotated 需要 swift helper（VISION_MCP_FORCE_OSASCRIPT 未设）");
+  }
+  const r = await adapter.helperRequest<{ png_base64: string; width: number; height: number; box_count: number }>(
+    "capture.rect_annotated",
+    {
+      rect: { x: cr.x, y: cr.y, width: cr.width, height: cr.height },
+      grid_step: gridStep,
+      boxes: boxes,
+    },
+    20_000,
+  );
+  await fs.writeFile(outPath, Buffer.from(r.png_base64, "base64"));
+  console.log(
+    JSON.stringify(
+      {
+        out_path: outPath,
+        width: r.width,
+        height: r.height,
+        box_count: r.box_count,
+        candidate_source: source,
+        grid_step: gridStep,
+      },
+      null,
+      2,
+    ),
+  );
+  await adapter.dispose?.();
+}
+
 async function cmdSnapshot(args: ParsedArgs) {
   const { adapter, capsule, loaded } = await openCapsuleForRaw(args);
   const { LocatorResolver } = await import("@vision-mcp/core");
@@ -860,6 +956,244 @@ async function cmdRawKey(args: ParsedArgs) {
   await adapter.pressKey({ combo });
   console.log(JSON.stringify({ ok: true, combo }));
   await adapter.dispose?.();
+}
+
+async function cmdTraceViewer(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("trace-viewer 需要 <app_id>");
+  const traceDir = path.join(appsRoot(args), ".traces", appId);
+  const trace = new FileTraceStore(traceDir);
+  await trace.ensure();
+  const sessions = await trace.listSessions();
+  const sessionId = args.flags.session
+    ? String(args.flags.session)
+    : sessions[sessions.length - 1]?.id;
+  if (!sessionId) {
+    console.error("没有 trace session 可渲染");
+    process.exit(1);
+  }
+  const events = await trace.query({ sessionId });
+  const session = sessions.find((s) => s.id === sessionId);
+  const outPath = String(args.flags.out ?? path.join(traceDir, `trace-${sessionId}.html`));
+  const html = renderTraceHtml(appId, session, events);
+  await fs.writeFile(outPath, html, "utf8");
+  console.log(
+    JSON.stringify(
+      {
+        out: outPath,
+        session_id: sessionId,
+        event_count: events.length,
+        events_with_screenshot: events.filter((e) => (e.asset_refs?.length ?? 0) > 0).length,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function renderTraceHtml(
+  appId: string,
+  session: import("@vision-mcp/core").TraceSession | undefined,
+  events: import("@vision-mcp/core").TraceEventBase[],
+): string {
+  const kindColors: Record<string, string> = {
+    action_started: "#3b82f6",
+    action_succeeded: "#10b981",
+    action_failed: "#ef4444",
+    state_detected: "#8b5cf6",
+    repair_attempted: "#f59e0b",
+    repair_succeeded: "#10b981",
+    postcondition_failed: "#f97316",
+    approval_requested: "#a855f7",
+    approval_granted: "#10b981",
+    approval_denied: "#ef4444",
+    lease_acquired: "#64748b",
+    lease_broken: "#64748b",
+    warning: "#f59e0b",
+    error: "#ef4444",
+  };
+  const rows = events.map((e, i) => {
+    const color = kindColors[e.kind] ?? "#64748b";
+    const screenshots = (e.asset_refs ?? [])
+      .map((p) => {
+        // path 是绝对路径；HTML 里用 file:// URI
+        const uri = p.startsWith("/") ? `file://${p}` : p;
+        return `<a href="${uri}" target="_blank"><img src="${uri}" loading="lazy" /></a>`;
+      })
+      .join("");
+    const detail = e.detail ? `<pre>${escapeHtml(JSON.stringify(e.detail, null, 2))}</pre>` : "";
+    return `<tr>
+      <td class="i">${i + 1}</td>
+      <td class="ts">${e.ts.slice(11, 19)}</td>
+      <td><span class="kind" style="background:${color}">${e.kind}</span></td>
+      <td class="msg">${escapeHtml(e.message)}${detail}</td>
+      <td class="ax">${e.action_id ?? ""}${e.state_id ? `<br><span class="state">${e.state_id}</span>` : ""}</td>
+      <td class="shots">${screenshots}</td>
+    </tr>`;
+  }).join("");
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>vision-mcp trace ${appId}</title>
+<style>
+  body { font: 13px/1.5 -apple-system, system-ui, sans-serif; margin: 16px; background: #f7f7f8; color: #1a1a1a; }
+  h1 { margin: 0 0 4px; }
+  .meta { color: #666; font-size: 12px; margin-bottom: 16px; }
+  table { border-collapse: collapse; width: 100%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  th, td { padding: 8px 10px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { background: #f1f3f5; text-align: left; font-weight: 600; }
+  td.i { color: #888; width: 36px; text-align: right; }
+  td.ts { color: #888; width: 72px; font-variant-numeric: tabular-nums; }
+  .kind { display: inline-block; padding: 2px 8px; border-radius: 4px; color: #fff; font-size: 11px; font-weight: 600; }
+  td.msg { max-width: 480px; }
+  td.msg pre { margin: 4px 0 0; padding: 6px 8px; background: #f6f8fa; border-radius: 4px; font-size: 11px; max-height: 120px; overflow: auto; }
+  td.ax { font-family: ui-monospace, monospace; font-size: 12px; color: #444; }
+  td.ax .state { color: #8b5cf6; font-size: 11px; }
+  td.shots { width: 320px; }
+  td.shots img { width: 150px; height: auto; margin: 2px; border: 1px solid #ddd; border-radius: 4px; cursor: zoom-in; }
+</style></head>
+<body>
+<h1>vision-mcp trace · ${appId}</h1>
+<div class="meta">session: <code>${session?.id ?? "?"}</code> · status: ${session?.status ?? "?"} · started: ${session?.started_at ?? "?"} · events: ${events.length}</div>
+<table>
+  <thead><tr><th>#</th><th>time</th><th>kind</th><th>message / detail</th><th>action / state</th><th>screenshots (before · after)</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+</body></html>`;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** click-text：OCR 找文字 → click 其中心。视觉路线的关键工具。 */
+async function cmdClickText(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const text = String(args.flags.text ?? "");
+  if (!text) throw new Error("click-text 需要 --text");
+  const match = (args.flags.match as "exact" | "contains" | "regex") ?? "contains";
+  const { DarwinHelperAdapter: HA, DarwinOcrProvider } = await import("@vision-mcp/core");
+  if (!(adapter instanceof HA)) throw new Error("click-text 当前需要 swift helper（含 Vision OCR）");
+  const ocr = new DarwinOcrProvider(adapter);
+  const status = await capsule.status();
+  const cr = status.geometry?.client_rect_px;
+  if (!cr) throw new Error("client_rect missing");
+  let region = cr;
+  if (args.flags.region) {
+    const [nx, ny, nw, nh] = String(args.flags.region).split(",").map(Number);
+    region = {
+      x: Math.round(cr.x + nx * cr.width),
+      y: Math.round(cr.y + ny * cr.height),
+      width: Math.round(nw * cr.width),
+      height: Math.round(nh * cr.height),
+    };
+  }
+  const tokens = await ocr.recognizeRect(region);
+  const compare = (a: string, b: string) => {
+    if (match === "regex") {
+      try { return new RegExp(b).test(a); } catch { return false; }
+    }
+    const A = a.replace(/\s+/g, "").toLowerCase();
+    const B = b.replace(/\s+/g, "").toLowerCase();
+    return match === "exact" ? A === B : A.includes(B);
+  };
+  // tokens 单 token 或拼接连续 token
+  let hit = tokens.find((t) => compare(t.text, text));
+  if (!hit) {
+    for (let i = 0; i < tokens.length; i++) {
+      let combined = tokens[i].text;
+      for (let j = i + 1; j < tokens.length && combined.length < text.length + 8; j++) {
+        combined += tokens[j].text;
+        if (compare(combined, text)) {
+          hit = { ...tokens[i], text: combined };
+          break;
+        }
+      }
+      if (hit) break;
+    }
+  }
+  if (!hit) {
+    console.log(JSON.stringify({ ok: false, reason: "text not found", tokens_seen: tokens.length }));
+    process.exit(2);
+  }
+  // bbox_norm 是相对 region 的；转屏幕坐标
+  const [bx, by, bw, bh] = hit.bbox_norm;
+  const pt = {
+    x: Math.round(region.x + (bx + bw / 2) * region.width),
+    y: Math.round(region.y + (by + bh / 2) * region.height),
+  };
+  await capsule.raise().catch(() => {});
+  await adapter.click(pt);
+  console.log(
+    JSON.stringify({
+      ok: true,
+      matched_text: hit.text,
+      confidence: hit.confidence,
+      point: pt,
+    }),
+  );
+  await adapter.dispose?.();
+}
+
+/** hover：移到坐标 + 等待，触发 hover-only 控件（如卡片浮动 ▶）。 */
+async function cmdHover(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const [nxs, nys] = String(args.flags.norm ?? "").split(",");
+  const nx = Number(nxs), ny = Number(nys);
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw new Error("hover 需要 --norm x,y");
+  const holdMs = Number(args.flags["hold-ms"] ?? 300);
+  await capsule.raise().catch(() => {});
+  const cr = (await capsule.validateGeometry()).client_rect_px;
+  const pt = { x: Math.round(cr.x + nx * cr.width), y: Math.round(cr.y + ny * cr.height) };
+  // 用 drag 0 距离实现 hover（mouseMoved CGEvent）
+  await adapter.drag(pt, { to_point_px: pt, steps: 1, duration_ms: holdMs });
+  console.log(JSON.stringify({ ok: true, point: pt, hold_ms: holdMs }));
+  await adapter.dispose?.();
+}
+
+/** click-fuzzy：click 失败时围绕 ±jitter 自动重试（小按钮兜底）。 */
+async function cmdClickFuzzy(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const [nxs, nys] = String(args.flags.norm ?? "").split(",");
+  const nx = Number(nxs), ny = Number(nys);
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw new Error("click-fuzzy 需要 --norm x,y");
+  const jitter = Number(args.flags["jitter-px"] ?? 8);
+  const attempts = Number(args.flags.attempts ?? 5);
+  await capsule.raise().catch(() => {});
+  const cr = (await capsule.validateGeometry()).client_rect_px;
+  // visual_hash baseline 用 capture frame 算 dHash 判断变化
+  const { DHashProvider } = await import("@vision-mcp/core");
+  const hasher = new DHashProvider();
+  const baselineFrame = await capsule.capture();
+  const baselineHash = await hasher.hash(baselineFrame);
+  // 候选点：中心 + ±jitter 4 方向 + 4 对角线
+  const center = { x: Math.round(cr.x + nx * cr.width), y: Math.round(cr.y + ny * cr.height) };
+  const allOffsets: Array<[number, number]> = [
+    [0, 0],
+    [jitter, 0], [-jitter, 0], [0, jitter], [0, -jitter],
+    [jitter, jitter], [jitter, -jitter], [-jitter, jitter], [-jitter, -jitter],
+  ];
+  const offsets = allOffsets.slice(0, attempts);
+  for (const [dx, dy] of offsets) {
+    const pt = { x: center.x + dx, y: center.y + dy };
+    await adapter.click(pt);
+    await new Promise((r) => setTimeout(r, 500));
+    const afterFrame = await capsule.capture();
+    const afterHash = await hasher.hash(afterFrame);
+    const sim = hasher.similarity(baselineHash, afterHash);
+    if (sim < 0.97) {
+      console.log(
+        JSON.stringify({ ok: true, point: pt, offset: [dx, dy], visual_diff: 1 - sim }),
+      );
+      await adapter.dispose?.();
+      return;
+    }
+  }
+  console.log(JSON.stringify({ ok: false, reason: "no visual change after all attempts", attempts }));
+  await adapter.dispose?.();
+  process.exit(2);
 }
 
 async function cmdServe(args: ParsedArgs) {
