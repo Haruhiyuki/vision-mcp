@@ -57,6 +57,23 @@ export const VlmLocator = z.object({
   cost_budget_usd: z.number().nonnegative().optional(),
 });
 
+/**
+ * i18n / 跨语言友好：在指定 region（或全屏）内取第 N 个匹配 role 的 AX 节点。
+ * 不依赖文字 → 同一套 map 在中/英/日 locale 下都工作。
+ *
+ * 例："sidebar 第 2 个 cell" → { type: 'ordinal_in_region', region_id: 'sidebar',
+ *      role: 'AXCell', index: 1 }
+ */
+export const OrdinalInRegionLocator = z.object({
+  type: z.literal("ordinal_in_region"),
+  region_id: z.string().optional(),
+  role: z.string().optional(),
+  role_regex: z.string().optional(),
+  index: z.number().int().nonnegative(),
+  min_width_norm: z.number().min(0).max(1).default(0.01),
+  min_height_norm: z.number().min(0).max(1).default(0.01),
+});
+
 export const Locator = z.discriminatedUnion("type", [
   AccessibilityLocator,
   OcrTextLocator,
@@ -64,6 +81,7 @@ export const Locator = z.discriminatedUnion("type", [
   ImagePatchLocator,
   BBoxNormLocator,
   VlmLocator,
+  OrdinalInRegionLocator,
 ]);
 
 export type Locator = z.infer<typeof Locator>;
@@ -72,3 +90,4 @@ export type OcrTextLocator = z.infer<typeof OcrTextLocator>;
 export type ImagePatchLocator = z.infer<typeof ImagePatchLocator>;
 export type BBoxNormLocator = z.infer<typeof BBoxNormLocator>;
 export type VlmLocator = z.infer<typeof VlmLocator>;
+export type OrdinalInRegionLocator = z.infer<typeof OrdinalInRegionLocator>;

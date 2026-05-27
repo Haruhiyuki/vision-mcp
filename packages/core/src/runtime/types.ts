@@ -70,6 +70,14 @@ export interface ActionResult {
   patches: Patch[];
   events: TraceEventBase[];
   message?: string;
+  /**
+   * P1 内建视觉验证：动作前后 dHash 相似度。
+   * - visual_change=1-similarity（0 完全没变；1 完全不同）
+   * - low_visual_change=true 时表示"动作执行但 UI 没明显变化"——
+   *   这是 vision-mcp 最常见的"幽灵成功"幽默 bug 来源，agent 应警惕。
+   */
+  visual_change?: number;
+  low_visual_change?: boolean;
 }
 
 export interface WorkflowResult {

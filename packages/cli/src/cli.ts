@@ -110,6 +110,14 @@ function usage(): string {
     "       在 region 内反复滚动 + OCR 找文字；找到后返回 bbox 或直接 click",
     "  hover-probe <app_id> --norm <x,y> [--hold-ms 600] [--out probe.png]",
     "       hover 后截图与原图 diff，找出 hover 触发的新元素位置",
+    "  hover-then-click <app_id> --hover-norm <x,y> [--click-norm <x,y>] [--hold-ms 600] [--auto-find]",
+    "       hover 后再 click。--auto-find 时自动 click 到 hover-probe 找到的新元素位置（卡片浮动 ▶ 典型场景）",
+    "  snapshot-crop <app_id> --region x,y,w,h --out crop.png",
+    "       只截 region 部分；省 agent context（不返回全屏 PNG）",
+    "  snapshot-tile <app_id> [--cols 3] [--rows 3] [--out-dir tiles/]",
+    "       把当前帧切成 N×M 网格，输出 N×M 张 thumb；agent 用来快速定位感兴趣区域",
+    "  verify-map <app_id> --baseline <dir> [--update]",
+    "       回归测试：跑 plan 后对比 baseline 截图，visual_diff 超阈值报警；--update 写新 baseline",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -193,6 +201,18 @@ async function main() {
         return;
       case "hover-probe":
         await cmdHoverProbe(args);
+        return;
+      case "hover-then-click":
+        await cmdHoverThenClick(args);
+        return;
+      case "snapshot-crop":
+        await cmdSnapshotCrop(args);
+        return;
+      case "snapshot-tile":
+        await cmdSnapshotTile(args);
+        return;
+      case "verify-map":
+        await cmdVerifyMap(args);
         return;
       case "serve":
         await cmdServe(args);
@@ -1417,6 +1437,272 @@ async function cmdHoverProbe(args: ParsedArgs) {
     }),
   );
   await adapter.dispose?.();
+}
+
+/**
+ * hover-then-click: 复合动作
+ *   1. 移到 hover-norm 位置 + 持续 hold-ms（触发 hover-only 控件出现）
+ *   2. 如果传了 --click-norm，click 该位置；否则跳到 3
+ *   3. --auto-find：对 hover 前后做 visual diff，找出新出现的元素，click 它
+ *
+ * 解决卡片浮动 ▶ 按钮、tooltip 按钮等"必须 hover 才点得到"的场景。
+ */
+async function cmdHoverThenClick(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const [hxs, hys] = String(args.flags["hover-norm"] ?? "").split(",");
+  const hx = Number(hxs), hy = Number(hys);
+  if (!Number.isFinite(hx) || !Number.isFinite(hy))
+    throw new Error("hover-then-click 需要 --hover-norm x,y");
+  const holdMs = Number(args.flags["hold-ms"] ?? 600);
+  const autoFind = Boolean(args.flags["auto-find"]);
+  const clickNormStr = args.flags["click-norm"] as string | undefined;
+
+  await capsule.raise().catch(() => {});
+  const cr = (await capsule.validateGeometry()).client_rect_px;
+  const safePt = { x: cr.x + 5, y: cr.y + 5 };
+  // baseline：先把鼠标放窗口角，再 capture
+  await adapter.drag(safePt, { to_point_px: safePt, steps: 1, duration_ms: 100 });
+  await new Promise((r) => setTimeout(r, 200));
+  const baseFrame = autoFind ? await capsule.capture() : undefined;
+
+  // 移动并 hover
+  const hoverPt = { x: Math.round(cr.x + hx * cr.width), y: Math.round(cr.y + hy * cr.height) };
+  await adapter.drag(hoverPt, { to_point_px: hoverPt, steps: 1, duration_ms: holdMs });
+  await new Promise((r) => setTimeout(r, holdMs));
+
+  let clickAt: { x: number; y: number };
+  if (clickNormStr) {
+    const [cnx, cny] = clickNormStr.split(",").map(Number);
+    clickAt = { x: Math.round(cr.x + cnx * cr.width), y: Math.round(cr.y + cny * cr.height) };
+  } else if (autoFind && baseFrame) {
+    // 复用 hover-probe 的 diff 算法找 hot block
+    const afterFrame = await capsule.capture();
+    const w = baseFrame.width_px;
+    const h = baseFrame.height_px;
+    const radiusX = Math.round(0.15 * cr.width * 2);
+    const radiusY = Math.round(0.15 * cr.height * 2);
+    const fx = Math.max(0, Math.round((hoverPt.x - cr.x) / cr.width * w));
+    const fy = Math.max(0, Math.round((hoverPt.y - cr.y) / cr.height * h));
+    const x0 = Math.max(0, fx - radiusX);
+    const y0 = Math.max(0, fy - radiusY);
+    const x1 = Math.min(w, fx + radiusX);
+    const y1 = Math.min(h, fy + radiusY);
+    const block = 20;
+    let maxDiff = 0;
+    let hotBlock = { x: fx, y: fy };
+    for (let by = y0; by < y1 - block; by += block) {
+      for (let bx = x0; bx < x1 - block; bx += block) {
+        let d = 0;
+        for (let yy = 0; yy < block; yy++) {
+          for (let xx = 0; xx < block; xx++) {
+            const idx = ((by + yy) * w + (bx + xx)) * 4;
+            d +=
+              Math.abs((baseFrame.pixels[idx] ?? 0) - (afterFrame.pixels[idx] ?? 0)) +
+              Math.abs((baseFrame.pixels[idx + 1] ?? 0) - (afterFrame.pixels[idx + 1] ?? 0)) +
+              Math.abs((baseFrame.pixels[idx + 2] ?? 0) - (afterFrame.pixels[idx + 2] ?? 0));
+          }
+        }
+        if (d > maxDiff) {
+          maxDiff = d;
+          hotBlock = { x: bx, y: by };
+        }
+      }
+    }
+    if (maxDiff < 5000) {
+      console.log(
+        JSON.stringify({ ok: false, reason: "hover 后无明显新元素出现", max_diff: maxDiff }),
+      );
+      await adapter.dispose?.();
+      process.exit(2);
+    }
+    // hot block 像素坐标 → 屏幕坐标
+    clickAt = {
+      x: cr.x + Math.round(((hotBlock.x + block / 2) / w) * cr.width),
+      y: cr.y + Math.round(((hotBlock.y + block / 2) / h) * cr.height),
+    };
+  } else {
+    // 既没显式 click 又没 auto-find：默认 click hover 位置
+    clickAt = hoverPt;
+  }
+  await adapter.click(clickAt, { click_count: Number(args.flags["click-count"] ?? 1) });
+  console.log(
+    JSON.stringify({
+      ok: true,
+      hover_point: hoverPt,
+      click_point: clickAt,
+      auto_find: autoFind,
+    }),
+  );
+  await adapter.dispose?.();
+}
+
+/** snapshot-crop: 只截屏幕 region 子部分，省 agent context。 */
+async function cmdSnapshotCrop(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const outPath = String(args.flags.out ?? "/tmp/crop.png");
+  if (!args.flags.region) throw new Error("snapshot-crop 需要 --region x,y,w,h（归一化）");
+  const [nx, ny, nw, nh] = String(args.flags.region).split(",").map(Number);
+  const cr = (await capsule.validateGeometry()).client_rect_px;
+  const rect = {
+    x: Math.round(cr.x + nx * cr.width),
+    y: Math.round(cr.y + ny * cr.height),
+    width: Math.round(nw * cr.width),
+    height: Math.round(nh * cr.height),
+  };
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileP = promisify(execFile);
+  await execFileP("/usr/sbin/screencapture", [
+    "-x", "-t", "png", "-R",
+    `${rect.x},${rect.y},${rect.width},${rect.height}`,
+    outPath,
+  ]);
+  console.log(JSON.stringify({ ok: true, out: outPath, region_screen: rect }));
+  await adapter.dispose?.();
+}
+
+/** snapshot-tile: 把当前帧切成 N×M thumb 网格，输出多张小图。 */
+async function cmdSnapshotTile(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const cols = Number(args.flags.cols ?? 3);
+  const rows = Number(args.flags.rows ?? 3);
+  const outDir = String(args.flags["out-dir"] ?? "/tmp/tiles");
+  await fs.mkdir(outDir, { recursive: true });
+  const cr = (await capsule.validateGeometry()).client_rect_px;
+  const tileW = Math.floor(cr.width / cols);
+  const tileH = Math.floor(cr.height / rows);
+  const tiles: Array<{ row: number; col: number; out: string; region_norm: [number, number, number, number] }> = [];
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileP = promisify(execFile);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = cr.x + c * tileW;
+      const y = cr.y + r * tileH;
+      const filename = `tile_r${r}_c${c}.png`;
+      const fullPath = path.join(outDir, filename);
+      await execFileP("/usr/sbin/screencapture", [
+        "-x", "-t", "png", "-R",
+        `${x},${y},${tileW},${tileH}`,
+        fullPath,
+      ]).catch(() => {});
+      tiles.push({
+        row: r,
+        col: c,
+        out: fullPath,
+        region_norm: [c / cols, r / rows, 1 / cols, 1 / rows],
+      });
+    }
+  }
+  console.log(JSON.stringify({ ok: true, cols, rows, tiles }, null, 2));
+  await adapter.dispose?.();
+}
+
+/**
+ * verify-map: 回归测试 map 是否仍然有效。
+ *
+ * 工作流：
+ *   1. 跑 `--plan plan.json` 中定义的 action 序列（与 record 命令同 plan 格式）。
+ *   2. 每步执行后，截图 baseline 内对应步骤的 ref.png 做 dHash 对比。
+ *   3. similarity < threshold 时 fail，输出 diff 报告。
+ *   4. `--update` 模式：把当前 step 截图作为新 baseline 写回。
+ *
+ * 适合 CI：app 更新后用同一个 plan 跑一遍，发现哪些步骤的 UI 变了。
+ */
+async function cmdVerifyMap(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("verify-map 需要 <app_id>");
+  const baselineDir = String(args.flags.baseline ?? path.join(appsRoot(args), appId, "baseline"));
+  const planFile = String(args.flags.plan ?? path.join(appsRoot(args), appId, "plans", "regression.json"));
+  const update = Boolean(args.flags.update);
+  const threshold = Number(args.flags["min-similarity"] ?? 0.9);
+
+  const plan = JSON.parse(await fs.readFile(planFile, "utf8")) as {
+    name?: string;
+    steps: Array<{
+      label: string;
+      click_norm?: [number, number];
+      double_click_norm?: [number, number];
+      type?: string;
+      clear_first?: boolean;
+      key?: string;
+      wait_ms?: number;
+    }>;
+  };
+  await fs.mkdir(baselineDir, { recursive: true });
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const { DHashProvider, encodeRgbaToPng } = await import("@vision-mcp/core");
+  const hasher = new DHashProvider();
+  const results: Array<{ label: string; similarity: number; status: "ok" | "fail" | "new"; baseline?: string }> = [];
+
+  for (const step of plan.steps) {
+    // 执行 step
+    const cr = (await capsule.validateGeometry()).client_rect_px;
+    if (step.click_norm) {
+      await capsule.raise().catch(() => {});
+      await adapter.click({
+        x: Math.round(cr.x + step.click_norm[0] * cr.width),
+        y: Math.round(cr.y + step.click_norm[1] * cr.height),
+      });
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    if (step.double_click_norm) {
+      await adapter.click({
+        x: Math.round(cr.x + step.double_click_norm[0] * cr.width),
+        y: Math.round(cr.y + step.double_click_norm[1] * cr.height),
+      }, { click_count: 2 });
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    if (step.type !== undefined) {
+      await adapter.typeText({ text: step.type, clear_first: step.clear_first ?? false });
+    }
+    if (step.key) await adapter.pressKey({ combo: step.key });
+    if (step.wait_ms) await new Promise((r) => setTimeout(r, step.wait_ms));
+    // 截图与 baseline 对比
+    const frame = await capsule.capture();
+    const png = encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels);
+    const safeLabel = step.label.replace(/[^a-zA-Z0-9_.\-]/g, "_");
+    const baselinePath = path.join(baselineDir, `${safeLabel}.png`);
+    const baselineHashPath = path.join(baselineDir, `${safeLabel}.hash`);
+    const currentHash = await hasher.hash(frame);
+    if (update) {
+      await fs.writeFile(baselinePath, png);
+      await fs.writeFile(baselineHashPath, currentHash);
+      results.push({ label: step.label, similarity: 1, status: "new" });
+      continue;
+    }
+    // 拿历史 hash
+    let baseHash: string | undefined;
+    try {
+      baseHash = (await fs.readFile(baselineHashPath, "utf8")).trim();
+    } catch {}
+    if (!baseHash) {
+      results.push({ label: step.label, similarity: 0, status: "new" });
+      continue;
+    }
+    const sim = hasher.similarity(baseHash, currentHash);
+    results.push({
+      label: step.label,
+      similarity: sim,
+      status: sim >= threshold ? "ok" : "fail",
+      baseline: baselinePath,
+    });
+  }
+  const failed = results.filter((r) => r.status === "fail");
+  console.log(JSON.stringify({
+    plan: plan.name,
+    update,
+    threshold,
+    results,
+    summary: {
+      total: results.length,
+      ok: results.filter((r) => r.status === "ok").length,
+      fail: failed.length,
+      new: results.filter((r) => r.status === "new").length,
+    },
+  }, null, 2));
+  await adapter.dispose?.();
+  if (failed.length > 0) process.exit(2);
 }
 
 async function cmdServe(args: ParsedArgs) {

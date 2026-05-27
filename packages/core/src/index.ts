@@ -8,3 +8,10 @@ export * from "./trace/index.js";
 export * from "./runtime/index.js";
 export * from "./repair/index.js";
 export * from "./builder/index.js";
+export {
+  ClaudeVlmProvider,
+  ScriptedVlmProvider,
+  type VlmAskResult,
+  type VlmRelocateResult,
+} from "./vlm/index.js";
+export type { VlmProvider as CoreVlmProvider } from "./vlm/index.js";

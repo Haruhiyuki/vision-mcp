@@ -6,6 +6,7 @@ import type {
   AccessibilityProvider,
 } from "../locator/types.js";
 import { DHashProvider } from "../locator/visual-hash.js";
+import type { VlmProvider } from "../vlm/types.js";
 import { VisionMcpError } from "../errors.js";
 
 export interface DiscoverOptions {
@@ -29,6 +30,14 @@ export interface DiscoverOptions {
   out_dir: string;
   /** 进度回调。 */
   on_progress?: (msg: string) => void;
+  /**
+   * 可选 VLM 集成（P2）：开启后 discover 会用 VLM 给每个新页面起 state_id +
+   * 列出可点击元素的语义功能，自动写入 draft_states。
+   * 注意：每次 click 都触发一次 ask()；为成本控制，限制 max_clicks。
+   */
+  vlm?: VlmProvider;
+  vlm_naming?: boolean;     // 默认 true（若提供了 vlm）
+  vlm_describe?: boolean;   // 默认 true（若提供了 vlm）
 }
 
 export type ReturnAction =
@@ -45,6 +54,11 @@ export interface PageFingerprint {
 
 export interface DiscoveredPage {
   id: string;
+  /** VLM 起的语义名（如 "music.search_results"），可作为 state_id 草稿。 */
+  vlm_name?: string;
+  vlm_description?: string;
+  /** VLM 识别出的可交互元素列表（含语义功能描述）。 */
+  vlm_elements?: Array<{ label: string; bbox_norm?: [number, number, number, number]; purpose?: string }>;
   fingerprint: PageFingerprint;
   visited_at: string;
   out_dir: string;
@@ -89,6 +103,21 @@ export interface DiscoverResult {
       goes_to?: string;
       return_via?: ReturnAction;
     }>;
+    /** P2 同类聚类：建议把这些 controls 改为 collection 形式。 */
+    collections_hint?: Array<{
+      id: string;
+      role: string;
+      layout: "grid" | "row" | "column";
+      rows?: number;
+      cols?: number;
+      count?: number;
+      cell_bbox_norm: [number, number, number, number];
+      spacing_x: number;
+      spacing_y: number;
+      member_count: number;
+    }>;
+    vlm_name?: string;
+    vlm_description?: string;
   }>;
 }
 
@@ -119,9 +148,10 @@ export class Discoverer {
   private adapter: PlatformAdapter;
   private ax: AccessibilityProvider;
   private hasher = new DHashProvider();
-  private opts: Required<Omit<DiscoverOptions, "filter" | "on_progress">> & {
+  private opts: Required<Omit<DiscoverOptions, "filter" | "on_progress" | "vlm">> & {
     filter?: DiscoverOptions["filter"];
     on_progress?: DiscoverOptions["on_progress"];
+    vlm?: VlmProvider;
   };
   private pages = new Map<string, DiscoveredPage>();
   private transitions: DiscoveredTransition[] = [];
@@ -146,6 +176,9 @@ export class Discoverer {
       out_dir: opts.out_dir,
       filter: opts.filter,
       on_progress: opts.on_progress,
+      vlm: opts.vlm,
+      vlm_naming: opts.vlm_naming ?? !!opts.vlm,
+      vlm_describe: opts.vlm_describe ?? !!opts.vlm,
     };
   }
 
@@ -396,6 +429,53 @@ export class Discoverer {
       outgoing: [],
     };
     this.pages.set(id, page);
+    // P2：用 VLM 给页面起名 + 列举语义元素（如果配置了）
+    if (this.opts.vlm && (this.opts.vlm_naming || this.opts.vlm_describe)) {
+      try {
+        const frame = await this.capsule.capture();
+        if (this.opts.vlm_naming) {
+          const askRes = await this.opts.vlm.ask(
+            frame,
+            [
+              "你看到的是某桌面应用的一个页面截图。",
+              "请用一个简短的英文 snake_case state id 命名它（例如 search_results, album_detail, playing_now）。",
+              "再用一行中文描述这是什么页面。",
+              "输出 JSON 一行：{\"id\": \"...\", \"description\": \"...\"}",
+            ].join("\n"),
+          );
+          try {
+            const m = askRes.text.match(/\{[\s\S]*\}/);
+            if (m) {
+              const obj = JSON.parse(m[0]);
+              page.vlm_name = obj.id;
+              page.vlm_description = obj.description;
+            }
+          } catch {}
+        }
+        if (this.opts.vlm_describe) {
+          const askRes = await this.opts.vlm.ask(
+            frame,
+            [
+              "列出截图中所有显著的可交互元素（按钮、链接、输入框等）。",
+              "每项给一个 label（简短名称）+ bbox_norm [x,y,w,h]（归一化）+ purpose（一句话用途）。",
+              "输出 JSON 一行：{\"elements\": [{\"label\": \"...\", \"bbox_norm\": [..], \"purpose\": \"...\"}]}",
+              "只列前 15 个最重要的元素。",
+            ].join("\n"),
+          );
+          try {
+            const m = askRes.text.match(/\{[\s\S]*\}/);
+            if (m) {
+              const obj = JSON.parse(m[0]);
+              if (Array.isArray(obj.elements)) {
+                page.vlm_elements = obj.elements;
+              }
+            }
+          } catch {}
+        }
+      } catch {
+        // VLM 失败不阻塞 discover
+      }
+    }
     return page;
   }
 
@@ -422,8 +502,66 @@ export class Discoverer {
   }
 
   private buildDraft(): DiscoverResult["draft_states"] {
+    return [...this.pages.values()].map((p) => {
+      // P2 聚类：找等距 grid/row/column
+      const { clusterCollections } = require("./cluster.js") as typeof import("./cluster.js");
+      const cluster = clusterCollections(p.candidates);
+      return {
+        id: p.vlm_name ? `auto.${p.vlm_name}` : p.id,
+        vlm_name: p.vlm_name,
+        vlm_description: p.vlm_description,
+        anchors_hint: p.candidates.slice(0, 3).map((c) => ({
+          role: c.role,
+          description: c.description,
+          name: c.name,
+        })),
+        collections_hint: cluster.collections.map((cc) => ({
+          id: cc.suggested_id,
+          role: cc.member_ax_paths.length > 0 ? p.candidates.find((c) => c.ax_path === cc.member_ax_paths[0])?.role ?? "?" : "?",
+          layout: cc.layout,
+          rows: cc.rows,
+          cols: cc.cols,
+          count: cc.count,
+          cell_bbox_norm: cc.cell_bbox_norm,
+          spacing_x: cc.spacing_x,
+          spacing_y: cc.spacing_y,
+          member_count: cc.member_ax_paths.length,
+        })),
+        _looseCandidates: cluster.loose_nodes,
+      } as unknown as ReturnType<typeof this.buildDraft>[number] & { _looseCandidates: NodeRef[] };
+    }).map((d) => {
+      const { _looseCandidates, ...rest } = d as unknown as {
+        _looseCandidates: NodeRef[];
+        controls_hint?: unknown;
+        id: string;
+        anchors_hint: { role: string; description?: string; name?: string }[];
+        collections_hint?: unknown;
+        vlm_name?: string;
+        vlm_description?: string;
+      };
+      const p = this.pages.get(rest.id) ?? [...this.pages.values()].find((pg) => `auto.${pg.vlm_name}` === rest.id);
+      const candidatesToEmit = _looseCandidates ?? p?.candidates ?? [];
+      return {
+        ...rest,
+        controls_hint: candidatesToEmit.map((c: NodeRef, i: number) => {
+          const tr = p?.outgoing.find((t) => t.click.ax_path === c.ax_path);
+          return {
+            id: sanitizeId(c.name ?? c.description ?? `ctrl_${i}`),
+            role: c.role,
+            label: c.name ?? c.description,
+            bbox_norm: c.bbox_norm,
+            goes_to: tr?.to_page,
+            return_via: tr?.return_via ?? undefined,
+          };
+        }),
+      };
+    }) as DiscoverResult["draft_states"];
+  }
+
+  // 旧的简单 buildDraft 入口 — 仅保留 anchors_hint + controls_hint，不含 collection。
+  private _oldBuildDraft(): DiscoverResult["draft_states"] {
     return [...this.pages.values()].map((p) => ({
-      id: p.id,
+      id: p.vlm_name ? `auto.${p.vlm_name}` : p.id,
       anchors_hint: p.candidates.slice(0, 3).map((c) => ({
         role: c.role,
         description: c.description,

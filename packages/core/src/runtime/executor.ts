@@ -27,12 +27,14 @@ import {
 } from "../trace/index.js";
 import { RepairEngine } from "../repair/engine.js";
 import { encodeRgbaToPng } from "./png.js";
+import { DHashProvider } from "../locator/visual-hash.js";
 
 export class RuntimeExecutor {
   private resolver: LocatorResolver;
   private sessionId: string;
   private repair: RepairEngine;
   private recentControls: LocatorMatch[] = [];
+  private hasher = new DHashProvider();
 
   constructor(private readonly opts: RuntimeOptions) {
     this.resolver = new LocatorResolver(opts.providers);
@@ -241,6 +243,8 @@ export class RuntimeExecutor {
     let postOk = false;
     let stateAfter: StateMatch | null = null;
     let message: string | undefined;
+    let visualChange: number | undefined;
+    let lowVisualChange = false;
 
     try {
       events.push(
@@ -293,24 +297,67 @@ export class RuntimeExecutor {
       // 6. 执行动作
       // 6a. before-screenshot 写 trace asset
       let beforeAssetPath: string | undefined;
-      if (this.opts.trace) {
-        beforeAssetPath = await this.saveActionScreenshot("before", actionId);
+      let beforeHash: string | undefined;
+      // P1：动作前算 visual_hash 做内建 diff，并保存截图到 trace。
+      // 即使没有 trace，也算 hash 以便 ActionResult.visual_change 可填。
+      try {
+        const beforeFrame = await this.opts.capsule.capture();
+        beforeHash = await this.hasher.hash(beforeFrame);
+        if (this.opts.trace && beforeHash) {
+          const { encodeRgbaToPng } = await import("./png.js");
+          const png = encodeRgbaToPng(beforeFrame.width_px, beforeFrame.height_px, beforeFrame.pixels);
+          const safeAction = actionId.replace(/[^a-zA-Z0-9_.\-]/g, "_");
+          beforeAssetPath = await this.opts.trace.writeAsset(
+            `${this.sessionId}-before-${safeAction}.png`,
+            png,
+          );
+        }
+      } catch {
+        // 视觉 diff 是 best-effort，失败不阻塞动作执行
       }
       await this.dispatch(ctx, match);
       // 动作完成后失效 AX 缓存：postcondition 必须看到新页面
       if (this.opts.providers.accessibility?.invalidate) {
         this.opts.providers.accessibility.invalidate();
       }
-      // 6b. after-screenshot
+      // 6b. after-screenshot + visual diff
       let afterAssetPath: string | undefined;
-      if (this.opts.trace) {
-        // 给 UI 一点时间响应
+      let afterHash: string | undefined;
+      try {
         await new Promise((r) => setTimeout(r, 250));
-        afterAssetPath = await this.saveActionScreenshot("after", actionId);
+        const afterFrame = await this.opts.capsule.capture();
+        afterHash = await this.hasher.hash(afterFrame);
+        if (beforeHash && afterHash) {
+          const sim = this.hasher.similarity(beforeHash, afterHash);
+          visualChange = 1 - sim;
+        }
+        if (this.opts.trace) {
+          const { encodeRgbaToPng } = await import("./png.js");
+          const png = encodeRgbaToPng(afterFrame.width_px, afterFrame.height_px, afterFrame.pixels);
+          const safeAction = actionId.replace(/[^a-zA-Z0-9_.\-]/g, "_");
+          afterAssetPath = await this.opts.trace.writeAsset(
+            `${this.sessionId}-after-${safeAction}.png`,
+            png,
+          );
+        }
+      } catch {}
+      lowVisualChange = visualChange !== undefined && visualChange < 0.02;
+      if (lowVisualChange && ctx.actionType !== "wait" && ctx.actionType !== "noop") {
+        events.push(
+          await this.appendTrace({
+            kind: "warning",
+            message: `视觉无明显变化（visual_change=${visualChange!.toFixed(3)} < 0.02）— 动作可能没实际生效`,
+            action_id: actionId,
+            detail: { visual_change: visualChange },
+          }),
+        );
       }
 
       // 7. 等待 postcondition
       if (ctx.control.postcondition) {
+        // P1：判断 postcondition 是否含 ocr_should_appear / text_should_appear；
+        // 若是且 OCR provider 可用，wait 的每次 refresh 主动 OCR 一次（不只是 analyze）。
+        const needsOcr = conditionNeedsOcr(ctx.control.postcondition);
         const result = await waitForCondition(
           ctx.control.postcondition,
           async () => {
@@ -319,8 +366,23 @@ export class RuntimeExecutor {
             const st = await this.opts.capsule.status();
             if (st.attached_window) {
               ins.window_title = st.attached_window.title;
-              // 关键：wait 的 refresh 必须重填 AX，否则 AX-based anchor 永远不命中
               await this.resolver.setAccessibility(ins, st.attached_window.native_handle);
+            }
+            // 关键 P1：postcondition 需要 OCR 时主动调 OCR provider 填充 tokens。
+            if (needsOcr && this.opts.providers.ocr) {
+              const maybeOcr = this.opts.providers.ocr as {
+                recognizeRect?: (rect: import("../capsule/types.js").RectPx) => Promise<import("../locator/types.js").OcrToken[]>;
+                recognize: (f: typeof frame) => Promise<import("../locator/types.js").OcrToken[]>;
+              };
+              try {
+                if (maybeOcr.recognizeRect && st.geometry?.client_rect_px) {
+                  ins.ocr = await maybeOcr.recognizeRect(st.geometry.client_rect_px);
+                } else {
+                  ins.ocr = await maybeOcr.recognize(frame);
+                }
+              } catch {
+                // 失败保持原 ocr=[]
+              }
             }
             const detected2 = this.resolver.detectState(this.opts.map, ins);
             stateAfter = detected2;
@@ -330,6 +392,7 @@ export class RuntimeExecutor {
               insights: ins,
               window_title: st.attached_window?.title,
               recent_controls: this.recentControls,
+              baseline_visual_hash: beforeHash,
             };
           },
         );
@@ -394,6 +457,8 @@ export class RuntimeExecutor {
       patches,
       events,
       message,
+      visual_change: visualChange,
+      low_visual_change: lowVisualChange,
     };
   }
 
@@ -513,23 +578,6 @@ export class RuntimeExecutor {
     }
   }
 
-  /**
-   * 截一帧并以 PNG 写入 trace asset 目录，返回相对路径。
-   * 用 frame 自带 RGBA 转 PNG（避免再 fork screencapture）。
-   */
-  private async saveActionScreenshot(stage: "before" | "after", actionId: string): Promise<string | undefined> {
-    if (!this.opts.trace) return undefined;
-    try {
-      const frame = await this.opts.capsule.capture();
-      const png = encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels);
-      const safeAction = actionId.replace(/[^a-zA-Z0-9_.\-]/g, "_");
-      const filename = `${this.sessionId}-${stage}-${safeAction}.png`;
-      return await this.opts.trace.writeAsset(filename, png);
-    } catch {
-      return undefined;
-    }
-  }
-
   async repairAttempt(level = 3): Promise<{ ok: boolean; message: string; patches: Patch[] }> {
     const geom = await this.opts.capsule.validateGeometry();
     const result = await this.repair.attempt({ level, geometry: geom });
@@ -553,6 +601,19 @@ export class RuntimeExecutor {
     }
     return this.opts.trace.append({ ...event, session_id: this.sessionId });
   }
+}
+
+function conditionNeedsOcr(cond: import("../schema/index.js").Condition): boolean {
+  const check = (c: import("../schema/index.js").ConditionAtom): boolean =>
+    c.type === "ocr_should_appear" ||
+    c.type === "text_should_appear" ||
+    c.type === "text_should_disappear";
+  if ("type" in cond) return check(cond as import("../schema/index.js").ConditionAtom);
+  const g = cond as import("../schema/index.js").ConditionGroup;
+  if (g.all?.some(check)) return true;
+  if (g.any?.some(check)) return true;
+  if (g.not && check(g.not)) return true;
+  return false;
 }
 
 function resolveParams(

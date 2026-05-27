@@ -282,6 +282,45 @@ export class LocatorResolver {
           evidence: `vlm:${loc.prompt.slice(0, 32)}`,
         };
       }
+      case "ordinal_in_region": {
+        // 在指定 region 内或全屏，按 (y, x) 排序取第 index 个匹配 role 的 AX 节点
+        const regionBbox = loc.region_id
+          ? map.regions?.find((r) => r.id === loc.region_id)?.bbox_norm
+          : undefined;
+        let nodes = insights.accessibility;
+        if (regionBbox) {
+          const [rx, ry, rw, rh] = regionBbox;
+          nodes = nodes.filter((n) => {
+            const [nx, ny] = n.bbox_norm;
+            return nx >= rx - 0.01 && ny >= ry - 0.01 &&
+                   nx <= rx + rw + 0.01 && ny <= ry + rh + 0.01;
+          });
+        }
+        nodes = nodes.filter((n) => {
+          if (loc.role && n.role !== loc.role) return false;
+          if (loc.role_regex && (!n.role || !new RegExp(loc.role_regex).test(n.role))) return false;
+          const [, , w, h] = n.bbox_norm;
+          if (w < (loc.min_width_norm ?? 0.01)) return false;
+          if (h < (loc.min_height_norm ?? 0.01)) return false;
+          return true;
+        });
+        nodes = [...nodes].sort((a, b) => {
+          const dy = a.bbox_norm[1] - b.bbox_norm[1];
+          if (Math.abs(dy) > 0.01) return dy;
+          return a.bbox_norm[0] - b.bbox_norm[0];
+        });
+        const hit = nodes[loc.index];
+        if (!hit) return null;
+        const [x, y, w, h] = hit.bbox_norm;
+        return {
+          control_id: control.id,
+          bbox_norm: hit.bbox_norm,
+          center_norm: [x + w / 2, y + h / 2],
+          confidence: 0.85,
+          locator_used: "ordinal_in_region",
+          evidence: `ordinal_in_region: ${loc.region_id ?? "all"} role=${loc.role ?? loc.role_regex} idx=${loc.index}`,
+        };
+      }
     }
   }
 }
