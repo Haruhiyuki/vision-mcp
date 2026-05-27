@@ -225,6 +225,21 @@ try {
 } catch { }
 
 $script:isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$script:startTimeUtc = [DateTime]::UtcNow
+$script:rpcCount = 0
+
+# GetGuiResources（GDI / USER handle 计数）— 启动期就 Add-Type，health.snapshot 才能用
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class GuiRes {
+    [DllImport("user32.dll")] public static extern uint GetGuiResources(IntPtr hProcess, uint uiFlags);
+    public const uint GR_GDIOBJECTS = 0;
+    public const uint GR_USEROBJECTS = 1;
+}
+"@
+} catch { }
 
 # 多显示器 + per-monitor DPI：MonitorFromPoint + GetDpiForMonitor
 try {
@@ -838,49 +853,58 @@ function Await-OcrOp($winRtAsyncOp, $resultType) {
 
 # 对屏幕 rect 跑 OCR。返回 {text, bbox_norm: [x,y,w,h], confidence} 列表，
 # bbox 归一化到传入 rect。Windows.Media.Ocr 不给单词置信度，统一返回 1.0。
-function Recognize-Rect($rect) {
+# 内部 helper：System.Drawing.Bitmap → Windows.Media.Ocr.OcrResult。
+# 共用给 Recognize-Rect（GDI screen pixels）和 Recognize-Window（PrintWindow bitmap）。
+# bitmap 调用方负责 dispose。
+function Run-Ocr-On-Bitmap($bmp) {
     if (-not (Initialize-Ocr)) {
-        throw "Windows.Media.Ocr 不可用：未安装对应语言包（设置 → 时间和语言 → 语言 → 添加语言）"
+        throw "Windows.Media.Ocr 不可用：未安装对应语言包（设置 → 时间和语言 → 添加语言）"
     }
-    if ($rect.width -le 0 -or $rect.height -le 0) { return @() }
-    if ($rect.width -gt 10000 -or $rect.height -gt 10000) {
-        throw "OCR 矩形过大：Windows.Media.Ocr 限制 10000px/边"
+    if ($bmp.Width -gt 10000 -or $bmp.Height -gt 10000) {
+        throw "OCR 图像过大：Windows.Media.Ocr 限制 10000px/边（current $($bmp.Width)x$($bmp.Height)）"
     }
-    # 1. 屏幕区域 → PNG bytes
-    $bmp = New-Object System.Drawing.Bitmap $rect.width, $rect.height
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($rect.x, $rect.y, 0, 0, $bmp.Size)
-    $g.Dispose()
+    # Bitmap → PNG bytes → IRandomAccessStream → BitmapDecoder → SoftwareBitmap → OCR
     $ms = New-Object System.IO.MemoryStream
     $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
     $bytes = $ms.ToArray()
-    $bmp.Dispose()
-    # 2. PNG → IRandomAccessStream
+    $ms.Dispose()
     $iras = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
-    $writer = New-Object Windows.Storage.Streams.DataWriter $iras
-    $writer.WriteBytes($bytes)
-    Await-OcrOp $writer.StoreAsync() ([uint32]) | Out-Null
-    $writer.DetachStream() | Out-Null
-    $writer.Dispose()
-    $iras.Seek(0)
-    # 3. 解码 → SoftwareBitmap
-    $decoder = Await-OcrOp ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($iras)) ([Windows.Graphics.Imaging.BitmapDecoder])
-    $softBmp = Await-OcrOp $decoder.GetSoftwareBitmapAsync() ([Windows.Graphics.Imaging.SoftwareBitmap])
-    # 4. OCR
-    $ocrResult = Await-OcrOp $script:ocrEngine.RecognizeAsync($softBmp) ([Windows.Media.Ocr.OcrResult])
-    # 5. 提取词 + 归一化 bbox
-    # 注意：用 invScale * dim 而不是 dim / w，避免 PowerShell 偶发把 $rect.width
-    # 当 Object[] 处理（脚本作用域 + foreach 嵌套时易发）触发 op_Division 报错
+    try {
+        $writer = New-Object Windows.Storage.Streams.DataWriter $iras
+        try {
+            $writer.WriteBytes($bytes)
+            Await-OcrOp $writer.StoreAsync() ([uint32]) | Out-Null
+            $writer.DetachStream() | Out-Null
+        } finally {
+            $writer.Dispose()
+        }
+        $iras.Seek(0)
+        $decoder = Await-OcrOp ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($iras)) ([Windows.Graphics.Imaging.BitmapDecoder])
+        $softBmp = Await-OcrOp $decoder.GetSoftwareBitmapAsync() ([Windows.Graphics.Imaging.SoftwareBitmap])
+        return Await-OcrOp $script:ocrEngine.RecognizeAsync($softBmp) ([Windows.Media.Ocr.OcrResult])
+    } finally {
+        $iras.Dispose()
+    }
+}
+
+# 把 OcrResult 转成 tokens（含 bbox 归一化）。
+# refW/refH：归一化参考尺寸；通常 = bitmap 尺寸，但 Recognize-Window 时可用
+# client_rect 大小让 bbox 跟 client_rect frame 对齐。
+function OcrResult-To-Tokens($ocrResult, $refW, $refH) {
+    # 显式 Convert.ToDouble 避免 PS 偶发把 $refW 当 Object[]（触发 op_Multiply 异常）
     $tokens = New-Object System.Collections.ArrayList
-    $invW = 1.0 / ([double]([int]$rect.width))
-    $invH = 1.0 / ([double]([int]$rect.height))
+    $rW = [Convert]::ToDouble($refW)
+    $rH = [Convert]::ToDouble($refH)
+    if ($rW -le 0 -or $rH -le 0) { return $tokens }
+    $invW = 1.0 / $rW
+    $invH = 1.0 / $rH
     foreach ($ocrLine in $ocrResult.Lines) {
         foreach ($ocrWord in $ocrLine.Words) {
             $b = $ocrWord.BoundingRect
-            $bx = [double]$b.X * $invW
-            $by = [double]$b.Y * $invH
-            $bw = [double]$b.Width * $invW
-            $bh = [double]$b.Height * $invH
+            $bx = [Convert]::ToDouble($b.X) * $invW
+            $by = [Convert]::ToDouble($b.Y) * $invH
+            $bw = [Convert]::ToDouble($b.Width) * $invW
+            $bh = [Convert]::ToDouble($b.Height) * $invH
             [void]$tokens.Add(@{
                 text       = [string]$ocrWord.Text
                 bbox_norm  = @($bx, $by, $bw, $bh)
@@ -888,8 +912,75 @@ function Recognize-Rect($rect) {
             })
         }
     }
-    $iras.Dispose()
     return $tokens
+}
+
+# OCR 屏幕矩形：GDI CopyFromScreen 抓屏，要求目标窗口可见 + 前台
+function Recognize-Rect($rect) {
+    if ($rect.width -le 0 -or $rect.height -le 0) { return @() }
+    $bmp = New-Object System.Drawing.Bitmap $rect.width, $rect.height
+    try {
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($rect.x, $rect.y, 0, 0, $bmp.Size)
+        $g.Dispose()
+        $ocrResult = Run-Ocr-On-Bitmap $bmp
+        return OcrResult-To-Tokens $ocrResult $rect.width $rect.height
+    } finally {
+        $bmp.Dispose()
+    }
+}
+
+# OCR 整个窗口：PrintWindow 抓窗口位图（含被遮挡 / 屏外 workspace 窗口）。
+# 关键：不依赖 GDI screen pixels，所以 vision-mcp 自己拉前台都不需要。
+# 可选 region_norm = [nx, ny, nw, nh] 在窗口内裁剪。
+function Recognize-Window($handle, $regionNorm) {
+    $hwnd = [IntPtr]::new([int64]$handle)
+    $r = New-Object Win32+RECT
+    [Win32]::GetWindowRect($hwnd, [ref]$r) | Out-Null
+    $w = $r.right - $r.left
+    $h = $r.bottom - $r.top
+    if ($w -le 0 -or $h -le 0) { return @() }
+    $full = New-Object System.Drawing.Bitmap $w, $h
+    try {
+        $g = [System.Drawing.Graphics]::FromImage($full)
+        $hdcBmp = $g.GetHdc()
+        # PW_RENDERFULLCONTENT = 0x2（Win 8.1+）让 DWM 复合窗口正常渲染
+        $ok = [Win32]::PrintWindow($hwnd, $hdcBmp, 2)
+        $g.ReleaseHdc($hdcBmp)
+        $g.Dispose()
+        if (-not $ok) {
+            # PrintWindow 失败（DirectX 全屏 / 反作弊保护）—— fallback 屏幕抓
+            $rect = @{ x = $r.left; y = $r.top; width = $w; height = $h }
+            return Recognize-Rect $rect
+        }
+        # 裁剪到 region_norm（如果提供）
+        $bmpForOcr = $full
+        $refW = $w; $refH = $h
+        if ($regionNorm -and $regionNorm.Length -eq 4) {
+            # ConvertFrom-Json 偶发把 array 字段包成 Object[]；[double] cast 不够
+            # （触发 op_Multiply on Object[]），Convert.ToDouble 显式 unbox
+            $rx = [int]([Convert]::ToDouble($regionNorm[0]) * $w)
+            $ry = [int]([Convert]::ToDouble($regionNorm[1]) * $h)
+            $rw = [int]([Convert]::ToDouble($regionNorm[2]) * $w)
+            $rh = [int]([Convert]::ToDouble($regionNorm[3]) * $h)
+            if ($rw -gt 0 -and $rh -gt 0) {
+                $crop = New-Object System.Drawing.Bitmap $rw, $rh
+                $cg = [System.Drawing.Graphics]::FromImage($crop)
+                $cg.DrawImage($full, 0, 0, [System.Drawing.Rectangle]::new($rx, $ry, $rw, $rh), [System.Drawing.GraphicsUnit]::Pixel)
+                $cg.Dispose()
+                $bmpForOcr = $crop
+                $refW = $rw; $refH = $rh
+            }
+        }
+        try {
+            $ocrResult = Run-Ocr-On-Bitmap $bmpForOcr
+            return OcrResult-To-Tokens $ocrResult $refW $refH
+        } finally {
+            if ($bmpForOcr -ne $full) { $bmpForOcr.Dispose() }
+        }
+    } finally {
+        $full.Dispose()
+    }
 }
 
 # ---------- UI Automation: AX tree dump + InvokePattern ----------
@@ -921,10 +1012,52 @@ function Dump-MSAA-Tree($handle, $maxNodes = 500, $maxDepth = 6) {
     return $out
 }
 
-function Dump-UIA-Tree($handle, $maxNodes = 500, $maxDepth = 6) {
+function ToFinite([double]$v) {
+    if ([double]::IsInfinity($v) -or [double]::IsNaN($v)) { return 0.0 }
+    return $v
+}
+
+# 可交互角色（带语义、agent 真正想操作的元素）。把这层判断放进 UIA dump
+# 让 interactive_only=true 直接在 walker 里剪枝，避免遍历完整树。
+$script:interactiveRoles = @{
+    "ControlType.Button" = $true; "ControlType.Edit" = $true;
+    "ControlType.Hyperlink" = $true; "ControlType.CheckBox" = $true;
+    "ControlType.RadioButton" = $true; "ControlType.ComboBox" = $true;
+    "ControlType.MenuItem" = $true; "ControlType.Tab" = $true;
+    "ControlType.TabItem" = $true; "ControlType.ListItem" = $true;
+    "ControlType.DataItem" = $true; "ControlType.TreeItem" = $true;
+    "ControlType.SplitButton" = $true; "ControlType.Slider" = $true;
+    "ControlType.Spinner" = $true;
+}
+
+# UIA dump 参数（与 macOS 对齐 + Windows 特有）：
+#   handle / max_nodes / max_depth
+#   interactive_only=true   只返回带语义的可交互元素 + 任何有 Name 的 Text/Image
+#   skip_empty=true         过滤掉 Pane/Group 等无 name/desc/class 的纯结构节点
+#                            （CEF 中这类节点占 90%，过滤后从 500 缩到几十）
+#   viewport_norm=[nx,ny,nw,nh]  视口裁剪，只 dump bbox 与视口相交的节点
+function Dump-UIA-Tree($handle, $maxNodes = 500, $maxDepth = 6,
+                       [bool]$interactiveOnly = $false,
+                       [bool]$skipEmpty = $false,
+                       $viewportNorm = $null) {
     $hwnd = [IntPtr]::new([int64]$handle)
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
     if (-not $root) { return @() }
+
+    # 把 viewport_norm 解到窗口绝对像素 rect 供 bbox 相交判断
+    $vp = $null
+    if ($viewportNorm -and $viewportNorm.Length -eq 4) {
+        $r = New-Object Win32+RECT
+        [Win32]::GetWindowRect($hwnd, [ref]$r) | Out-Null
+        $ww = $r.right - $r.left; $wh = $r.bottom - $r.top
+        $vp = @{
+            x = $r.left + [double]$viewportNorm[0] * $ww
+            y = $r.top  + [double]$viewportNorm[1] * $wh
+            x2 = $r.left + ([double]$viewportNorm[0] + [double]$viewportNorm[2]) * $ww
+            y2 = $r.top  + ([double]$viewportNorm[1] + [double]$viewportNorm[3]) * $wh
+        }
+    }
+
     $out = New-Object System.Collections.ArrayList
     $stack = New-Object System.Collections.Stack
     $stack.Push(@{ el = $root; depth = 0; path = "win[0]" })
@@ -939,27 +1072,43 @@ function Dump-UIA-Tree($handle, $maxNodes = 500, $maxDepth = 6) {
             $autoId = $info.AutomationId
             $cls = $info.ClassName
             $bb = $info.BoundingRectangle
-            # UIA 把不可见 / 未渲染的元素 BoundingRectangle 设成 Rect.Empty —
-            # X/Y = double.PositiveInfinity, W/H = double.NegativeInfinity。
-            # PowerShell 的 ConvertTo-Json 把 Infinity 直接写成裸字面量
-            # ("pos":[Infinity,Infinity])，这是无效 JSON，会让 Node 端 parse_error
-            # 后请求挂到 timeout。这里把 non-finite 全部归零（上层 normalize 会过滤掉
-            # w/h<=0 的节点，正好排除这些不可见元素）。
-            function ToFinite([double]$v) {
-                if ([double]::IsInfinity($v) -or [double]::IsNaN($v)) { return 0.0 }
-                return $v
+            $px = ToFinite $bb.X; $py = ToFinite $bb.Y
+            $pw = ToFinite $bb.Width; $ph = ToFinite $bb.Height
+
+            # 过滤判定（仅决定要不要 emit，子节点继续遍历给后代机会）
+            $emit = $true
+            if ($skipEmpty -and -not $name -and -not $autoId -and -not $cls -and $role -match "(Pane|Group|Custom|Image)$") {
+                $emit = $false
             }
-            $node = @{
-                role  = $role
-                name  = $name
-                desc  = $autoId
-                class = $cls
-                pos   = @((ToFinite $bb.X), (ToFinite $bb.Y))
-                size  = @((ToFinite $bb.Width), (ToFinite $bb.Height))
-                depth = $cur.depth
-                path  = $cur.path
+            if ($interactiveOnly) {
+                $isInteractive = $script:interactiveRoles.ContainsKey($role)
+                # 退而求其次：有 Name + 是 Text/ListItem 也算（语义可见的文本）
+                if (-not $isInteractive -and $name -and $role -match "(Text|StaticText|ListItem)$") { $isInteractive = $true }
+                if (-not $isInteractive) { $emit = $false }
             }
-            [void]$out.Add($node)
+            # 视口裁剪：bbox 与 viewport 不相交 → 跳过整个子树
+            $inViewport = $true
+            if ($vp -and $pw -gt 0 -and $ph -gt 0) {
+                if (($px + $pw) -lt $vp.x -or ($py + $ph) -lt $vp.y -or $px -gt $vp.x2 -or $py -gt $vp.y2) {
+                    $inViewport = $false
+                }
+            }
+            if (-not $inViewport) {
+                # 整个分支不在视口；不 emit，也不递归
+                continue
+            }
+            if ($emit) {
+                [void]$out.Add(@{
+                    role  = $role
+                    name  = $name
+                    desc  = $autoId
+                    class = $cls
+                    pos   = @($px, $py)
+                    size  = @($pw, $ph)
+                    depth = $cur.depth
+                    path  = $cur.path
+                })
+            }
             if ($cur.depth -lt $maxDepth) {
                 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
                 $child = $walker.GetFirstChild($el)
@@ -1044,10 +1193,45 @@ while ($true) {
     $id = $msg.id
     $method = $msg.method
     $p = if ($msg.params) { $msg.params } else { @{} }
+    $script:rpcCount += 1
     try {
         switch ($method) {
             "version" {
                 Send-Result $id @{ version = "0.2"; platform = "windows"; elevated = $script:isElevated }
+                break
+            }
+            "health.snapshot" {
+                # helper 自身健康检查，用于长寿命 sidecar 内存监控。
+                # 返回 uptime + .NET GC heap + GDI handle 数 + RPC 累计。
+                # macOS swift helper 没这条；agent 检测平台后判断是否调。
+                $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+                # 强制 GC + 抓 heap 大小让 leak 检测更准（GC.GetTotalMemory(true)）
+                $gcHeapBytes = [System.GC]::GetTotalMemory($false)
+                $health = @{
+                    uptime_sec      = [int]([DateTime]::UtcNow - $script:startTimeUtc).TotalSeconds
+                    rpc_count       = $script:rpcCount
+                    pid             = $proc.Id
+                    elevated        = $script:isElevated
+                    handle_count    = $proc.HandleCount
+                    gdi_handle_count = $null   # 走 P/Invoke GetGuiResources(GR_GDIOBJECTS=0)
+                    user_handle_count = $null  # GR_USEROBJECTS=1
+                    working_set_bytes = $proc.WorkingSet64
+                    private_bytes   = $proc.PrivateMemorySize64
+                    gc_heap_bytes   = $gcHeapBytes
+                    gc_gen_collected = @(
+                        [System.GC]::CollectionCount(0),
+                        [System.GC]::CollectionCount(1),
+                        [System.GC]::CollectionCount(2)
+                    )
+                    threads          = $proc.Threads.Count
+                    ps_version       = $PSVersionTable.PSVersion.ToString()
+                }
+                # GDI / USER handle 数（GetGuiResources）—— 检测 helper 是否泄露 GDI bitmap / DC
+                try {
+                    $health.gdi_handle_count  = [GuiRes]::GetGuiResources($proc.Handle, [GuiRes]::GR_GDIOBJECTS)
+                    $health.user_handle_count = [GuiRes]::GetGuiResources($proc.Handle, [GuiRes]::GR_USEROBJECTS)
+                } catch { }
+                Send-Result $id $health
                 break
             }
             "capsule.list_displays"           { Send-Result $id (List-Displays) -AsArray; break }
@@ -1092,13 +1276,17 @@ while ($true) {
                 break
             }
             "ax.dump" {
+                # 参数：max_nodes / max_depth / interactive_only / skip_empty / viewport_norm
+                # interactive_only=true 在 walker 里剪枝，CEF/Electron 深树场景可从
+                # 500+ 节点缩到几十；skip_empty=true 过滤无 name 的 Pane/Group。
                 $maxNodes = if ($p.max_nodes) { [int]$p.max_nodes } else { 500 }
                 $maxDepth = if ($p.max_depth) { [int]$p.max_depth } else { 6 }
-                $uia = Dump-UIA-Tree $p.handle $maxNodes $maxDepth
+                $interactiveOnly = [bool]$p.interactive_only
+                $skipEmpty = [bool]$p.skip_empty
+                $viewportNorm = $p.viewport_norm
+                $uia = Dump-UIA-Tree $p.handle $maxNodes $maxDepth $interactiveOnly $skipEmpty $viewportNorm
                 # UIA 拿不到内容的老 Win32 / GDI 自绘 app（记事本经典模式、老 MFC）
                 # 自动 fallback 到 MSAA。判定：UIA 节点数 < 3 视为 UIA 没看到内容
-                # （ProgrammaticName "ControlType.Pane" 套娃几层但没 name/desc 的情况也 < 3 节点有效）
-                # explicit prefer_msaa=true：跳过 UIA 直接走 MSAA
                 if ($p.prefer_msaa -or $uia.Count -lt 3) {
                     $msaa = Dump-MSAA-Tree $p.handle $maxNodes $maxDepth
                     if ($msaa.Count -gt $uia.Count) {
@@ -1218,7 +1406,17 @@ while ($true) {
                 # returns: { tokens: [{ text, bbox_norm:[x,y,w,h], confidence }] }
                 if (-not $p.rect) { Send-Error $id "rect required" "BAD_PARAMS"; break }
                 $tokens = Recognize-Rect $p.rect
-                # 用 ArrayList 包，避免 ConvertTo-Json 把单元素展平
+                $arr = New-Object System.Collections.ArrayList
+                foreach ($t in $tokens) { [void]$arr.Add($t) }
+                Send-Result $id @{ tokens = $arr }
+                break
+            }
+            "ocr.recognize_window" {
+                # 用 PrintWindow 抓窗口位图喂 OCR，不依赖屏幕可见性。
+                # params: { handle, region_norm?: [nx,ny,nw,nh] }
+                # 屏外 workspace 窗口 / 被遮挡窗口 / 不前台窗口都能 OCR。
+                if (-not $p.handle) { Send-Error $id "handle required" "BAD_PARAMS"; break }
+                $tokens = Recognize-Window $p.handle $p.region_norm
                 $arr = New-Object System.Collections.ArrayList
                 foreach ($t in $tokens) { [void]$arr.Add($t) }
                 Send-Result $id @{ tokens = $arr }

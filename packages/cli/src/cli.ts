@@ -174,8 +174,9 @@ function usage(): string {
     "       在浏览器实时查看 capsule 画面（http://localhost:port）：含画面 + 接管按钮",
     "  install-helper [--force] [--prefix <path>]",
     "       检测并编译 native helper（macOS swiftc / Windows .ps1 自动 wrap）。安装后续运行的前置依赖",
-    "  doctor",
+    "  doctor [--watch <sec>]",
     "       一键自检：OS / Node / PowerShell / helper / DPI / elevation / displays；输出可贴 issue 报告",
+    "       --watch <sec>：周期 health.snapshot 监控 helper（GDI / heap / handle leak 检测）",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -2307,7 +2308,14 @@ async function encodeFrameAsPng(frame: { width_px: number; height_px: number; pi
  *
  * 退出码：所有关键项 OK → 0；任意 fail → 1。
  */
-async function cmdDoctor(_args: ParsedArgs) {
+async function cmdDoctor(args: ParsedArgs) {
+  // --watch <seconds>：周期性轮询 helper health.snapshot，看 GDI/heap/handle 趋势。
+  // 用于 P4-23 长 session 内存监控（24h 跑下来看是否 leak）。
+  if (args.flags.watch) {
+    const intervalMs = Number(args.flags.watch === true ? 60 : args.flags.watch) * 1000;
+    await cmdDoctorWatch(intervalMs);
+    return;
+  }
   const os = await import("node:os");
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
@@ -2414,6 +2422,79 @@ async function cmdDoctor(_args: ParsedArgs) {
   lines.push("");
   console.log(lines.join("\n"));
   if (!allOk) process.exit(1);
+}
+
+/**
+ * doctor --watch：周期 health.snapshot 看趋势。
+ * 检测 GDI handle / .NET heap / working set 累积；suspicious 时高亮。
+ *
+ * 一行一个 sample（jsonl），方便 grep / 喂给 vega-lite 画图。
+ * Ctrl+C 退出。
+ *
+ * 用法：vision-mcp doctor --watch 30   # 每 30s 一次
+ *      vision-mcp doctor --watch        # 默认 60s
+ */
+async function cmdDoctorWatch(intervalMs: number) {
+  const bundled = await resolveBundledHelper();
+  if (!bundled) {
+    console.error("doctor --watch 需要 helper 可用；先跑 vision-mcp install-helper");
+    process.exit(1);
+  }
+  const adapter = await createPlatformAdapter({ platform: "auto", helperPath: bundled });
+  // 只有 Windows helper 实现了 health.snapshot（macOS swift helper 没这条；roadmap）
+  const isWindows = adapter.platform === "windows";
+  if (!isWindows) {
+    console.error(`doctor --watch 目前仅支持 Windows helper（当前 ${adapter.platform}）`);
+    await adapter.dispose?.();
+    process.exit(1);
+  }
+  const helperRequest = (adapter as unknown as {
+    helperRequest: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
+  }).helperRequest.bind(adapter);
+
+  console.error(`[doctor watch] helper=${bundled}  interval=${intervalMs}ms  Ctrl+C 退出`);
+  console.error(`[doctor watch] 输出 JSONL 到 stdout；用 jq 处理：vision-mcp doctor --watch 30 | jq -c '{t:.iso,gdi:.gdi_handle_count,heap:.gc_heap_bytes}'`);
+
+  let firstSample: Record<string, number> | null = null;
+  const tick = async () => {
+    try {
+      const h = await helperRequest<Record<string, number>>("health.snapshot", {}, 10_000);
+      const sample = {
+        iso: new Date().toISOString(),
+        ...h,
+      };
+      // 简单趋势：与 first sample 比较，发现增长就在 stderr 高亮
+      if (!firstSample) {
+        firstSample = h;
+      } else {
+        const deltas: string[] = [];
+        for (const k of ["gdi_handle_count", "user_handle_count", "handle_count", "gc_heap_bytes", "working_set_bytes"]) {
+          const cur = Number(h[k] ?? 0);
+          const orig = Number(firstSample[k] ?? 0);
+          if (orig > 0 && cur > orig * 1.5) {
+            deltas.push(`${k}: ${orig} → ${cur} (+${Math.round(((cur - orig) / orig) * 100)}%)`);
+          }
+        }
+        if (deltas.length) {
+          console.error(`[doctor watch] ⚠️  potential leak: ${deltas.join("; ")}`);
+        }
+      }
+      console.log(JSON.stringify(sample));
+    } catch (err) {
+      console.error(`[doctor watch] sample failed: ${(err as Error).message}`);
+    }
+  };
+  // 立即一次 + 周期
+  await tick();
+  const timer = setInterval(tick, intervalMs);
+  // Ctrl+C cleanup
+  process.on("SIGINT", async () => {
+    clearInterval(timer);
+    await adapter.dispose?.();
+    process.exit(0);
+  });
+  // 持续运行
+  await new Promise(() => {});
 }
 
 async function cmdInstallHelper(args: ParsedArgs) {

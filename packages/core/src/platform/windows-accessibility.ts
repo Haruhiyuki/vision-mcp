@@ -30,6 +30,12 @@ export interface WindowsAccessibilityOptions {
   /** ax.dump 限制。Win UIA 在 Chrome / Electron 树很深；默认 500/6 与 helper 一致。 */
   max_nodes?: number;
   max_depth?: number;
+  /** 只返回可交互节点（Button/Edit/Link/CheckBox/MenuItem/Tab/...）+ 有 Name 的 Text。 */
+  interactive_only?: boolean;
+  /** 跳过没有 Name/AutomationId/ClassName 的 Pane/Group（CEF 中 90% 是这种）。 */
+  skip_empty?: boolean;
+  /** 视口裁剪 [nx,ny,nw,nh]：bbox 与视口不相交的子树整个跳过。 */
+  viewport_norm?: [number, number, number, number];
 }
 
 /**
@@ -93,7 +99,14 @@ export class WindowsAccessibilityProvider implements AccessibilityProvider {
     try {
       raw = await this.adapter.helperRequest<RawUiaNode[] | RawUiaNode>(
         "ax.dump",
-        { handle: windowHandle, max_nodes: maxNodes, max_depth: maxDepth },
+        {
+          handle: windowHandle,
+          max_nodes: maxNodes,
+          max_depth: maxDepth,
+          interactive_only: this.options.interactive_only,
+          skip_empty: this.options.skip_empty,
+          viewport_norm: this.options.viewport_norm,
+        },
         60_000,
       );
     } catch (err) {

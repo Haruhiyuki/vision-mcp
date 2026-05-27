@@ -77,6 +77,43 @@ export class WindowsOcrProvider implements OcrProvider {
     return tokens;
   }
 
+  /**
+   * OCR 整个窗口（PrintWindow → 位图 → OCR）。
+   * 不依赖屏幕可见性：屏外 workspace / 被遮挡 / 不前台的窗口都能 OCR。
+   * regionNorm 可选 [nx, ny, nw, nh] 在窗口内裁剪（节省 OCR 时间）。
+   * 返回的 bbox 归一化到 regionNorm（若提供）或整个窗口。
+   */
+  async recognizeWindow(
+    windowHandle: string,
+    options: { regionNorm?: [number, number, number, number]; nocache?: boolean } = {},
+  ): Promise<OcrToken[]> {
+    const region = options.regionNorm
+      ? `${options.regionNorm.join(",")}`
+      : "full";
+    const key = `window:${windowHandle}:${region}`;
+    if (!options.nocache) {
+      const hit = this.cache.get(key);
+      if (hit && Date.now() - hit.ts < this.ttlMs) return hit.tokens;
+    }
+    const r = await this.adapter.helperRequest<{ tokens: RawToken[] }>(
+      "ocr.recognize_window",
+      {
+        handle: windowHandle,
+        region_norm: options.regionNorm,
+      },
+      20_000,
+    );
+    const tokens: OcrToken[] = (r.tokens ?? []).map((t) => ({
+      text: t.text,
+      confidence: t.confidence,
+      bbox_norm: t.bbox_norm,
+    }));
+    if (!options.nocache) {
+      this.cache.set(key, { ts: Date.now(), tokens });
+    }
+    return tokens;
+  }
+
   /** 列出系统装的 OCR 语言包，给 doctor 命令展示。 */
   async languages(): Promise<Array<{ tag: string; display: string }>> {
     const r = await this.adapter.helperRequest<Array<{ tag: string; display: string }> | { tag: string; display: string }>(
