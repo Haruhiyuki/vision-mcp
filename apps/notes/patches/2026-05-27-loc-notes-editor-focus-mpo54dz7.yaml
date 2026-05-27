@@ -1,5 +1,5 @@
 id: loc-notes-editor-focus-mpo54dz7
-trust: session_only
+trust: trusted
 created_at: 2026-05-27T14:09:19.555Z
 created_by: vision-mcp-cli-patch
 reason: "实测: cmd+n 后焦点自动在编辑区，click 反而丢焦点 → 必须 type 默认"

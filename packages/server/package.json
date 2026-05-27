@@ -30,7 +30,7 @@
     "clean": "rimraf dist *.tsbuildinfo",
     "start": "node dist/bin.js",
     "test": "vitest run",
-    "prepublishOnly": "npm run clean && npm run build"
+    "prepublishOnly": "npm run clean && npm run build && find dist \\( -name '*tsbuildinfo' -o -name '*.map' \\) -delete"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

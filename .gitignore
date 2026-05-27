@@ -1,21 +1,44 @@
+# Build artifacts
 node_modules
 dist
 *.tsbuildinfo
+
+# Editor / OS
 .DS_Store
-.env
-.env.local
-coverage
-.vitest
 .vscode/settings.json
 .idea
 *.log
+
+# Test / runtime
+coverage
+.vitest
 trace.db
 trace.db-journal
+
+# Secrets / env
+.env
+.env.local
+
+# vision-mcp runtime cache
 .vision-mcp/runtime-cache
-examples/.traces/
-apps/.traces/
+
+# ============ vision-mcp 运行时产物（不入库） ============
+# 实测/CI 产生的 trace（包括 events / sessions / 截图 assets）
+**/.traces/
+# 探索阶段截图 / dump
 apps/*/.explore*/
 apps/*/.record/
 apps/*/.discover/
+examples/*/.explore*/
+examples/*/.record/
+examples/*/.discover/
 .explore/
 
+# 临时 / 调试输出
+/tmp/vmcp-*
+*.tmp.png
+*.tmp.json
+
+# session_only patches（按定义不该入库；trusted/untrusted_proposal 可 commit）
+# 注：当前没有自动按 trust 过滤的 hook；如果手动入库 session_only patch
+# 要先把 trust 升级为 trusted，否则在干净 clone 上行为不一致。

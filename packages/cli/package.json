@@ -33,7 +33,7 @@
     "build": "tsc -b",
     "clean": "rimraf dist *.tsbuildinfo",
     "test": "vitest run",
-    "prepublishOnly": "npm run clean && npm run build"
+    "prepublishOnly": "npm run clean && npm run build && find dist \\( -name '*tsbuildinfo' -o -name '*.map' \\) -delete"
   },
   "dependencies": {
     "@vision-mcp/core": "0.1.0",

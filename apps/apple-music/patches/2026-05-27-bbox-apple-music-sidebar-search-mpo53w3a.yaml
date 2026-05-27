@@ -1,5 +1,5 @@
 id: bbox-apple-music-sidebar-search-mpo53w3a
-trust: session_only
+trust: trusted
 created_at: 2026-05-27T14:08:56.374Z
 created_by: vision-mcp-cli-patch
 reason: 实测 sidebar 搜索 cell 在 norm (0.014, 0.065)；原 bbox 中心 (0.04, 0.085) 实际指向主页
