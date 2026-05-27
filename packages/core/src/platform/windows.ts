@@ -20,11 +20,13 @@ import { NativeBridge, resolveDefaultHelper } from "./native-bridge.js";
 /**
  * Windows 平台适配器。
  *
- * 真正的窗口/输入/捕获能力来自 native helper（Rust + windows-rs / IddCx sample）。
- * 在 JavaScript 层，我们只做 JSON-RPC 转换、参数校验和错误归一化。
+ * 真正的窗口/输入/捕获能力来自 native helper（PowerShell + Win32 / Rust + windows-rs）。
+ * 在 JavaScript 层做 JSON-RPC 转换、参数校验和错误归一化。
+ *
+ * 不创建虚拟显示器（设计文档 §8.4）：直接迁移窗口到主屏稳定位置。
  *
  * helper 期望支持以下方法：
- *   - capsule.list_displays / capsule.ensure_virtual_display / capsule.remove_virtual_display
+ *   - capsule.list_displays
  *   - window.list / window.get / window.move / window.restore / window.placement
  *   - capture.window / capture.display
  *   - input.click / input.type / input.key / input.scroll / input.drag / input.subscribe
@@ -52,12 +54,18 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
     return this.bridge.request<DisplayInfo[]>("capsule.list_displays");
   }
 
+  /** 不创建虚拟显示器。挑稳定 display（优先窗口当前 display，其次 primary）。 */
   async ensureVirtualDisplay(opts: EnsureDisplayOptions): Promise<DisplayInfo> {
-    return this.bridge.request<DisplayInfo>("capsule.ensure_virtual_display", {
-      mode: opts.mode,
-      geometry: opts.geometry,
-      fallbacks: opts.fallbacks ?? [],
+    const { pickStableDisplay } = await import("../capsule/workspace.js");
+    const { VisionMcpError } = await import("../errors.js");
+    const all = await this.listDisplays();
+    if (all.length === 0) {
+      throw new VisionMcpError("CAPSULE_DISPLAY_MISSING", "Windows helper 未报告任何 display");
+    }
+    const pick = pickStableDisplay(all, {
+      minClient: { width: opts.geometry.width_px, height: opts.geometry.height_px },
     });
+    return pick.display ?? all[0];
   }
 
   async listWindows(filter?: TargetWindow): Promise<WindowInfo[]> {

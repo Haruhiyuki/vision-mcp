@@ -17,9 +17,7 @@ import type {
 } from "../capsule/manager.js";
 import {
   inferDisplayKind,
-  isRecommendedWorkspace,
-  pickWorkspaceDisplay,
-  synthesizeOffScreenWorkspace,
+  pickStableDisplay,
 } from "../capsule/workspace.js";
 import { NativeBridge, resolveDefaultHelper } from "./native-bridge.js";
 
@@ -49,25 +47,15 @@ export class MacosPlatformAdapter implements PlatformAdapter {
 
   async listDisplays(): Promise<DisplayInfo[]> {
     const raw = await this.bridge.request<DisplayInfo[]>("capsule.list_displays");
-    // 老 helper 不返回 kind / recommended_for_workspace；这里统一补齐。
     return raw.map((d) => ({
       ...d,
       kind: d.kind ?? inferDisplayKind(d),
-      recommended_for_workspace:
-        d.recommended_for_workspace ?? isRecommendedWorkspace(d),
     }));
   }
 
   /**
-   * macOS 不"创建"系统级虚拟显示器（设计文档 §9.5）。
-   * 这里按以下优先级选 workspace：
-   *   1. 真实 displays 中找 virtual > sidecar > airplay > extended（pickWorkspaceDisplay）
-   *   2. mode == "off_screen" 或 allow_off_screen 时合成 off-screen workspace（窗口放主屏外）
-   *   3. mode == "real_window" 直接返回 primary（不切 workspace，capsule 用窗口自身坐标）
-   *   4. 都不行 → 抛错让 capsule.ensureDisplay 走 fallbacks
-   *
-   * 不再调 helper 的 capsule.ensure_workspace_display——helper 端没有实现真"创建"，
-   * 之前直接返回 displays[0] 会让 runtime 误以为得到了"虚拟"显示器实际只是 primary。
+   * 不创建虚拟显示器（设计文档 §9.5 / §8.4）。直接挑稳定 display：
+   * 优先窗口当前 display，其次 primary。窗口将被迁到这个 display 的工作区中心，**完整可见**。
    */
   async ensureVirtualDisplay(opts: EnsureDisplayOptions): Promise<DisplayInfo> {
     const all = await this.listDisplays();
@@ -77,33 +65,13 @@ export class MacosPlatformAdapter implements PlatformAdapter {
         "macOS helper 未报告任何 display",
       );
     }
-    const minClient = {
-      width: opts.geometry.width_px,
-      height: opts.geometry.height_px,
-    };
-    if (opts.mode === "real_window") {
-      return all.find((d) => d.is_primary) ?? all[0];
-    }
-    const allowOffScreen = (opts as { allowOffScreen?: boolean }).allowOffScreen === true;
-    const pick = pickWorkspaceDisplay(all, { minClient });
-    if (pick.display) return pick.display;
-
-    // 没有合适的真实 workspace
-    if (allowOffScreen || opts.fallbacks?.includes("off_screen" as never)) {
-      const primary = all.find((d) => d.is_primary) ?? all[0];
-      return synthesizeOffScreenWorkspace({
-        primary,
+    const pick = pickStableDisplay(all, {
+      minClient: {
         width: opts.geometry.width_px,
         height: opts.geometry.height_px,
-      });
-    }
-    throw new VisionMcpError(
-      "CAPSULE_DISPLAY_MISSING",
-      `未找到合适的 workspace 显示器：${pick.reason}。可用：${all
-        .map((d) => `${d.id}(${d.kind ?? "?"})`)
-        .join(", ")}。提示：连接副屏 / 启用 Sidecar / 安装 BetterDisplay 等虚拟显示驱动，或通过 ensureDisplay({ allowOffScreen: true }) 启用屏外工作区。`,
-      { details: { displays: all, scored: pick.scored } },
-    );
+      },
+    });
+    return pick.display ?? all[0];
   }
 
   async listWindows(filter?: TargetWindow): Promise<WindowInfo[]> {

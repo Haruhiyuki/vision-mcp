@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   inferDisplayKind,
-  isRecommendedWorkspace,
-  pickWorkspaceDisplay,
-  synthesizeOffScreenWorkspace,
+  pickStableDisplay,
   describeDisplay,
   type DisplayInfo,
+  type WindowInfo,
 } from "@vision-mcp/core";
 
 function mk(overrides: Partial<DisplayInfo>): DisplayInfo {
@@ -23,80 +22,79 @@ function mk(overrides: Partial<DisplayInfo>): DisplayInfo {
   };
 }
 
-describe("workspace display selection", () => {
-  it("primary 单显示器 → pick 失败（不返回 primary）", () => {
-    const r = pickWorkspaceDisplay([mk({ id: "d0", is_primary: true })]);
-    expect(r.display).toBeNull();
-    expect(r.scored[0].kind).toBe("primary");
+function mkWindow(displayId?: string): WindowInfo {
+  return {
+    id: "w",
+    title: "test",
+    process_name: "test",
+    process_id: 1234,
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    client_bounds: { x: 0, y: 0, width: 800, height: 600 },
+    display_id: displayId,
+    is_minimized: false,
+    is_maximized: false,
+    is_fullscreen: false,
+    is_foreground: true,
+    native_handle: "w",
+  };
+}
+
+describe("pickStableDisplay", () => {
+  it("单显示器场景：返回 primary", () => {
+    const r = pickStableDisplay([mk({ id: "d0", is_primary: true })]);
+    expect(r.display?.id).toBe("d0");
   });
 
-  it("有副屏 → 优先 extended", () => {
-    const r = pickWorkspaceDisplay([
-      mk({ id: "p", is_primary: true }),
-      mk({ id: "e", bounds: { x: 1920, y: 0, width: 1920, height: 1080 }, work_area: { x: 1920, y: 0, width: 1920, height: 1080 } }),
-    ]);
-    expect(r.display?.id).toBe("e");
-    expect(r.scored[0].kind).toBe("extended");
+  it("有窗口当前 display：优先用它（不强行回主屏）", () => {
+    const r = pickStableDisplay(
+      [mk({ id: "p", is_primary: true }), mk({ id: "ext", bounds: { x: 1920, y: 0, width: 1920, height: 1080 }, work_area: { x: 1920, y: 0, width: 1920, height: 1080 } })],
+      { window: mkWindow("ext") },
+    );
+    expect(r.display?.id).toBe("ext");
   });
 
-  it("有 virtual 显示器 → virtual 优先于 extended", () => {
-    const r = pickWorkspaceDisplay([
-      mk({ id: "p", is_primary: true }),
-      mk({ id: "e" }),
-      mk({ id: "v", is_virtual: true, kind: "virtual" }),
-    ]);
-    expect(r.display?.id).toBe("v");
+  it("无窗口 hint + 多显示器：返回 primary", () => {
+    const r = pickStableDisplay(
+      [mk({ id: "p", is_primary: true }), mk({ id: "ext", bounds: { x: 1920, y: 0, width: 1920, height: 1080 } })],
+    );
+    expect(r.display?.id).toBe("p");
   });
 
-  it("sidecar 优先于 extended", () => {
-    const r = pickWorkspaceDisplay([
-      mk({ id: "p", is_primary: true }),
-      mk({ id: "e" }),
-      mk({ id: "s", kind: "sidecar", name: "iPad" }),
-    ]);
-    expect(r.display?.id).toBe("s");
-  });
-
-  it("minClient 不够时降分", () => {
-    const r = pickWorkspaceDisplay(
-      [mk({ id: "small", bounds: { x: 0, y: 0, width: 800, height: 600 }, work_area: { x: 0, y: 0, width: 800, height: 600 } })],
+  it("primary 太小不够容纳 minClient：fallback 到能装下的副屏", () => {
+    const r = pickStableDisplay(
+      [
+        mk({ id: "small", is_primary: true, bounds: { x: 0, y: 0, width: 800, height: 600 }, work_area: { x: 0, y: 0, width: 800, height: 600 } }),
+        mk({ id: "big", bounds: { x: 0, y: 0, width: 2560, height: 1440 }, work_area: { x: 0, y: 0, width: 2560, height: 1440 } }),
+      ],
       { minClient: { width: 1280, height: 800 } },
     );
+    expect(r.display?.id).toBe("big");
+  });
+
+  it("空 display 列表：display=null", () => {
+    const r = pickStableDisplay([]);
     expect(r.display).toBeNull();
   });
+});
 
-  it("inferDisplayKind 通过 name 识别第三方虚拟驱动", () => {
-    expect(inferDisplayKind(mk({ name: "BetterDisplay 4K", is_primary: false }))).toBe("virtual");
-    expect(inferDisplayKind(mk({ name: "Sidecar Display" }))).toBe("sidecar");
-    expect(inferDisplayKind(mk({ name: "AirPlay TV" }))).toBe("airplay");
-    expect(inferDisplayKind(mk({ name: "Random Monitor" }))).toBe("extended");
-    expect(inferDisplayKind(mk({ name: "X", is_primary: true }))).toBe("primary");
+describe("inferDisplayKind / describeDisplay", () => {
+  it("primary 标记为 primary", () => {
+    expect(inferDisplayKind(mk({ is_primary: true }))).toBe("primary");
   });
 
-  it("isRecommendedWorkspace primary=false / virtual=true", () => {
-    expect(isRecommendedWorkspace(mk({ is_primary: true, kind: "primary" }))).toBe(false);
-    expect(isRecommendedWorkspace(mk({ kind: "virtual" }))).toBe(true);
-    expect(isRecommendedWorkspace(mk({ kind: "sidecar" }))).toBe(true);
-    expect(isRecommendedWorkspace(mk({ kind: "mirror" }))).toBe(false);
+  it("非 primary 不带 kind hint：fallback 到 extended", () => {
+    expect(inferDisplayKind(mk({ is_primary: false }))).toBe("extended");
   });
 
-  it("synthesizeOffScreenWorkspace 把窗口放在主屏右下角让 SCKit 仍能渲染", () => {
-    const primary = mk({ id: "p", is_primary: true, bounds: { x: 0, y: 0, width: 1920, height: 1080 } });
-    const off = synthesizeOffScreenWorkspace({ primary, width: 1280, height: 800 });
-    expect(off.id).toBe("off-screen-workspace");
-    expect(off.kind).toBe("virtual");
-    expect(off.recommended_for_workspace).toBe(true);
-    // 默认 peek=40 → 窗口左上在 (1920-40, 1080-40) = (1880, 1040)
-    expect(off.bounds.x).toBe(1880);
-    expect(off.bounds.y).toBe(1040);
-    expect(off.bounds.width).toBe(1280);
-    expect(off.bounds.height).toBe(800);
+  it("已有 kind 字段：照用", () => {
+    expect(inferDisplayKind(mk({ kind: "mirror" }))).toBe("mirror");
   });
 
-  it("describeDisplay 返回 emoji + 信息", () => {
-    const s = describeDisplay(mk({ id: "d0", name: "Mi Monitor", is_primary: true, kind: "primary" }));
+  it("describeDisplay 输出含 id 和分辨率", () => {
+    const s = describeDisplay(mk({ id: "d0", name: "Mi Monitor", is_primary: true }));
     expect(s).toContain("d0");
     expect(s).toContain("Mi Monitor");
     expect(s).toContain("primary");
+    expect(s).toContain("1920x1080");
   });
 });

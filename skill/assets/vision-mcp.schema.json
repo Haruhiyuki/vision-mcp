@@ -61,8 +61,8 @@
             "mode": {
               "type": "string",
               "enum": [
-                "same_session_virtual_display",
                 "real_window",
+                "same_session_virtual_display",
                 "existing_display",
                 "third_party_virtual_display",
                 "off_screen"

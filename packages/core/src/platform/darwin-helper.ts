@@ -16,12 +16,7 @@ import type {
 } from "../capsule/types.js";
 import type { PlatformAdapter, WindowSnapshot } from "../capsule/manager.js";
 import type { TargetWindow } from "../schema/index.js";
-import {
-  inferDisplayKind,
-  isRecommendedWorkspace,
-  pickWorkspaceDisplay,
-  synthesizeOffScreenWorkspace,
-} from "../capsule/workspace.js";
+import { inferDisplayKind, pickStableDisplay } from "../capsule/workspace.js";
 import { NativeBridge } from "./native-bridge.js";
 
 /**
@@ -71,59 +66,25 @@ export class DarwinHelperAdapter implements PlatformAdapter {
         native_handle: d.native_handle,
         kind: d.kind as DisplayInfo["kind"],
         name: d.name,
-        vendor: d.vendor,
-        product: d.product,
-        recommended_for_workspace: d.recommended_for_workspace,
       };
-      // 老 helper 不传 kind / recommended_for_workspace：用本地推断兜底。
       if (!base.kind) base.kind = inferDisplayKind(base);
-      if (base.recommended_for_workspace === undefined) {
-        base.recommended_for_workspace = isRecommendedWorkspace(base);
-      }
       return base;
     });
   }
 
-  /**
-   * macOS 选 workspace 显示器：
-   *   1. 真实 displays 中按 virtual > sidecar > airplay > extended 评分（pickWorkspaceDisplay）
-   *   2. mode == "off_screen" 或 allowOffScreen == true → 合成屏外工作区
-   *   3. mode == "real_window" → 返回 primary（capsule 用窗口自身坐标系）
-   *   4. 都不行 → 抛错让 capsule.ensureDisplay 走 fallbacks
-   */
+  /** 不创建虚拟显示器。挑稳定 display（优先窗口当前 display，其次 primary）。 */
   async ensureVirtualDisplay(opts: EnsureDisplayOptions): Promise<DisplayInfo> {
     const all = await this.listDisplays();
     if (all.length === 0) {
       throw new VisionMcpError("CAPSULE_DISPLAY_MISSING", "macOS 未报告任何 NSScreen");
     }
-    const minClient = {
-      width: opts.geometry.width_px,
-      height: opts.geometry.height_px,
-    };
-    if (opts.mode === "real_window") {
-      return all.find((d) => d.is_primary) ?? all[0];
-    }
-    const allowOffScreen =
-      opts.allowOffScreen === true ||
-      (opts.fallbacks ?? []).includes("off_screen" as never) ||
-      opts.mode === ("off_screen" as never);
-    const pick = pickWorkspaceDisplay(all, { minClient });
-    if (pick.display) return pick.display;
-    if (allowOffScreen) {
-      const primary = all.find((d) => d.is_primary) ?? all[0];
-      return synthesizeOffScreenWorkspace({
-        primary,
+    const pick = pickStableDisplay(all, {
+      minClient: {
         width: opts.geometry.width_px,
         height: opts.geometry.height_px,
-      });
-    }
-    throw new VisionMcpError(
-      "CAPSULE_DISPLAY_MISSING",
-      `未找到合适的 workspace 显示器：${pick.reason}。可用：${all
-        .map((d) => `${d.id}(${d.kind ?? "?"})`)
-        .join(", ")}。提示：连接副屏 / 启用 Sidecar / 安装 BetterDisplay 等虚拟显示驱动，或在 ensureDisplay 中传 allowOffScreen=true 启用屏外工作区。`,
-      { details: { displays: all, scored: pick.scored } },
-    );
+      },
+    });
+    return pick.display ?? all[0];
   }
 
   async listWindows(filter?: TargetWindow): Promise<WindowInfo[]> {
@@ -201,14 +162,13 @@ export class DarwinHelperAdapter implements PlatformAdapter {
       point,
       button: opts?.button,
       click_count: opts?.click_count,
-      cursor_mode: opts?.cursor_mode,
-      try_ax_press: opts?.try_ax_press,
     });
   }
 
   /**
-   * macOS 专用：用 AX 操作窗口内 norm 位置的元素，完全不动鼠标光标。
-   * 适合 off-screen workspace 模式下点击屏外/半屏外的窗口元素。
+   * macOS 高级：用 AX 直接对 norm 位置的元素发 AXPress（不依赖鼠标坐标）。
+   * 适用：能被 AX 识别的语义按钮 / 工具栏 / 菜单项。
+   * 对 NSTableView cell / SwiftUI 自绘元素无效（它们不响应 AXPress）。
    */
   async axPressInWindow(handle: string, norm: [number, number]): Promise<{ ok: boolean; via: string; matched_role?: string; matched_name?: string }> {
     return this.bridge.request("input.ax_press", { handle, norm });
@@ -251,20 +211,6 @@ export class DarwinHelperAdapter implements PlatformAdapter {
   }
 
   async raiseWindow(handle: string): Promise<void> {
-    // 优先 window.raise：AXRaise + 必要时 activate + 保位置。
-    // off-screen workspace 模式必须用这个：window.activate 会让 macOS 把屏外窗口拉回主屏。
-    try {
-      const r = await this.bridge.request<{ ok: boolean }>("window.raise", {
-        handle,
-        keep_position: true,
-      });
-      if (r?.ok) {
-        await sleep(120);
-        return;
-      }
-    } catch {
-      // 老 helper 不支持 window.raise，降级到 window.activate
-    }
     await this.bridge.request("window.activate", { handle });
     await sleep(180);
   }
@@ -308,12 +254,9 @@ interface RawDisplay {
   is_primary: boolean;
   is_virtual: boolean;
   native_handle: string;
-  // 新字段（Swift helper v0.2+）：可能不存在
+  /** v0.4 起 swift helper 可能返回；老 helper 不返回。 */
   kind?: string;
   name?: string;
-  vendor?: string;
-  product?: string;
-  recommended_for_workspace?: boolean;
 }
 
 export interface RawAxNode {

@@ -47,9 +47,9 @@ helper stdin/stdout：每行一个 JSON 消息
 - 必须授权 Screen Recording + Accessibility。建议提供 `Open System Settings` 深链：
   `x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture`
   `x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`
-- 不创建系统级虚拟显示器；改为自动检测并使用现有 workspace display（virtual / sidecar / airplay / extended），无副屏环境可启用 off_screen workspace（peek-corner 40px 模式）。详见 `skill/references/platform-macos.md`。
+- 不创建系统级虚拟显示器（设计文档 §9.5）。`capsule.migrate` 总是把窗口固定到 display 工作区中心，**完整可见**。
 - helper 启动时自动 `NSApplication.shared + .accessory` 初始化（ScreenCaptureKit 必需）。
-- macOS 14+ 支持完整 SCKit 抓窗口能力；macOS 13 及更早会自动 fallback `screencapture -R`（不支持屏外窗口）。
+- macOS 14+ 支持完整 SCKit 抓窗口；macOS 13 及更早自动 fallback `screencapture -R`。
 
 ## 3. 部署环境变量
 

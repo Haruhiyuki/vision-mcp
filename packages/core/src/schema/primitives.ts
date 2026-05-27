@@ -31,15 +31,19 @@ export const CoordinateSpace = z.enum([
 ]);
 export type CoordinateSpace = z.infer<typeof CoordinateSpace>;
 
+/**
+ * Capsule 模式。当前只有一种：real_window —— 把窗口固定在用户主屏的一个稳定位置（完整可见），
+ * 使用归一化坐标。
+ *
+ * 历史值（same_session_virtual_display / existing_display / third_party_virtual_display /
+ * off_screen）保留为合法枚举以向后兼容老 yaml，但在 runtime 全部按 real_window 处理。
+ * 设计文档 §9.5 / §8.4：macOS / Windows 都不在 MVP 自创虚拟显示器。
+ */
 export const CapsuleMode = z.enum([
-  "same_session_virtual_display",
   "real_window",
+  "same_session_virtual_display",
   "existing_display",
   "third_party_virtual_display",
-  /**
-   * macOS off-screen workspace：把窗口放在主屏可视范围之外的合成 workspace。
-   * 适合无副屏 + 不想抢主屏的场景。必须配合 Live View 看画面。
-   */
   "off_screen",
 ]);
 export type CapsuleMode = z.infer<typeof CapsuleMode>;

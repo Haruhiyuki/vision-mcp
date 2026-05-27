@@ -21,19 +21,18 @@
 | Map Builder + WorkflowRecorder | ✅ 基础完成 | `packages/core/src/builder/*` |
 | MCP Server（§13.2 全部工具 + §13.3 资源） | ✅ 完整 | `packages/server/src/*` |
 | CLI | ✅ 完整 | `packages/cli/src/cli.ts` 提供 init/validate/build/run/workflow/repair/trace/serve/schema |
-| **macOS workspace display 体系 (v0.4)** | ✅ 完整 | `packages/core/src/capsule/workspace.ts`：自动识别 virtual/sidecar/airplay/extended/off_screen + 评分推荐 |
-| **macOS virtual cursor + AX-press (v0.4)** | ✅ 完整 | `native/macos/src/main.swift`：cursor warp_restore + axPressInWindowAtNorm；off-screen 窗口零鼠标干预操作 |
-| **macOS SCKit window capture (v0.4)** | ✅ 完整 | `capture.window` 用 ScreenCaptureKit 抓半屏外窗口完整内容（2560×1600 retina） |
-| **CLI workspace 命令族 (v0.4)** | ✅ 完整 | `vision-mcp displays / capsule / restore / live-view / ax-press` |
+| **macOS SCKit window capture** | ✅ 完整 | `capture.window` 用 ScreenCaptureKit 抓窗口（2560×1600 retina） |
+| **macOS AX-press**（高级输入） | ✅ 完整 | `input.ax_press` BFS 找窗口元素发 AXPerformAction("AXPress")，对有 AXPress action 的元素零鼠标干预 |
+| **CLI 命令族** | ✅ 完整 | `vision-mcp displays / capsule / restore / live-view / ax-press` |
 | Skill 文档 / 示例 map / trace 样例 | ✅ 完整 | `skill/`、`examples/`、`apps/activity-monitor/` |
 | 测试覆盖（schema, capsule, locator, runtime, repair, trace, workspace, MCP server e2e） | ✅ 43 个 vitest 测试全部通过 | `packages/*/tests/*.test.ts` |
 
 不在交付范围内（设计文档明示 P2 / 长期研究项）：
 
-- Windows IDD（Indirect Display Driver）签名安装器与企业部署脚本。
-- macOS 系统级虚拟显示器的私有实现（设计文档 §9.5 明确不做；现用 workspace display 体系覆盖等价能力）。
+- Windows IDD（Indirect Display Driver）虚拟显示器（设计文档 §8.4：MVP 不实现）。
+- macOS 系统级虚拟显示器（设计文档 §9.5：public API 不支持，MVP 不做）。
 - 生产级 OCR / VLM 实现：当前提供接口（`OcrProvider` / `VlmProvider`），生产可注入 Tesseract / PaddleOCR / Apple Vision / OpenAI VLM 等。
-- 独立 GUI Live View app（已用 HTTP server + 浏览器实现 MVP；M1/M2 可升级为 native NSPanel + 全局接管热键）。
+- 独立 GUI Live View app（已用 HTTP server + 浏览器实现 MVP）。
 
 ## 快速开始
 

@@ -21,7 +21,7 @@
 
 - 状态边框：Windows.Graphics.Capture / ScreenCaptureKit 自带；不要尝试隐藏。
 - **Live View**（v0.4 MVP，浏览器版）：`vision-mcp live-view <app> --port 7575` 启动后浏览器实时显示 capsule 画面 + 接管按钮（POST /takeover → 把窗口迁回主屏）。生产环境可升级为 native NSPanel + 全局接管热键（M1）。
-- **Workspace 提示**：选到非 primary workspace（virtual / sidecar / airplay / extended / off_screen）时，agent 必须在对话中告知用户本次任务执行的显示器名称；off_screen 模式必须额外说明 peek-corner 位置。详见 `skill/references/safety.md` §7。
+- **窗口可见性**：vision-mcp 不创建虚拟显示器，目标窗口总是迁到用户主屏稳定位置完整可见，agent 在做什么用户随时能看到。
 - Trace：所有动作进入 `<traces_dir>/<app_id>/events.jsonl`，用户随时可以打开 trace 查看 agent 做了什么。
 
 ## 3. 取消授权

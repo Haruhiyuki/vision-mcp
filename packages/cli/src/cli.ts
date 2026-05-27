@@ -94,10 +94,10 @@ function usage(): string {
     "       Agent 视角：一次拿截图 + AX 候选 + state match。等同于 MCP tool vision_map.snapshot",
     "  annotated <app_id> [--out frame.png] [--grid-step 0.1]",
     "       叠加网格 + 候选框 + 序号的截图：agent 看图后能说『click #7』而非估坐标",
-    "  click <app_id> --norm <x,y> [--button left|right|middle] [--count 1] [--cursor virtual|physical]",
-    "       直接 click 归一化坐标。--cursor virtual 在点击后还原鼠标位置（不抢用户主屏光标）",
+    "  click <app_id> --norm <x,y> [--button left|right|middle] [--count 1]",
+    "       直接 click 归一化坐标。等同于 MCP tool vision_map.click_at",
     "  ax-press <app_id> --norm <x,y>",
-    "       用 AX-press 操作 norm 位置元素：完全不动鼠标，能点屏外/半屏外窗口（off-screen workspace 必备）",
+    "       macOS 高级：用 AX 直接对 norm 位置元素发 AXPress（不依赖鼠标坐标，对有 AXPress action 的元素更稳）",
     "  type <app_id> --text <s> [--clear-first]",
     "       直接 type 文本（支持中文）。等同于 MCP tool vision_map.type_text",
     "  key <app_id> --combo <combo>",
@@ -121,13 +121,13 @@ function usage(): string {
     "  verify-map <app_id> --baseline <dir> [--update]",
     "       回归测试：跑 plan 后对比 baseline 截图，visual_diff 超阈值报警；--update 写新 baseline",
     "  displays [--json]",
-    "       列出当前所有显示器 + 自动评分推荐 workspace（macOS 兼 Sidecar/AirPlay/虚拟驱动）",
-    "  capsule <app_id> [--display <id>] [--off-screen] [--restore-on-exit]",
-    "       一键 ensureDisplay + attach + migrate；--off-screen 无副屏时启用屏外工作区",
+    "       列出当前所有显示器及类型（不创建虚拟显示器）",
+    "  capsule <app_id> [--display <id>]",
+    "       一键 ensureDisplay + attach + migrate 到 display 工作区中心（窗口完整可见）",
     "  restore <app_id>",
-    "       把窗口迁回 attach 前的原 placement（off-screen workspace 也可用此命令唤回主屏）",
+    "       把窗口迁回主屏中央",
     "  live-view <app_id> [--port 7575] [--interval-ms 500]",
-    "       在浏览器实时查看 capsule workspace（http://localhost:port）：含画面 + 接管按钮",
+    "       在浏览器实时查看 capsule 画面（http://localhost:port）：含画面 + 接管按钮",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -1003,7 +1003,6 @@ async function cmdRawClick(args: ParsedArgs) {
   if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw new Error("--norm 形式：x,y（归一化 0-1）");
   const button = (args.flags.button as never) ?? "left";
   const count = Number(args.flags.count ?? 1);
-  const cursorMode = args.flags.cursor ? String(args.flags.cursor) : undefined;
   await capsule.raise().catch(() => {});
   const geom = await capsule.validateGeometry();
   const cr = geom.client_rect_px;
@@ -1011,13 +1010,8 @@ async function cmdRawClick(args: ParsedArgs) {
     x: Math.round(cr.x + nx * cr.width),
     y: Math.round(cr.y + ny * cr.height),
   };
-  await adapter.click(pt, {
-    button,
-    click_count: count,
-    cursor_mode: cursorMode as never,
-    try_ax_press: cursorMode === "ax_press",
-  });
-  console.log(JSON.stringify({ ok: true, point: pt, point_norm: [nx, ny], cursor_mode: cursorMode ?? "physical" }));
+  await adapter.click(pt, { button, click_count: count });
+  console.log(JSON.stringify({ ok: true, point: pt, point_norm: [nx, ny] }));
   await adapter.dispose?.();
 }
 
@@ -1837,22 +1831,14 @@ async function cmdDisplays(args: ParsedArgs) {
     fallbackToMock: Boolean(args.flags["fallback-mock"]),
     helperPath: process.env.VISION_MCP_NATIVE_HELPER,
   });
-  const { describeDisplay, pickWorkspaceDisplay } = await import("@vision-mcp/core");
+  const { describeDisplay } = await import("@vision-mcp/core");
   const displays = await adapter.listDisplays();
-  const pick = pickWorkspaceDisplay(displays, { minClient: { width: 1280, height: 800 } });
   if (args.flags.json) {
-    console.log(JSON.stringify({ displays, recommended: pick.display?.id ?? null, scored: pick.scored }, null, 2));
+    console.log(JSON.stringify({ displays }, null, 2));
   } else {
     console.log("Displays:");
     for (const d of displays) {
-      const isRec = pick.display?.id === d.id ? "  ⇐ recommended workspace" : "";
-      console.log("  " + describeDisplay(d) + isRec);
-    }
-    if (!pick.display) {
-      console.log("\n⚠️  没有真实 workspace 显示器。可选方案：");
-      console.log("  1. 连接副屏 / 启用 Sidecar / AirPlay");
-      console.log("  2. 安装 BetterDisplay / Deskreen 等虚拟显示驱动");
-      console.log("  3. 用 `vision-mcp capsule <app> --off-screen` 启用屏外工作区（窗口移到主屏外，配合 live-view 查看）");
+      console.log("  " + describeDisplay(d));
     }
   }
   await adapter.dispose?.();
@@ -1869,7 +1855,6 @@ async function cmdCapsule(args: ParsedArgs) {
   });
   const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
   const requestedDisplay = args.flags.display ? String(args.flags.display) : undefined;
-  const offScreen = Boolean(args.flags["off-screen"]);
 
   let display;
   if (requestedDisplay) {
@@ -1881,12 +1866,11 @@ async function cmdCapsule(args: ParsedArgs) {
   } else {
     display = await capsule.ensureDisplay({
       geometry: loaded.effective.visual_box.display,
-      mode: offScreen ? "off_screen" : loaded.effective.visual_box.mode,
+      mode: loaded.effective.visual_box.mode,
       fallbacks: loaded.effective.visual_box.fallbacks,
-      allowOffScreen: offScreen,
     });
   }
-  console.log(`[capsule] workspace display: ${display.id} (${display.kind ?? "?"}) bounds=${JSON.stringify(display.bounds)}`);
+  console.log(`[capsule] display: ${display.id} (${display.kind ?? "?"}) bounds=${JSON.stringify(display.bounds)}`);
 
   if (!loaded.effective.visual_box.target_window) {
     throw new Error(`vision-mcp.yaml 缺少 visual_box.target_window，无法 attach`);
@@ -1900,9 +1884,7 @@ async function cmdCapsule(args: ParsedArgs) {
   console.log(JSON.stringify({
     capsule_id: capsule.id,
     display, window: moved,
-    note: offScreen
-      ? "窗口已移到主屏外。运行 `vision-mcp live-view " + appId + "` 在浏览器查看；`vision-mcp restore " + appId + "` 唤回主屏。"
-      : "窗口已迁入 workspace display。",
+    note: "窗口已迁到 display 工作区中心，完整可见。",
   }, null, 2));
   await adapter.dispose?.();
 }
