@@ -1222,6 +1222,40 @@ func handle(method: String, params: [String: Any]) -> Any {
             "matched_role": (r.role as Any?) ?? NSNull(),
             "matched_name": (r.name as Any?) ?? NSNull(),
         ]
+    case "input.click_in_window":
+        // 屏外 click 兜底：暂时把窗口拉到主屏 → click → 移回原位置。
+        // 适合 ax_press 找不到可点击元素（AXCell sidebar 等）的场景。
+        // 副作用：用户主屏会闪一下窗口；virtual cursor warp_restore 让光标看起来不动。
+        guard let handle = params["handle"] as? String,
+              let norm = params["norm"] as? [Double], norm.count == 2 else { return ["error": "handle + norm required"] }
+        guard let (_, axWin, desc) = findWindow(handle: handle) else { return ["error": "window not found"] }
+        let button = (params["button"] as? String) ?? "left"
+        let count = (params["click_count"] as? NSNumber)?.intValue ?? 1
+        let savedRect = desc.bounds
+        // 把窗口移到主屏中央（保持原 size）
+        guard let mainScreen = NSScreen.main else { return ["error": "no main screen"] }
+        let wa = mainScreen.visibleFrame
+        let tempX = wa.origin.x + (wa.width - savedRect.width) / 2.0
+        let tempY = wa.origin.y + (wa.height - savedRect.height) / 2.0
+        var tempPos = CGPoint(x: tempX, y: tempY)
+        let tempPosVal = AXValueCreate(.cgPoint, &tempPos)!
+        AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, tempPosVal)
+        usleep(80_000)
+        // 在窗口内 norm 位置 click（用 virtual cursor 让光标不动）
+        let clickX = tempX + norm[0] * savedRect.width
+        let clickY = tempY + norm[1] * savedRect.height
+        postClick(point: CGPoint(x: clickX, y: clickY), button: button, count: count, mode: "virtual")
+        usleep(80_000)
+        // 还原窗口位置
+        var origPos = CGPoint(x: savedRect.origin.x, y: savedRect.origin.y)
+        let origPosVal = AXValueCreate(.cgPoint, &origPos)!
+        AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, origPosVal)
+        return [
+            "ok": true,
+            "via": "click_in_window_flash",
+            "click_point": ["x": clickX, "y": clickY],
+            "original_bounds": ["x": savedRect.origin.x, "y": savedRect.origin.y, "width": savedRect.width, "height": savedRect.height],
+        ]
     case "capsule.restore_cursor":
         // 用于 virtual cursor 模式手动还原；通常不需要 caller 调用，postClick 内部已做。
         if let p = params["point"] as? [String: Any],
