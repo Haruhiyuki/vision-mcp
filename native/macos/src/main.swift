@@ -20,6 +20,46 @@ import IOKit.graphics
 import Vision
 import CoreImage
 import ScreenCaptureKit
+import Darwin.Mach
+
+// ---------- 启动期：health.snapshot 状态 ----------
+let helperStartTime = Date()
+var rpcCount: UInt64 = 0
+
+/// macOS 等价 Windows GetGuiResources：用 mach_task_basic_info 拿 resident
+/// memory；handle count 用 NSProcessInfo / open fd 数；线程数走 task_threads。
+/// agent doctor --watch 长 session 跑下来看这几条是否单调增长，判断 leak。
+func healthSnapshot() -> [String: Any] {
+    let proc = ProcessInfo.processInfo
+    var info = mach_task_basic_info()
+    var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+    let r = withUnsafeMutablePointer(to: &info) { infoPtr -> kern_return_t in
+        infoPtr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+            task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), intPtr, &count)
+        }
+    }
+    var threadCount: mach_msg_type_number_t = 0
+    var threadList: thread_act_array_t? = nil
+    let tr = task_threads(mach_task_self_, &threadList, &threadCount)
+    if tr == KERN_SUCCESS, let tl = threadList {
+        vm_deallocate(mach_task_self_, vm_address_t(bitPattern: tl), vm_size_t(threadCount) * vm_size_t(MemoryLayout<thread_t>.size))
+    }
+    return [
+        "uptime_sec": Int(Date().timeIntervalSince(helperStartTime)),
+        "rpc_count": rpcCount,
+        "pid": proc.processIdentifier,
+        "elevated": getuid() == 0,
+        "handle_count": NSNull(),       // macOS 没有等价 GDI handle 概念
+        "gdi_handle_count": NSNull(),
+        "user_handle_count": NSNull(),
+        "working_set_bytes": r == KERN_SUCCESS ? info.resident_size : 0,
+        "private_bytes": r == KERN_SUCCESS ? info.virtual_size : 0,
+        "gc_heap_bytes": NSNull(),       // Swift 无 GC；只有 ARC + Mach VM
+        "gc_gen_collected": NSNull(),
+        "threads": Int(threadCount),
+        "ps_version": "swift",
+    ]
+}
 
 // ---------- JSON helpers ----------
 
@@ -841,9 +881,12 @@ func capture(rect: CGRect) -> Data? {
 // ---------- RPC dispatch ----------
 
 func handle(method: String, params: [String: Any]) -> Any {
+    rpcCount += 1
     switch method {
     case "version":
         return ["version": "0.1", "platform": "macos"]
+    case "health.snapshot":
+        return healthSnapshot()
     case "capsule.list_displays":
         return listDisplays()
     case "capsule.ensure_workspace_display":

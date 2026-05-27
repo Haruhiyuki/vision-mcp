@@ -44,18 +44,24 @@ function makeAccessibilityProvider(a: PlatformAdapter): AccessibilityProvider | 
 }
 
 /**
- * 平台无关地拿一个 OcrProvider（有 recognizeRect 方法）。
+ * 平台无关地拿一个 OcrProvider。
  * - macOS swift helper → DarwinOcrProvider（Vision framework）
  * - Windows → WindowsOcrProvider（Windows.Media.Ocr WinRT）
  * - osascript / mock：undefined → 调用方应该报错或跳过 OCR 步骤
  *
- * 返回的 provider 都暴露 recognizeRect(screenRect, opts)；click-text /
- * scroll-until-text 等 OCR-依赖命令应通过这层而不是 instanceof DarwinHelperAdapter。
+ * 返回的 provider 都暴露 recognizeRect(screenRect, opts)。
+ * Windows provider 额外暴露 recognizeWindow(handle, opts)：走 PrintWindow，
+ * 不依赖目标窗口前台 / 可见（屏外 workspace 适用）。
  */
 type RectOcrProvider = {
   recognizeRect(
     screenRect: { x: number; y: number; width: number; height: number },
     options?: { nocache?: boolean },
+  ): Promise<Array<{ text: string; confidence: number; bbox_norm: [number, number, number, number] }>>;
+  /** 仅 Windows provider 暴露。若存在，agent 应优先用它（不需窗口前台）。 */
+  recognizeWindow?(
+    windowHandle: string,
+    options?: { regionNorm?: [number, number, number, number]; nocache?: boolean },
   ): Promise<Array<{ text: string; confidence: number; bbox_norm: [number, number, number, number] }>>;
   invalidate?(): void;
 };
@@ -1414,15 +1420,18 @@ async function cmdClickText(args: ParsedArgs) {
       `macOS 需 swift helper（不是 osascript），Windows 需 helper.ps1`,
     );
   }
-  // OCR 走 GDI 屏幕抓取（不是 PrintWindow），目标窗口必须可见且在前台
-  // 否则 OCR 会读到上层其它窗口（比如我们自己的终端）。先 raise 再 OCR。
-  await capsule.raise().catch(() => {});
   const status = await capsule.status();
   const cr = status.geometry?.client_rect_px;
   if (!cr) throw new Error("client_rect missing");
+  // Windows 走 PrintWindow path（recognizeWindow），不需要 raise，屏外窗口也能用。
+  // macOS / 其他平台仍走 GDI screen path（recognizeRect）+ raise。
+  const handle = status.attached_window?.native_handle;
+  const useWindowOcr = ocr.recognizeWindow && handle;
+  let regionNorm: [number, number, number, number] | undefined;
   let region = cr;
   if (args.flags.region) {
     const [nx, ny, nw, nh] = String(args.flags.region).split(",").map(Number);
+    regionNorm = [nx, ny, nw, nh];
     region = {
       x: Math.round(cr.x + nx * cr.width),
       y: Math.round(cr.y + ny * cr.height),
@@ -1430,7 +1439,15 @@ async function cmdClickText(args: ParsedArgs) {
       height: Math.round(nh * cr.height),
     };
   }
-  const tokens = await ocr.recognizeRect(region);
+  let tokens;
+  if (useWindowOcr) {
+    // recognizeWindow 内部用 PrintWindow，bbox_norm 相对 window/region 自身
+    tokens = await ocr.recognizeWindow!(handle!, regionNorm ? { regionNorm } : {});
+  } else {
+    // 屏幕路径必须先 raise，否则 OCR 读到上层窗口（agent 自己的终端等）
+    await capsule.raise().catch(() => {});
+    tokens = await ocr.recognizeRect(region);
+  }
   const compare = (a: string, b: string) => {
     if (match === "regex") {
       try { return new RegExp(b).test(a); } catch { return false; }
@@ -1439,7 +1456,6 @@ async function cmdClickText(args: ParsedArgs) {
     const B = b.replace(/\s+/g, "").toLowerCase();
     return match === "exact" ? A === B : A.includes(B);
   };
-  // tokens 单 token 或拼接连续 token
   let hit = tokens.find((t) => compare(t.text, text));
   if (!hit) {
     for (let i = 0; i < tokens.length; i++) {
@@ -1455,15 +1471,38 @@ async function cmdClickText(args: ParsedArgs) {
     }
   }
   if (!hit) {
-    console.log(JSON.stringify({ ok: false, reason: "text not found", tokens_seen: tokens.length }));
+    console.log(JSON.stringify({ ok: false, reason: "text not found", tokens_seen: tokens.length, via: useWindowOcr ? "window" : "screen" }));
     process.exit(2);
   }
-  // bbox_norm 是相对 region 的；转屏幕坐标
+  // bbox_norm 解到屏幕坐标：
+  //   - useWindowOcr：bbox 相对 window/regionNorm；要 client_rect 起点 + 缩放
+  //   - 否则：bbox 相对 region 屏幕矩形（已是 client_rect 子集）
   const [bx, by, bw, bh] = hit.bbox_norm;
-  const pt = {
-    x: Math.round(region.x + (bx + bw / 2) * region.width),
-    y: Math.round(region.y + (by + bh / 2) * region.height),
-  };
+  let pt;
+  if (useWindowOcr) {
+    if (regionNorm) {
+      // bbox 相对 cropped region，region 已是 client_rect 内 normalized
+      pt = {
+        x: Math.round(region.x + (bx + bw / 2) * region.width),
+        y: Math.round(region.y + (by + bh / 2) * region.height),
+      };
+    } else {
+      // bbox 相对 window bounds（PrintWindow 抓的整个 window，包括 chrome）
+      const wb = status.attached_window?.bounds;
+      if (!wb) throw new Error("missing window bounds");
+      pt = {
+        x: Math.round(wb.x + (bx + bw / 2) * wb.width),
+        y: Math.round(wb.y + (by + bh / 2) * wb.height),
+      };
+    }
+  } else {
+    pt = {
+      x: Math.round(region.x + (bx + bw / 2) * region.width),
+      y: Math.round(region.y + (by + bh / 2) * region.height),
+    };
+  }
+  // 真要 click 时还是 raise 一下（屏外窗口不需要前台，但 click 坐标射向真实屏幕
+  // 像素，target 必须可见才能交互；agent 应在 OCR 后明确 raise）。
   await capsule.raise().catch(() => {});
   await adapter.click(pt);
   console.log(
@@ -2441,16 +2480,17 @@ async function cmdDoctorWatch(intervalMs: number) {
     process.exit(1);
   }
   const adapter = await createPlatformAdapter({ platform: "auto", helperPath: bundled });
-  // 只有 Windows helper 实现了 health.snapshot（macOS swift helper 没这条；roadmap）
-  const isWindows = adapter.platform === "windows";
-  if (!isWindows) {
-    console.error(`doctor --watch 目前仅支持 Windows helper（当前 ${adapter.platform}）`);
+  // Windows ps1 helper 和 macOS swift helper 都实现了 health.snapshot；
+  // 其他 adapter（osascript / mock）没有，跳过
+  const a = adapter as unknown as {
+    helperRequest?: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
+  };
+  if (typeof a.helperRequest !== "function") {
+    console.error(`doctor --watch 需要 helper-based adapter（当前 ${adapter.platform} 不支持）`);
     await adapter.dispose?.();
     process.exit(1);
   }
-  const helperRequest = (adapter as unknown as {
-    helperRequest: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
-  }).helperRequest.bind(adapter);
+  const helperRequest = a.helperRequest.bind(adapter);
 
   console.error(`[doctor watch] helper=${bundled}  interval=${intervalMs}ms  Ctrl+C 退出`);
   console.error(`[doctor watch] 输出 JSONL 到 stdout；用 jq 处理：vision-mcp doctor --watch 30 | jq -c '{t:.iso,gdi:.gdi_handle_count,heap:.gc_heap_bytes}'`);
