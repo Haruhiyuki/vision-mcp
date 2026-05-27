@@ -15,23 +15,19 @@ $env:VISION_MCP_NATIVE_HELPER = "C:\path\to\src\vision-mcp-helper.ps1"
 # 或直接配 powershell + ps1 路径
 ```
 
-## 2. 编译为 exe（生产推荐）
+## 2. 编译为 exe（v0.1 暂不可用，留作记录）
 
-PowerShell 冷启动 ~400ms；exe 启动 ~10ms。
+**当前不要用 ps2exe**：
 
-```powershell
-Install-Module -Name ps2exe -Scope CurrentUser
-Invoke-ps2exe `
-  -inputFile src\vision-mcp-helper.ps1 `
-  -outputFile vision-mcp-helper.exe `
-  -noConsole
-```
+- `-noConsole`：编成 Windows GUI 子系统，子进程根本没 stdin/stdout pipe → ReadLine 永远阻塞。
+- 默认（无 `-noConsole`）：ps2exe 用自定义 PSHost，把 `[Console]::In.ReadLine()` 重定向到 Forms 输入框 → 父进程的 pipe 写入不会到达脚本。
 
-然后：
+两条路在做 JSON-RPC sidecar 时都不可用。已在 commit `b3cb50e` 验证过。
 
-```powershell
-$env:VISION_MCP_NATIVE_HELPER = "C:\path\to\vision-mcp-helper.exe"
-```
+如果你要 .exe 提速，目前 supported 方案：
+
+1. **用 .ps1（默认）**：`NativeBridge` 自动用 `powershell.exe -File` 包一层。冷启动 ~400ms（Add-Type UIA / Drawing），之后稳定 ~50ms/RPC。对长寿命 sidecar 完全够用。
+2. **dotnet AOT launcher（roadmap）**：5 行 C# `Process.Start("powershell.exe", ...)` 包一层，跳过 PowerShell 5.1 启动期。等 prebuilt 发布。
 
 ## 3. 实现的 RPC 方法
 
@@ -108,11 +104,50 @@ $env:VISION_MCP_NATIVE_HELPER = "C:\path\to\vision-mcp-helper.exe"
 
 ## 8. 故障排查
 
+### 通用问题
+
 | 现象 | 原因 | 解决 |
 | ---- | ---- | ---- |
-| `INPUT_LEASE_DENIED` | 目标 app 是高完整度等级（任务管理器/反作弊） | helper 以管理员身份运行 |
-| `capture.window` 黑屏 | DirectX 全屏 / 反作弊保护 | 用 `capture.rect`（BitBlt）兜底；或迁出 fullscreen |
-| `input.ax_press` 返回 `no_pattern` | 元素是自绘 UI，不实现 UIA pattern | 改用 `input.click`（坐标） |
-| `Add-Type UIAutomationClient` 失败 | 用了 PowerShell Core (pwsh.exe) | 改用 Windows PowerShell 5.1（`powershell.exe`）或编译 exe |
-| 中文输入乱码 | Clipboard 编码错 | 确保 PowerShell session 用 UTF-8（`[Console]::OutputEncoding = [Text.UTF8Encoding]::new()`） |
+| `INPUT_LEASE_DENIED` | 目标 app 是高完整度等级（任务管理器/反作弊） | 整个 Node 进程以管理员身份运行（helper 跟随父进程权限）|
+| `capture.window` 黑屏 | DirectX 全屏 / 反作弊保护 / DWM 复合关 | 用 `capture.rect`（BitBlt）兜底；或迁出 fullscreen。终极方案 WGC（roadmap）|
+| `input.ax_press` 返回 `no_pattern` | 元素是自绘 UI，不实现 UIA pattern | 改用 `input.click`（坐标）；或上 MSAA fallback（roadmap）|
+| `Add-Type UIAutomationClient` 失败 | 用了 PowerShell Core (pwsh.exe) | helper 启动期会自检并报 `PWSH_INCOMPATIBLE`；CLI 自动包 `powershell.exe -File` 避开这条 |
+| `windows is not iterable` 之类的 JS 报错 | 旧 helper PS 5.1 ConvertTo-Json 展平了 1-element 数组 | 升级 helper 到 b3cb50e 之后版本（已用 ArrayList 修复）|
+| 中文 / Emoji 标题乱码 | OutputEncoding 不是 UTF-8 | helper 启动期已强制 UTF-8；老 helper 升级即可 |
 | `SetForegroundWindow` 静默失败 | Win10+ 前台锁定保护 | helper 已内置 `AttachThreadInput` hack；仍失败时用 `Alt+Tab` 模拟 |
+
+### SmartScreen 拦截（未签名 .exe）
+
+如果你拿到第三方 prebuilt `vision-mcp-helper.exe`（或自己 ps2exe 编的实验版），第一次双击会被 Windows SmartScreen 拦截：
+
+1. **解除阻止**（最简单）：右键 .exe → 属性 → 勾选底部"解除阻止" → 应用。这是 NTFS Zone.Identifier ADS，安装包/MOTW 标记导致。
+2. **PowerShell 一键解除**：`Unblock-File "C:\path\to\vision-mcp-helper.exe"`
+3. **管理员首次运行**：右键 → "以管理员身份运行"，SmartScreen 走过一次后记住。
+4. **正式签名（生产）**：申请 OV/EV 代码签名证书（DigiCert / Sectigo / SSL.com 一年 ~$200），用 `signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 /a vision-mcp-helper.exe`。EV 签名直接绕过 SmartScreen 信誉积累期，OV 需要积累 ~3000+ 用户下载量。
+5. **CI 流水线签名**：在 GitHub Actions 用 [Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing) 或托管 signtool 任务，避免私钥落地。
+
+### 企业 GPO 锁定环境
+
+| 锁定项 | 现象 | 应对 |
+| ----- | ---- | ---- |
+| PowerShell ExecutionPolicy=AllSigned | `.ps1` 加载失败 | CLI 用 `-ExecutionPolicy Bypass`，在大多数策略下有效；如果是 GPO ConstrainedLanguage 锁死，需要 admin 在 [`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`] 加 `__PSLockdownPolicy` 例外，或申请白名单 |
+| AppLocker / WDAC 限可执行 | `powershell.exe` 不能运行任意 .ps1 | 把 helper .ps1 加入 Publisher 白名单（用企业签名）或 Path 例外 |
+| Defender ASR 规则拦 PowerShell | helper 进程被立即 kill | 把 vision-mcp 的 Node 进程 + helper .ps1 加 ASR 例外（[Block all Office applications from creating child processes] 等规则）|
+| Windows Sandbox / WDAG | 抓不到 host 桌面 | 设计上 vision-mcp 不跨沙箱；只能在沙箱内自己跑一份 |
+
+### Sandboxed app（UWP / MSIX）
+
+UWP / MSIX 打包的 app（Edge、Calculator 现代版、商店应用）有几个特殊点：
+
+- **进程名**：MainModule 是宿主 `ApplicationFrameHost.exe` 或 `RuntimeBroker.exe`，不是直接对应的 exe。`window.list` 的 `process_name` 看到的是宿主名 → 用 `title_regex` 选窗口更可靠。
+- **窗口层级**：UWP 窗口实际由 `Windows.UI.Core.CoreWindow` 子窗口承载；UIAutomation 树多一层 `Pane`。`ax.dump` 可能要 `max_depth=8` 才能看到内容。
+- **AppContainer 隔离**：UWP 进程是 low-integrity，但作为 attacker 的 vision-mcp 反而是 medium/high integrity，UAC 方向反着，可以正常注入输入。
+- **PrintWindow**：UWP 的 DirectComposition 渲染对 `PrintWindow PW_RENDERFULLCONTENT` 一般 OK，但 Edge 这种用 GPU 合成的会黑屏 → 走 BitBlt 屏幕区域或 WGC。
+
+### 报 issue 时附上 doctor 输出
+
+```powershell
+vision-mcp doctor > vision-mcp-doctor.txt
+```
+
+把 `vision-mcp-doctor.txt` 贴进 issue。它包含 OS / PowerShell 版本 / helper 路径 / displays 列表 / elevation 状态。

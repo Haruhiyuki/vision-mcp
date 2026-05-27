@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [20, 22]
+        exclude:
+          # ubuntu 上跑一档就够，主要给 typecheck / 单测的快速覆盖
+          - os: ubuntu-latest
+            node: 22
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: install (without postinstall — install-helper 单独验证)
+        run: npm install --ignore-scripts
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: build
+        run: npm run build
+
+      - name: unit tests
+        run: npm test
+
+      # 下面这些只在 Windows 跑，验证 Windows-specific 路径
+      - name: windows / install-helper --silent 烟雾测试
+        if: matrix.os == 'windows-latest'
+        run: node packages/cli/dist/index.js install-helper --silent
+
+      - name: windows / doctor 自检
+        if: matrix.os == 'windows-latest'
+        run: node packages/cli/dist/index.js doctor
+
+      - name: windows / helper RPC 端到端（version + list_displays）
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $env:VISION_MCP_NATIVE_HELPER = "$pwd\native\windows\src\vision-mcp-helper.ps1"
+          $out = node packages/cli/dist/index.js displays --json
+          Write-Host $out
+          if (-not ($out -match '"displays"')) { throw "displays RPC failed" }

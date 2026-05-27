@@ -134,9 +134,11 @@ vision-mcp/
 `vision-mcp install-helper` 一条命令完成（npm install 时 postinstall 自动跑）：
 
 - **macOS**：检测 `swiftc` → 自动 `swiftc -O ...` 编译（~5–10 秒）。需要 Xcode Command Line Tools (`xcode-select --install`)。
-- **Windows**：检测 `ps2exe` → 自动编译 `.exe`；没装则用 `.ps1` 直接跑（启动 ~400ms vs `.exe` ~10ms）。
+- **Windows**：自检 PowerShell 5.1（不能用 pwsh 7：UIAutomationClient Add-Type 必失败）+ 写部署说明。helper 是 `.ps1`，CLI 自动用 `powershell.exe -File` 包一层。首次 RPC 冷启动 ~400ms，之后稳定 ~50ms。
 
 首次操作真窗口时，macOS 会弹两个授权对话框：**屏幕录制** + **辅助功能**——授权后重启 MCP host 让权限生效。
+
+**Windows 自检 & 常见问题**：跑 `vision-mcp doctor` 一次看 PowerShell 版本 / helper 路径 / displays / elevation；报 issue 时把输出贴上。详细的 SmartScreen 解除、企业 GPO（AppLocker / WDAC / ExecutionPolicy）、UWP/MSIX app 操作要点见 [native/windows/README.md §8](native/windows/README.md)。
 
 ## 文档导览
 
