@@ -156,8 +156,23 @@ function Get-MonitorDpiForBounds($bounds) {
 }
 
 # ---------- JSON 输出 ----------
+# 重要：PowerShell 5.1 的 ConvertTo-Json 对 1-element 数组会展平成单对象。
+# 这会让 JS 适配器拿到 result={...} 而非 result=[{...}]，触发 "not iterable"。
+# 对策：array-returning endpoints 调 Send-Result -AsArray；Send-Result 内部
+# 把值放进 ArrayList（ConvertTo-Json 对 ArrayList 即使 0/1 元素也保持 [...]）。
 
-function Send-Result($id, $result) {
+function Send-Result($id, $result, [switch]$AsArray) {
+    if ($AsArray) {
+        $al = New-Object System.Collections.ArrayList
+        if ($null -ne $result) {
+            if ($result -is [System.Collections.IEnumerable] -and $result -isnot [string] -and $result -isnot [hashtable]) {
+                foreach ($x in $result) { [void]$al.Add($x) }
+            } else {
+                [void]$al.Add($result)
+            }
+        }
+        $result = $al
+    }
     $obj = @{ id = $id; result = $result }
     [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 12))
     [Console]::Out.Flush()
@@ -173,13 +188,13 @@ function Send-Error($id, $message, $code = "UNKNOWN") {
 
 function List-Displays {
     $screens = [System.Windows.Forms.Screen]::AllScreens
-    $out = @()
+    $out = New-Object System.Collections.ArrayList
     for ($i = 0; $i -lt $screens.Length; $i++) {
         $s = $screens[$i]
         # per-monitor DPI（Win 8.1+ MDT_EFFECTIVE_DPI）；老 Windows 回退 96
         $dpi = Get-MonitorDpiForBounds $s.Bounds
         $kind = if ($s.Primary) { "primary" } else { "extended" }
-        $out += @{
+        [void]$out.Add(@{
             id                       = "display-$i"
             bounds                   = @{ x = $s.Bounds.X; y = $s.Bounds.Y; width = $s.Bounds.Width; height = $s.Bounds.Height }
             work_area                = @{ x = $s.WorkingArea.X; y = $s.WorkingArea.Y; width = $s.WorkingArea.Width; height = $s.WorkingArea.Height }
@@ -192,9 +207,10 @@ function List-Displays {
             kind                     = $kind
             name                     = $s.DeviceName
             native_handle            = "$i"
-        }
+        })
     }
-    return @(,$out)
+    # 返回 ArrayList；调用方 Send-Result -AsArray 强制 JSON 数组
+    return $out
 }
 
 # ---------- Windows ----------
@@ -238,13 +254,18 @@ function List-Windows($filter) {
     }
     $script:tmpList = @()
     [Win32]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+    # filter 都加 @(...) 包装：单元素 Where-Object 结果会被 PowerShell 展平成标量
     $list = $script:tmpList
     if ($filter) {
-        if ($filter.process_name) { $list = $list | Where-Object { $_.process_name -eq $filter.process_name } }
-        if ($filter.title_regex)  { $list = $list | Where-Object { $_.title -match $filter.title_regex } }
-        if ($filter.class_name)   { $list = $list | Where-Object { $_.class_name -eq $filter.class_name } }
+        if ($filter.process_name) { $list = @($list | Where-Object { $_.process_name -eq $filter.process_name }) }
+        if ($filter.title_regex)  { $list = @($list | Where-Object { $_.title -match $filter.title_regex }) }
+        if ($filter.class_name)   { $list = @($list | Where-Object { $_.class_name -eq $filter.class_name }) }
     }
-    return @(,$list)
+    # 转 ArrayList，配合 Send-Result -AsArray 强制 JSON 数组（PS 5.1 ConvertTo-Json
+    # 默认会把 1-element 数组展平成单对象，让 JS 适配器 "not iterable" 报错）
+    $al = New-Object System.Collections.ArrayList
+    foreach ($w in $list) { [void]$al.Add($w) }
+    return $al
 }
 
 function Move-Window-By-Handle($handle, $rect) {
@@ -619,10 +640,27 @@ while ($true) {
                 Send-Result $id @{ version = "0.2"; platform = "windows"; elevated = $script:isElevated }
                 break
             }
-            "capsule.list_displays"           { Send-Result $id (List-Displays); break }
-            "capsule.ensure_virtual_display"  { Send-Result $id ((List-Displays)[0]); break }
-            "capsule.ensure_workspace_display"{ Send-Result $id ((List-Displays)[0]); break }
-            "window.list"                     { Send-Result $id (List-Windows $p.filter); break }
+            "capsule.list_displays"           { Send-Result $id (List-Displays) -AsArray; break }
+            "capsule.ensure_virtual_display"  {
+                $d = List-Displays
+                if ($d.Count -eq 0) { Send-Error $id "no displays" "CAPSULE_DISPLAY_MISSING" } else { Send-Result $id $d[0] }
+                break
+            }
+            "capsule.ensure_workspace_display"{
+                # Windows 不创建虚拟显示器，但要挑稳定 display（参 macOS workspace_display
+                # 行为）：选 work_area 最大且能容纳契约尺寸的显示器，优先 primary。
+                $all = List-Displays
+                if ($all.Count -eq 0) { Send-Error $id "no displays" "CAPSULE_DISPLAY_MISSING"; break }
+                $minW = if ($p.geometry.width_px) { [int]$p.geometry.width_px } else { 0 }
+                $minH = if ($p.geometry.height_px) { [int]$p.geometry.height_px } else { 0 }
+                $fits = $all | Where-Object { $_.work_area.width -ge $minW -and $_.work_area.height -ge $minH }
+                if (-not $fits) { $fits = $all }
+                # 优先 primary，否则面积最大
+                $pick = $fits | Sort-Object @{ Expression = { -[int]$_.is_primary }; Ascending = $true }, @{ Expression = { -($_.work_area.width * $_.work_area.height) }; Ascending = $true } | Select-Object -First 1
+                Send-Result $id $pick
+                break
+            }
+            "window.list"                     { Send-Result $id (List-Windows $p.filter) -AsArray; break }
             "window.get" {
                 $list = List-Windows $null
                 $found = $list | Where-Object { $_.native_handle -eq $p.handle -or $_.id -eq $p.handle } | Select-Object -First 1
@@ -646,7 +684,7 @@ while ($true) {
             "ax.dump" {
                 $maxNodes = if ($p.max_nodes) { [int]$p.max_nodes } else { 500 }
                 $maxDepth = if ($p.max_depth) { [int]$p.max_depth } else { 6 }
-                Send-Result $id (Dump-UIA-Tree $p.handle $maxNodes $maxDepth)
+                Send-Result $id (Dump-UIA-Tree $p.handle $maxNodes $maxDepth) -AsArray
                 break
             }
             "capture.rect" {

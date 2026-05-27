@@ -51,7 +51,11 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
   }
 
   async listDisplays(): Promise<DisplayInfo[]> {
-    return this.bridge.request<DisplayInfo[]>("capsule.list_displays");
+    // 防御：旧 helper 在 result 是 1-element 时被 ConvertTo-Json 展平成单对象，
+    // 而非数组。新 helper 用 ArrayList + -AsArray 修复了这点；这层兜底仍保留以兼容
+    // 老 helper 用户。
+    const raw = await this.bridge.request<DisplayInfo[] | DisplayInfo>("capsule.list_displays");
+    return Array.isArray(raw) ? raw : raw ? [raw] : [];
   }
 
   /** 不创建虚拟显示器。挑稳定 display（优先窗口当前 display，其次 primary）。 */
@@ -69,7 +73,8 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
   }
 
   async listWindows(filter?: TargetWindow): Promise<WindowInfo[]> {
-    return this.bridge.request<WindowInfo[]>("window.list", { filter });
+    const raw = await this.bridge.request<WindowInfo[] | WindowInfo>("window.list", { filter });
+    return Array.isArray(raw) ? raw : raw ? [raw] : [];
   }
 
   async getWindow(handle: string): Promise<WindowInfo> {
