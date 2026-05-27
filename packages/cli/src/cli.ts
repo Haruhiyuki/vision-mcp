@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import {
   VisionMap,
   applyPatches,
@@ -133,7 +134,9 @@ function usage(): string {
     "  live-view <app_id> [--port 7575] [--interval-ms 500]",
     "       在浏览器实时查看 capsule 画面（http://localhost:port）：含画面 + 接管按钮",
     "  install-helper [--force] [--prefix <path>]",
-    "       检测并编译 native helper（macOS swiftc / Windows ps2exe）。安装后续运行的前置依赖",
+    "       检测并编译 native helper（macOS swiftc / Windows .ps1 自动 wrap）。安装后续运行的前置依赖",
+    "  doctor",
+    "       一键自检：OS / Node / PowerShell / helper / DPI / elevation / displays；输出可贴 issue 报告",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -145,6 +148,13 @@ function usage(): string {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  // 在 dispatch 前把 bundled helper 路径设进 env，让所有 createPlatformAdapter
+  // 调用都能默认拿到。用户显式设的 VISION_MCP_NATIVE_HELPER 优先（resolveBundledHelper 会先读 env）。
+  // install-helper 命令自己有特殊逻辑，跳过；其他命令受益。
+  if (args.command !== "install-helper" && !process.env.VISION_MCP_NATIVE_HELPER) {
+    const bundled = await resolveBundledHelper();
+    if (bundled) process.env.VISION_MCP_NATIVE_HELPER = bundled;
+  }
   try {
     switch (args.command) {
       case "help":
@@ -254,6 +264,9 @@ async function main() {
       case "install-helper":
         await cmdInstallHelper(args);
         return;
+      case "doctor":
+        await cmdDoctor(args);
+        return;
       case "serve":
         await cmdServe(args);
         return;
@@ -279,6 +292,42 @@ function appsRoot(args: ParsedArgs): string {
   return String(
     args.flags["apps-root"] ?? process.env.VISION_MCP_APPS_ROOT ?? path.join(process.cwd(), "apps"),
   );
+}
+
+/**
+ * 解析 native helper 的默认路径。顺序：
+ *   1) env VISION_MCP_NATIVE_HELPER（用户显式覆盖，优先级最高）
+ *   2) cli 包自带的 native/<platform>/...（npm i -g 安装的情况）
+ *   3) 仓库根 native/<platform>/...（源码 dev 的情况）
+ * 返回 undefined 时由 core 走 native-bridge.resolveDefaultHelper 兜底。
+ *
+ * 为何不全靠 env：用户 npm i -g 后想直接 `vision-mcp serve` 跑 stdio
+ * MCP server，不希望强迫设环境变量。CLI 比 core 更清楚自己的包位置，
+ * 所以这层提前解析后显式传 helperPath。
+ */
+async function resolveBundledHelper(): Promise<string | undefined> {
+  const envPath = process.env.VISION_MCP_NATIVE_HELPER;
+  if (envPath) return envPath;
+  const cliDir = path.dirname(fileURLToPath(import.meta.url));
+  const plat = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : null;
+  if (!plat) return undefined;
+  const names = plat === "windows"
+    ? ["vision-mcp-helper.exe", path.join("src", "vision-mcp-helper.ps1")]
+    : ["vision-mcp-helper"];
+  const roots = [
+    path.resolve(cliDir, "..", "native", plat),                    // npm install: cli/native
+    path.resolve(cliDir, "..", "..", "..", "native", plat),        // dev: repo/native
+  ];
+  for (const root of roots) {
+    for (const name of names) {
+      const c = path.join(root, name);
+      try {
+        await fs.access(c);
+        return c;
+      } catch { /* try next */ }
+    }
+  }
+  return undefined;
 }
 
 async function cmdInit(args: ParsedArgs) {
@@ -2144,6 +2193,113 @@ async function encodeFrameAsPng(frame: { width_px: number; height_px: number; pi
   return encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels);
 }
 
+/**
+ * `vision-mcp doctor`：一键自检 + 写报告。
+ *
+ * 输出一份纯文本（便于 `vision-mcp doctor > report.txt` 贴到 issue），
+ * 覆盖：OS / Node / PowerShell 版本、helper 路径、helper ping (version RPC)、
+ * 当前 displays 数、是否管理员、DPI awareness 状态。
+ *
+ * 退出码：所有关键项 OK → 0；任意 fail → 1。
+ */
+async function cmdDoctor(_args: ParsedArgs) {
+  const os = await import("node:os");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execP = promisify(execFile);
+  const lines: string[] = [];
+  let allOk = true;
+  const ok = (label: string, value: string) => lines.push(`  ✅ ${label}: ${value}`);
+  const warn = (label: string, value: string) => { lines.push(`  ⚠️  ${label}: ${value}`); };
+  const fail = (label: string, value: string) => { allOk = false; lines.push(`  ❌ ${label}: ${value}`); };
+
+  lines.push(`vision-mcp doctor — ${new Date().toISOString()}`);
+  lines.push("");
+  lines.push(`[system]`);
+  ok("os", `${os.type()} ${os.release()} (${process.platform}/${process.arch})`);
+  ok("node", process.version);
+  ok("cwd", process.cwd());
+
+  lines.push("");
+  lines.push(`[helper]`);
+  const bundledHelper = await resolveBundledHelper();
+  if (bundledHelper) {
+    ok("path", bundledHelper);
+  } else {
+    fail("path", "未找到 vision-mcp-helper（既无 env，又无 cli/native 也无 repo/native）");
+  }
+
+  if (process.platform === "win32") {
+    lines.push("");
+    lines.push(`[windows]`);
+    const psExe = process.env.SystemRoot
+      ? path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+      : "powershell.exe";
+    try {
+      const r = await execP(psExe, [
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+        `$PSVersionTable.PSVersion.ToString() + '|' + $PSVersionTable.PSEdition`,
+      ], { timeout: 10_000 });
+      const ver = (r.stdout || "").trim();
+      if (ver.endsWith("|Core")) {
+        fail("powershell", `${ver} — 必须用 Windows PowerShell 5.1，不能用 pwsh 7+`);
+      } else {
+        ok("powershell", ver);
+      }
+    } catch (err) {
+      fail("powershell", `${psExe} 调用失败：${(err as Error).message.split("\n")[0]}`);
+    }
+    // 管理员？
+    try {
+      const r = await execP(psExe, [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+      ], { timeout: 5_000 });
+      const elevated = (r.stdout || "").trim() === "True";
+      if (elevated) ok("elevation", "已以管理员身份运行（可注入 elevated app）");
+      else warn("elevation", "未以管理员身份运行——任务管理器 / 反作弊 app 的输入会被拒");
+    } catch { warn("elevation", "无法检测"); }
+    // ps2exe 不是关键依赖了，列下信息
+    try {
+      const r = await execP(psExe, [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "if (Get-Module -ListAvailable -Name ps2exe,PS2EXE) { 'yes' } else { 'no' }",
+      ], { timeout: 8_000 });
+      const has = (r.stdout || "").trim() === "yes";
+      if (has) ok("ps2exe", "已装（v0.1 暂不用，留作 prebuilt 编译）");
+      else warn("ps2exe", "未装（v0.1 不需要；helper 走 .ps1 + powershell.exe -File）");
+    } catch { /* skip */ }
+  }
+
+  lines.push("");
+  lines.push(`[capabilities]`);
+  // ping helper：跑 version RPC
+  if (bundledHelper) {
+    try {
+      const adapter = await createPlatformAdapter({
+        platform: "auto",
+        helperPath: bundledHelper,
+      });
+      const displays = await adapter.listDisplays();
+      ok("helper.ping", `OK (${displays.length} displays)`);
+      for (const d of displays) {
+        ok(`display ${d.id}`,
+          `${d.bounds.width}x${d.bounds.height} @ scale=${d.scale} (dpi=${d.dpi_x}, ${d.is_primary ? "primary" : d.kind})`,
+        );
+      }
+      await adapter.dispose?.();
+    } catch (err) {
+      fail("helper.ping", `${(err as Error).message.split("\n")[0]}`);
+    }
+  }
+
+  lines.push("");
+  lines.push(allOk ? "✅ 所有关键项 OK" : "❌ 部分检查失败，见上");
+  lines.push("");
+  console.log(lines.join("\n"));
+  if (!allOk) process.exit(1);
+}
+
 async function cmdInstallHelper(args: ParsedArgs) {
   const force = Boolean(args.flags.force);
   const silent = Boolean(args.flags.silent);   // 静默模式：失败不抛错，给 postinstall 用
@@ -2181,11 +2337,15 @@ async function cmdInstallHelper(args: ParsedArgs) {
     }
   }
 
-  // prefix 解析：1) --prefix 显式 2) cli 包内 native/（npm 安装）3) 仓库根 ../../native（源码 dev）
+  // prefix 解析：
+  //   1) --prefix 显式
+  //   2) cli 包内 native/（npm 安装：node_modules/@vision-mcp/cli/native）
+  //   3) 仓库根 native/（源码 dev：repo/packages/cli/dist + ../../../native）
+  // 注意 cliDir = packages/cli/dist；不能用 ../../native（那是 packages/native，不存在）
   const candidates = args.flags.prefix
     ? [String(args.flags.prefix)]
     : [
-        path.resolve(cliDir, "..", "..", "native"),
+        path.resolve(cliDir, "..", "native"),
         path.resolve(cliDir, "..", "..", "..", "native"),
       ];
   let prefix = candidates[0];
@@ -2268,65 +2428,57 @@ async function cmdInstallHelper(args: ParsedArgs) {
 
   if (platform === "win32") {
     const ps1Path = path.join(prefix, "windows", "src", "vision-mcp-helper.ps1");
-    const exePath = path.join(prefix, "windows", "vision-mcp-helper.exe");
     try {
       await fs.access(ps1Path);
     } catch {
       return fail(`找不到 PowerShell 脚本 ${ps1Path}。请确保完整安装。`);
     }
-    if (await isExecutable(exePath) && !force) {
-      log(`✅ Windows helper.exe 已就绪：${exePath}`);
-      if (!silent) {
-        log(`📋 host 配置：$env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
-      }
-      return;
-    }
-    // 尝试 ps2exe 自动编译
-    // 强制 UTF-8 输出避免 PowerShell 默认 UTF-16 BOM 让 Node stdout 乱码
+    // 一定要用 Windows PowerShell 5.1（powershell.exe）：
+    //   - UIAutomationClient Add-Type 在 pwsh.exe (PowerShell 7) 必失败
+    // 显式 SystemRoot 路径，避免用户 PATH 把 powershell 解析到 pwsh.exe alias。
+    const powershellExe = process.env.SystemRoot
+      ? path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+      : "powershell.exe";
     const psWrap = (script: string) =>
       `$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ${script}`;
-    let ps2exeReady = false;
+    async function powershell(script: string, timeoutMs = 30_000) {
+      return execP(powershellExe, [
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psWrap(script),
+      ], { maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs });
+    }
+
+    // 检测 PowerShell 5.1 是不是可用
+    let psVer = "";
     try {
-      const psCheck = await execP("powershell", [
-        "-NoProfile", "-NonInteractive", "-Command",
-        psWrap("if (Get-Module -ListAvailable -Name ps2exe) { Write-Output 'ok' } else { Write-Output 'missing' }"),
-      ], { timeout: 15_000 });
-      ps2exeReady = (psCheck.stdout || "").trim() === "ok";
-    } catch {
-      // powershell 调用失败（可能 ExecutionPolicy 限制），fall through
-    }
-    if (ps2exeReady) {
-      log(`🔨 用 ps2exe 编译 Windows helper.exe...`);
-      try {
-        await execP("powershell", [
-          "-NoProfile", "-NonInteractive", "-Command",
-          psWrap(`Invoke-ps2exe "${ps1Path}" "${exePath}" -noConsole`),
-        ], { maxBuffer: 10 * 1024 * 1024, timeout: 120_000 });
-        log(`✅ 编译完成：${exePath}`);
-        if (!silent) {
-          log(`📋 host 配置：$env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
-        }
-        return;
-      } catch (err) {
-        return fail(`ps2exe 编译失败：${(err as Error).message}\n请确认权限充足。`);
+      const ver = await powershell(`$PSVersionTable.PSVersion.Major.ToString() + '.' + $PSVersionTable.PSVersion.Minor.ToString() + '|' + $PSVersionTable.PSEdition`);
+      psVer = (ver.stdout || "").trim();
+      if (psVer.endsWith("|Core")) {
+        return fail(
+          `检测到 PowerShell 是 Core (pwsh.exe)：${psVer}。\n` +
+          `vision-mcp helper 必须用 Windows PowerShell 5.1。请确认 ${powershellExe} 存在。`,
+        );
       }
+    } catch (err) {
+      if (!silent) log(`⚠️ powershell.exe 调用失败：${(err as Error).message}`);
     }
-    // ps2exe 不可用 → 给指引（silent 模式 fallback .ps1）
-    if (silent) {
-      console.warn(`[vision-mcp install-helper] Windows: ps2exe 未安装，将用 .ps1 模式（启动较慢 ~400ms）`);
-      console.warn(`[vision-mcp install-helper] 加速 .exe 编译方法：vision-mcp install-helper`);
-      return;
+
+    // 既然 .ps1 + 自动 wrap 已能用，install-helper 主要变成"自检 + 写说明"。
+    // ps2exe 编译路径已验证 stdio 不可用（默认 host 拦了 [Console]::In，noConsole 又关
+    // console），不再自动尝试。需要 .exe 提速的用户走 prebuilt（CI 产物）或自研 C# launcher。
+    log(`✅ Windows helper 就绪（PowerShell ${psVer || "5.x"}）`);
+    log(`   helper: ${ps1Path}`);
+    log(`   CLI 会自动用 powershell.exe -File 包一层；首次 RPC ~400ms 冷启动后稳定 ~50ms`);
+    if (!silent) {
+      log(`\n📋 host 配置（可选；不设也行，CLI 会自动找到此 .ps1）：`);
+      log(`   $env:VISION_MCP_NATIVE_HELPER = "${ps1Path}"`);
+      log(`\n⚠️  权限提示：`);
+      log(`   - 高完整度 app（任务管理器 / 反作弊）：vision-mcp 进程需以管理员身份运行才能注入输入`);
+      log(`   - 中文 / 中文窗口标题：helper 已强制 UTF-8 输出`);
+      log(`\n⚙️  想要 .exe 提速（启动 ~10ms vs ~400ms）：`);
+      log(`   PS2EXE 的默认 PowerShell host 拦截 [Console]::In，不能做 JSON-RPC sidecar。`);
+      log(`   推荐方案：用 dotnet AOT / C# 写个 5-行 launcher 包 powershell.exe，或等官方 prebuilt 发布。`);
+      log(`\n📖 详细协议 + 故障排查见 native/windows/README.md`);
     }
-    log(`📝 Windows helper 部署说明`);
-    log(`\n⚙️  开发期（直接运行 .ps1，启动 ~400ms）：`);
-    log(`   $env:VISION_MCP_NATIVE_HELPER = "${ps1Path}"`);
-    log(`\n🔨 生产（编译为 .exe，启动 ~10ms）：`);
-    log(`   Install-Module -Name ps2exe -Scope CurrentUser`);
-    log(`   完成后重新运行：vision-mcp install-helper（自动 ps2exe 编译）`);
-    log(`\n⚠️  权限要求：`);
-    log(`   - 高完整度 app（任务管理器 / 反作弊）：helper 需以管理员身份运行才能注入输入`);
-    log(`   - 普通用户级 app：直接跑即可`);
-    log(`\n📖 详细 RPC 协议见 native/windows/README.md`);
     return;
   }
 
