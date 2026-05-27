@@ -1,0 +1,205 @@
+version: "0.1"
+app:
+  id: notes
+  name: 备忘录
+  platform: macos
+  launch_hint: attach_after_launch
+  description: |
+    macOS 备忘录 (Notes.app) 的 vision-mcp 地图。
+    UI 是 SwiftUI 自绘，AX 树只暴露 cells/text 而无 button——
+    所有 toolbar 动作必须用键盘快捷键或视觉判断 click 位置。
+
+visual_box:
+  id: notes-capsule
+  mode: real_window
+  platform: macos
+  display:
+    width_px: 1280
+    height_px: 800
+    scale: 2.0
+    dpi_x: 144
+    dpi_y: 144
+    refresh_rate_hz: 60
+  target_window:
+    bundle_id: com.apple.Notes
+    title_regex: ".+"
+  coordinate_space: normalized_client_rect
+  contract:
+    require_same_display: true
+    require_client_size_px: [1280, 800]
+    tolerate_client_size_delta_px: 16
+    require_unminimized: true
+    require_foreground_for_input: true
+    validate_before_each_action: true
+  fallbacks: []
+
+regions:
+  - id: folder_sidebar
+    description: 最左侧账户/文件夹列表（iCloud / Exchange / 最近删除 等）
+    bbox_norm: [0, 0, 0.085, 1]
+    controls: []
+
+  - id: note_list
+    description: 中间备忘录列表（按"置顶/今天/昨天/过去 7 天"分组）
+    bbox_norm: [0.085, 0, 0.245, 1]
+    controls: []
+
+  - id: editor
+    description: 右侧编辑区
+    bbox_norm: [0.33, 0.07, 0.67, 0.93]
+    controls:
+      - id: focus
+        role: textbox
+        label: 主编辑区文本（cmd+n 后焦点已在此，直接 type 即可；不要 click 否则会丢焦点）
+        action_types: [type, click]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.3, 0.3] }]
+        visual: { center_norm: [0.65, 0.5] }
+
+  - id: search_bar
+    description: 顶部右侧搜索框
+    bbox_norm: [0.86, 0.02, 0.13, 0.05]
+    controls:
+      - id: input
+        role: textbox
+        label: 搜索文本框
+        action_types: [click, type]
+        locator_priority: [{ type: bbox_norm, value: [0.88, 0.025, 0.10, 0.04] }]
+        visual: { center_norm: [0.93, 0.045] }
+
+  # 键盘快捷键虚拟控件：备忘录的所有 toolbar 操作都靠 keyboard。
+  - id: kbd
+    description: 键盘快捷键虚拟集合（备忘录无 AX-button，必须键盘）
+    bbox_norm: [0.5, 0.5, 0.01, 0.01]
+    controls:
+      - id: new_note
+        role: button
+        label: 新建备忘录 (Cmd+N)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: new_folder
+        role: button
+        label: 新建文件夹 (Cmd+Shift+N)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: search
+        role: button
+        label: 搜索 (Cmd+Option+F)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: delete_note
+        role: button
+        label: 删除当前备忘录 (Cmd+Delete) — destructive
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: bold
+        role: button
+        label: 粗体 (Cmd+B)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+
+states:
+  - id: notes.main
+    description: 备忘录主界面（三栏：文件夹 + 备忘录列表 + 编辑区）
+    kind: page
+    anchors:
+      - { type: window_title, pattern: "备忘录" }
+      - { type: ocr_text, text: "iCloud" }
+    match_policy: any_anchor
+    inherit_regions: [folder_sidebar, note_list, editor, search_bar, kbd]
+    controls: []
+
+transitions: []
+
+workflows:
+  - id: new_note
+    description: 新建一篇空备忘录（焦点自动跳到编辑区）
+    steps:
+      - action_id: "kbd.new_note"
+        params: { combo: "cmd+n" }
+    timeout_ms: 3000
+
+  - id: write_intro
+    description: |
+      新建备忘录并写入文本。
+      inputs.body 第一行会自动作为标题（备忘录 app 默认行为）。
+      使用 NSPasteboard 粘贴（type_text 支持中文/Unicode）。
+      实测要点：cmd+n 后焦点自动在编辑区，**不要**再 click editor 否则会丢焦点。
+    inputs:
+      - { name: body, type: string }
+    steps:
+      - action_id: "kbd.new_note"
+        params: { combo: "cmd+n" }
+      - action_id: "editor.focus"
+        params: { text: "{{body}}" }
+    timeout_ms: 10000
+
+  - id: focus_search
+    description: 聚焦搜索框
+    steps:
+      - action_id: "kbd.search"
+        params: { combo: "cmd+option+f" }
+    timeout_ms: 3000
+
+  - id: search_notes
+    description: 聚焦搜索框 → 输入关键词 → 按 return（备忘录会即时过滤）
+    inputs:
+      - { name: keyword, type: string }
+    steps:
+      - action_id: "kbd.search"
+        params: { combo: "cmd+option+f" }
+      - action_id: "search_bar.input"
+        params: { text: "{{keyword}}", clear_first: true }
+    timeout_ms: 5000
+
+repair_policy:
+  max_auto_repair_level: 3
+  geometry:
+    tolerate_client_size_delta_px: 16
+    tolerate_origin_change: true
+    require_same_dpi: true
+  state:
+    min_anchor_score: 0.5
+    min_ocr_similarity: 0.85
+    min_visual_similarity: 0.75
+  control_relocation:
+    confidence_threshold: 0.85
+    max_bbox_shift_norm: 0.15
+  destructive_actions:
+    auto_repair_before_action: false
+    require_user_confirmation: true
+
+safety_policy:
+  forbidden_action_categories:
+    - payment
+    - destructive   # kbd.delete_note 属于此类，必须人工审批
+    - external_communication
+    - permission_change
+    - captcha
+  require_approval_for_risk_levels:
+    - requires_confirmation
+    - destructive
+  redaction_patterns: []
+  allow_cloud_vlm: false
+  audit_log_retention_days: 14
+
+input_lease_policy:
+  default_lease_ms: 10000
+  break_on_user_input: true
+  break_hotkey: Esc Esc
+  require_revalidate_after_break: true
+
+metadata:
+  created_at: 2026-05-27T13:55:00.000Z
+  created_by: vision-mcp-notes-build
+  tags: [notes, macos, builtin]
+  notes: |
+    备忘录 UI 是 SwiftUI 自绘，AX 树几乎只有 AXStaticText/AXCell/AXImage/AXRow。
+    没有 AXButton，所以所有 toolbar 动作（新建/格式化/分享/锁定）必须靠键盘快捷键。
+    编辑区通过 cmd+n 后自动聚焦，可直接 type 文本（NSPasteboard 粘贴支持中文）。
+    备忘录第一行自动作为标题，列表里按时间分组显示（置顶/今天/昨天/过去7天）。
+    删除备忘录(cmd+delete)是 destructive 动作，本 map 默认要求人工审批。

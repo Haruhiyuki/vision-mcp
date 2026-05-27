@@ -479,6 +479,7 @@ async function cmdRun(args: ParsedArgs) {
   const { runtime, capsule } = await openAppRuntime(appId, args, {
     approveAll: Boolean(args.flags["approve-all"]),
     fallbackMock: true,
+    autoMigrate: true,
   });
   const result = await runtime.performAction(actionId, params);
   console.log(JSON.stringify(result, null, 2));
@@ -494,6 +495,7 @@ async function cmdWorkflow(args: ParsedArgs) {
   const { runtime, capsule } = await openAppRuntime(appId, args, {
     approveAll: Boolean(args.flags["approve-all"]),
     fallbackMock: true,
+    autoMigrate: true,
   });
   const result = await runtime.runWorkflow(wfId, inputs);
   console.log(JSON.stringify(result, null, 2));
