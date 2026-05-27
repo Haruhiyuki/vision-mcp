@@ -1,6 +1,10 @@
 # Repair Policy 参考
 
-Vision-MCP 的 repair 引擎按 §12 设计的“最小成本修复阶梯”工作：先尝试低成本动作，仅在低级修复无效时升级。**agent 必须以 `vision_map.repair_minimal` 调用 runtime 来执行修复，不要绕过该工具自行决定。**
+Vision-MCP 的修复体系分两条路径：
+
+1. **被动 Repair（runtime 自动）**：每个 action 失败时 runtime 按 L0-L3 阶梯尝试低成本修复。**agent 必须以 `vision_map.repair_minimal` 调用 runtime**，不要绕过该工具自行决定。
+2. **主动 Patch（agent in-the-loop）**：agent 在实战中发现 map 偏差时**主动写 patch** 固化修正。
+   两条路径互补：被动 repair 让本次执行尽量跑通；主动 patch 让下次跑成本降低。详见 SKILL.md §6 / AGENT-USAGE.md §4.7。
 
 ## 阶梯
 

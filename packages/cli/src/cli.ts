@@ -80,6 +80,10 @@ function usage(): string {
     "       运行 workflow",
     "  repair <app_id> [--max-level 3]",
     "       触发 repair L0-Lmax 自动修复",
+    "  patch <app_id> --state <id> --control <id> [--bbox-norm x,y,w,h] [--partial <json>] [--reason <text>] [--trust session_only|trusted|untrusted_proposal]",
+    "       主动写一个 control patch（修正 bbox 或 locator）。agent 在实战中发现 map 偏差时应直接调用，逐步把 map 校准到位",
+    "  patches <app_id>",
+    "       列出 app 当前所有已应用的 patch",
     "  trace <app_id> [--session <id>] [--limit 100]",
     "       打印最近 trace 事件",
     "  trace-viewer <app_id> [--out trace.html] [--session <id>]",
@@ -166,6 +170,12 @@ async function main() {
         return;
       case "repair":
         await cmdRepair(args);
+        return;
+      case "patch":
+        await cmdPatch(args);
+        return;
+      case "patches":
+        await cmdPatches(args);
         return;
       case "trace":
         await cmdTrace(args);
@@ -500,6 +510,106 @@ async function cmdWorkflow(args: ParsedArgs) {
   const result = await runtime.runWorkflow(wfId, inputs);
   console.log(JSON.stringify(result, null, 2));
   await capsule.adapter.dispose?.();
+}
+
+async function cmdPatch(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("patch 需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+
+  const stateId = args.flags.state ? String(args.flags.state) : undefined;
+  const controlId = args.flags.control ? String(args.flags.control) : undefined;
+  const bboxStr = args.flags["bbox-norm"] ? String(args.flags["bbox-norm"]) : undefined;
+  const partialStr = args.flags.partial ? String(args.flags.partial) : undefined;
+  const reason = args.flags.reason ? String(args.flags.reason) : "agent in-the-loop correction";
+  const trust = (args.flags.trust ? String(args.flags.trust) : "session_only") as
+    | "session_only" | "trusted" | "untrusted_proposal";
+  const confidence = args.flags.confidence ? Number(args.flags.confidence) : 1;
+
+  // 决定 patch 类型
+  let patch: import("@vision-mcp/core").Patch;
+  if (bboxStr) {
+    if (!stateId || !controlId) throw new Error("--bbox-norm 需要同时给 --state 和 --control");
+    const parts = bboxStr.split(",").map(Number);
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) {
+      throw new Error("--bbox-norm 形式：x,y,w,h（0-1）");
+    }
+    patch = {
+      id: `bbox-${appId}-${stateId}-${controlId}-${Date.now().toString(36)}`,
+      kind: "control_bbox",
+      state_id: stateId,
+      control_id: controlId,
+      new_bbox_norm: parts as [number, number, number, number],
+      method: reason,
+      trust,
+      confidence,
+      reason,
+      requires_review: trust === "untrusted_proposal",
+      created_at: new Date().toISOString(),
+      created_by: "vision-mcp-cli-patch",
+    };
+  } else if (partialStr) {
+    if (!stateId || !controlId) throw new Error("--partial 需要同时给 --state 和 --control");
+    const partial = JSON.parse(partialStr);
+    patch = {
+      id: `loc-${appId}-${stateId}-${controlId}-${Date.now().toString(36)}`,
+      kind: "control_locator",
+      state_id: stateId,
+      control_id: controlId,
+      partial,
+      trust,
+      confidence,
+      reason,
+      requires_review: trust === "untrusted_proposal",
+      created_at: new Date().toISOString(),
+      created_by: "vision-mcp-cli-patch",
+    };
+  } else {
+    throw new Error("patch 需要 --bbox-norm 或 --partial 至少一个");
+  }
+
+  // 校验 patch 能 apply（防止 state/region/control 不存在）
+  const Patch = (await import("@vision-mcp/core")).Patch;
+  const validated = Patch.parse(patch);
+  const state = loaded.effective.states.find((s) => s.id === stateId);
+  const region = loaded.effective.regions.find((r) => r.id === stateId);
+  if (!state && !region) {
+    console.warn(`⚠️  "${stateId}" 在 states / regions 都不存在，patch 仍写入但 applyPatches 会跳过`);
+  } else if (controlId) {
+    const inState = state?.controls.find((c) => c.id === controlId);
+    const inRegion = region?.controls.find((c) => c.id === controlId);
+    const inInherited = state?.inherit_regions
+      .map((rid) => loaded.effective.regions.find((r) => r.id === rid))
+      .some((r) => r?.controls.find((c) => c.id === controlId));
+    if (!inState && !inRegion && !inInherited) {
+      console.warn(`⚠️  control "${controlId}" 在 "${stateId}" / inherited regions 不存在`);
+    }
+  }
+  const filePath = await writePatch(loaded.baseDir, validated);
+  console.log(`✅ wrote patch ${filePath}`);
+  console.log(JSON.stringify(validated, null, 2));
+}
+
+async function cmdPatches(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("patches 需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  if (loaded.patches.length === 0) {
+    console.log(`(${appId}) 0 patches`);
+    return;
+  }
+  console.log(`${appId} 已应用 ${loaded.patches.length} patch:`);
+  for (const p of loaded.patches) {
+    const target = p.kind === "geometry_profile"
+      ? p.visual_box_id
+      : p.kind === "state"
+      ? p.state.id
+      : `${p.state_id}.${p.control_id}`;
+    console.log(`  - ${p.id} [${p.kind}] target=${target} trust=${p.trust} confidence=${p.confidence}`);
+    if (p.reason) console.log(`    reason: ${p.reason}`);
+  }
 }
 
 async function cmdRepair(args: ParsedArgs) {

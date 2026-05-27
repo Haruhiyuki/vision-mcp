@@ -44,6 +44,8 @@
 | `vision_map.perform_action` | 通过已定义的 action_id 操作（成品 workflow 模式） | result + events |
 | `vision_map.run_workflow` | 跑一条 workflow（多步） | result + steps |
 | `vision_map.repair_minimal` | 触发 L0-L3 修复 ladder | repair outcome |
+| **`vision-mcp patch`** | 主动写 control_bbox/control_locator/geometry patch（实战偏差固化）。详见 §4.7 持续修正 | patch file path |
+| **`vision-mcp patches`** | 列出 app 已应用的 patch | patch list |
 
 ## 2. Agent 主导建图的标准流程
 
@@ -194,7 +196,43 @@ Sidebar 的 AXCell `name="主页"` 由 helper 从子 AXStaticText 反推（macOS
 3. AX 树里 description ∈ {返回, Back, ◁, ‹, <, 上一} 的 AXButton
 4. 不行就告诉用户 — 不要瞎 click
 
-### 4.7 Capsule 行为：稳定窗口 + 完整可见
+### 4.7 持续修正：把每次实测偏差固化为 patch
+
+**核心原则**：map 永远是渐近完善的，一次探索不可能覆盖所有 corner case。Agent 在实战中遇到 map 偏差时**必须主动写 patch**，让 map 越用越好。
+
+**何时必须写 patch**：
+- 坐标偏差（命中位置错元素，如 sidebar 第 2 项实际选中第 3 项）
+- action_types 顺序错（如 click 编辑区反而丢焦点 → 应让 type 默认）
+- locator 命中错误（AX name 应改 description / OCR 替换 AX 等）
+
+**一行命令写 patch**：
+```bash
+# 修正 bbox（最常用）
+vision-mcp patch <app> --state <state_id_or_region_id> --control <id> \
+  --bbox-norm x,y,w,h \
+  --reason "实测命中错元素，新中心 ..."
+
+# 修正 locator 字段（action_types / locator_priority / label 等）
+vision-mcp patch <app> --state <id> --control <id> \
+  --partial '{"action_types":["type","click"]}' \
+  --reason "..."
+
+# 列出已应用 patches
+vision-mcp patches <app>
+```
+
+**Trust 渐进**：
+- 默认 `trust=session_only`：本次会话生效。agent 跑通 workflow 后告诉用户"我发现了 X 偏差并已临时修复"。
+- 用户确认后 `--trust trusted` 升级，写入 git。
+- 复杂/高风险用 `--trust untrusted_proposal` 不自动应用等人审。
+
+**实战例**（今天会话发现的真实偏差，已 patch 化）：
+- `apple-music sidebar.search` 原 bbox 中心 `(0.04, 0.085)` 实际指向"主页"→ patch 改成 `(0.0, 0.05, 0.04, 0.025)` 命中真正搜索 cell
+- `notes editor.focus` 原 `action_types: [click, type]` 默认 click 反而丢焦点 → patch 改为 `[type, click]`
+
+详见 `skill/SKILL.md` §6。
+
+### 4.8 Capsule 行为：稳定窗口 + 完整可见
 
 vision-mcp 不创建虚拟显示器（macOS / Windows public API 都不可靠）。`capsule.migrate` 把窗口固定到 display 工作区中心，**完整可见**，agent 用归一化客户区坐标操作。
 

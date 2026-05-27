@@ -103,9 +103,7 @@ export function applyPatches(
         break;
       }
       case "control_bbox": {
-        const state = draft.states.find((s) => s.id === p.state_id);
-        if (!state) break;
-        const ctrl = state.controls.find((c) => c.id === p.control_id);
+        const ctrl = findControlInDraft(draft, p.state_id, p.control_id);
         if (!ctrl) break;
         ctrl.visual = {
           ...(ctrl.visual ?? {}),
@@ -122,9 +120,7 @@ export function applyPatches(
         break;
       }
       case "control_locator": {
-        const state = draft.states.find((s) => s.id === p.state_id);
-        if (!state) break;
-        const ctrl = state.controls.find((c) => c.id === p.control_id);
+        const ctrl = findControlInDraft(draft, p.state_id, p.control_id);
         if (!ctrl) break;
         Object.assign(ctrl, p.partial);
         break;
@@ -145,6 +141,37 @@ export function applyPatches(
     }
   }
   return draft;
+}
+
+/**
+ * 在 draft 中按 (state_id, control_id) 找 control。
+ * - 优先在 states[].controls[] 里找；
+ * - 找不到则在 regions[].controls[] 里找（patch.state_id 可以是 region.id）；
+ * - 仍找不到则在 states[].inherit_regions 引用的 regions 里找。
+ * 这让 control_bbox / control_locator patch 能修正 region 共享控件。
+ */
+function findControlInDraft(
+  draft: VisionMapT,
+  stateOrRegionId: string,
+  controlId: string,
+): import("../schema/index.js").Control | null {
+  const state = draft.states.find((s) => s.id === stateOrRegionId);
+  if (state) {
+    const ctrl = state.controls.find((c) => c.id === controlId);
+    if (ctrl) return ctrl;
+    // state 里没有？看它 inherit 的 regions
+    for (const rid of state.inherit_regions ?? []) {
+      const region = draft.regions.find((r) => r.id === rid);
+      const rc = region?.controls.find((c) => c.id === controlId);
+      if (rc) return rc;
+    }
+  }
+  // state_id 本身可能就是 region_id
+  const region = draft.regions.find((r) => r.id === stateOrRegionId);
+  if (region) {
+    return region.controls.find((c) => c.id === controlId) ?? null;
+  }
+  return null;
 }
 
 /**
