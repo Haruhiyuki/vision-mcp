@@ -6,15 +6,23 @@ app:
   build: "2026.05"
   launch_hint: attach_after_launch
   description: |
-    虚构的企业 ERP 系统发票录入流程示例。
-    展示：多 state state graph / 多 locator 组合 / approval / postcondition /
-    redaction_patterns / image_patch fallback。
+    虚构的企业 ERP 系统示例。**完整展示 vision-mcp 当前架构**：
 
-    ⚠️ 这是 hypothetical demo（target = erp.exe），不能直接对真实软件跑。
-    真实可跑的示例见仓库根 apps/ 目录：
-      - apps/apple-music/  macOS Apple Music（含 region / collection 抽象）
-      - apps/notes/        macOS 备忘录（SwiftUI 自绘案例）
-      - apps/activity-monitor/  macOS 活动监视器
+    - regions/inherit_regions     跨 state 共享 sidebar / toolbar / kbd
+    - kbd region                  键盘虚拟控件集（所有快捷键集中管理）
+    - collection                  发票列表的 N 行卡片单条声明
+    - 多 locator                  accessibility + ocr_text + nearby_text + image_patch + bbox_norm
+    - postcondition               state_should_be / text_should_appear / visual_diff_should_be / ocr_should_appear
+    - approval_required           destructive / requires_confirmation 风险动作必须人工审批
+    - safety_policy               forbidden_action_categories + redaction_patterns
+    - patches/                    展示持续修正（实测发现的 bbox 偏差固化为 trusted patch）
+
+    ⚠️ 这是 hypothetical demo（target=erp.exe），不能直接对真实软件跑。
+    真实可跑案例见仓库 apps/ 目录：
+      - apps/apple-music/        macOS：region + collection + 双轨 locator
+      - apps/notes/              macOS：SwiftUI 自绘 + kbd region 案例
+      - apps/activity-monitor/   macOS：table view + 列排序
+
 visual_box:
   id: erp-capsule-1
   mode: real_window
@@ -38,247 +46,317 @@ visual_box:
     require_foreground_for_input: true
     validate_before_each_action: true
   fallbacks: []
+
+# ============ Regions：跨 state 共享的 UI 区域 ============
+# 比为每个 state 重复声明 sidebar/toolbar 高效得多；patch 时也只改一次。
+regions:
+  - id: sidebar
+    description: 左侧导航栏，所有登录后 state 共享
+    bbox_norm: [0, 0.05, 0.16, 0.95]
+    controls:
+      - id: dashboard
+        role: menu_item
+        label: 仪表盘
+        action_types: [click]
+        locator_priority:
+          - { type: accessibility, role: menu_item, name: 仪表盘 }
+          - { type: ocr_text, text: 仪表盘, match: exact }
+          - { type: bbox_norm, value: [0.02, 0.10, 0.12, 0.04] }
+        visual: { center_norm: [0.08, 0.12] }
+      - id: invoices
+        role: menu_item
+        label: 发票
+        action_types: [click]
+        locator_priority:
+          - { type: accessibility, role: menu_item, name: 发票 }
+          - { type: ocr_text, text: 发票, match: contains }
+          - { type: bbox_norm, value: [0.02, 0.16, 0.12, 0.04] }
+        visual: { center_norm: [0.08, 0.18] }
+      - id: customers
+        role: menu_item
+        label: 客户
+        action_types: [click]
+        locator_priority:
+          - { type: accessibility, role: menu_item, name: 客户 }
+          - { type: ocr_text, text: 客户, match: contains }
+          - { type: bbox_norm, value: [0.02, 0.22, 0.12, 0.04] }
+        visual: { center_norm: [0.08, 0.24] }
+
+  - id: toolbar
+    description: 顶部工具栏（新建/保存/搜索按钮 + 全局搜索框）
+    bbox_norm: [0.16, 0, 0.84, 0.05]
+    controls:
+      - id: new
+        role: button
+        label: 新建
+        action_types: [click, key]
+        locator_priority:
+          - { type: accessibility, role: button, name: 新建 }
+          - { type: ocr_text, text: 新建, match: exact }
+          - { type: image_patch, file: patches/toolbar_new.png, min_similarity: 0.9 }
+          - { type: bbox_norm, value: [0.18, 0.01, 0.06, 0.04] }
+        visual: { center_norm: [0.21, 0.03] }
+        notes: 优先快捷键 (Ctrl+N) 比小图标 click 稳
+      - id: save
+        role: button
+        label: 保存
+        action_types: [click, key]
+        locator_priority:
+          - { type: accessibility, role: button, name: 保存 }
+          - { type: ocr_text, text: 保存 }
+          - { type: bbox_norm, value: [0.25, 0.01, 0.06, 0.04] }
+        visual: { center_norm: [0.28, 0.03] }
+      - id: global_search
+        role: textbox
+        label: 全局搜索
+        action_types: [click, type]
+        locator_priority:
+          - { type: accessibility, automation_id: txtGlobalSearch }
+          - { type: bbox_norm, value: [0.82, 0.01, 0.16, 0.04] }
+        visual: { center_norm: [0.90, 0.03] }
+
+  # 键盘虚拟控件集：把所有快捷键收纳为可寻址 controls
+  # 优势：workflow 步骤里直接 `kbd.new_invoice` 而非 inline combo 字符串
+  - id: kbd
+    description: 键盘快捷键虚拟集合
+    bbox_norm: [0.5, 0.5, 0.01, 0.01]
+    controls:
+      - id: new_invoice
+        role: button
+        label: 新建发票 (Ctrl+N)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: save
+        role: button
+        label: 保存 (Ctrl+S)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: cancel
+        role: button
+        label: 取消/关闭 (Escape)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+      - id: search
+        role: button
+        label: 聚焦搜索 (Ctrl+F)
+        action_types: [key]
+        locator_priority: [{ type: bbox_norm, value: [0.5, 0.5, 0.01, 0.01] }]
+        visual: { center_norm: [0.5, 0.5] }
+
+# ============ States ============
 states:
   - id: login
-    description: 登录页
+    description: 登录页（沙盒外，没有 sidebar/toolbar）
     kind: page
     anchors:
-      - type: ocr_text
-        text: 用户名
-        match: contains
-        min_confidence: 0.85
-      - type: ocr_text
-        text: 密码
-        match: contains
-        min_confidence: 0.85
+      - { type: ocr_text, text: 用户名, match: contains, min_confidence: 0.85 }
+      - { type: ocr_text, text: 密码, match: contains, min_confidence: 0.85 }
     match_policy: all_anchors
+    inherit_regions: []
     controls:
       - id: username
         role: textbox
         label: 用户名
         action_types: [type, click]
         locator_priority:
-          - type: accessibility
-            role: textbox
-            automation_id: txtUserName
-          - type: nearby_text
-            text: 用户名
-            direction: right
-            max_distance_norm: 0.15
-          - type: bbox_norm
-            value: [0.42, 0.40, 0.25, 0.05]
-        visual:
-          bbox_norm: [0.42, 0.40, 0.25, 0.05]
-          center_norm: [0.545, 0.425]
+          - { type: accessibility, role: textbox, automation_id: txtUserName }
+          - { type: nearby_text, text: 用户名, direction: right, max_distance_norm: 0.15 }
+          - { type: bbox_norm, value: [0.42, 0.40, 0.25, 0.05] }
+        visual: { bbox_norm: [0.42, 0.40, 0.25, 0.05], center_norm: [0.545, 0.425] }
         risk_level: safe
       - id: password
         role: textbox
         label: 密码
         action_types: [type, click]
         locator_priority:
-          - type: accessibility
-            role: textbox
-            automation_id: txtPassword
-          - type: nearby_text
-            text: 密码
-            direction: right
-            max_distance_norm: 0.15
-          - type: bbox_norm
-            value: [0.42, 0.48, 0.25, 0.05]
-        visual:
-          bbox_norm: [0.42, 0.48, 0.25, 0.05]
-          center_norm: [0.545, 0.505]
+          - { type: accessibility, role: textbox, automation_id: txtPassword }
+          - { type: nearby_text, text: 密码, direction: right, max_distance_norm: 0.15 }
+          - { type: bbox_norm, value: [0.42, 0.48, 0.25, 0.05] }
+        visual: { bbox_norm: [0.42, 0.48, 0.25, 0.05], center_norm: [0.545, 0.505] }
         risk_level: safe
       - id: submit
         role: button
         label: 登录
         action_types: [click]
         locator_priority:
-          - type: accessibility
-            role: button
-            name: 登录
-          - type: ocr_text
-            text: 登录
-            match: exact
-          - type: bbox_norm
-            value: [0.50, 0.57, 0.12, 0.05]
-        visual:
-          bbox_norm: [0.50, 0.57, 0.12, 0.05]
-          center_norm: [0.56, 0.595]
+          - { type: accessibility, role: button, name: 登录 }
+          - { type: ocr_text, text: 登录, match: exact }
+          - { type: bbox_norm, value: [0.50, 0.57, 0.12, 0.05] }
+        visual: { bbox_norm: [0.50, 0.57, 0.12, 0.05], center_norm: [0.56, 0.595] }
         postcondition:
           any:
-            - type: state_should_be
-              state_id: dashboard
-            - type: text_should_appear
-              text: 工作台
-              timeout_ms: 4000
+            - { type: state_should_be, state_id: dashboard }
+            - { type: text_should_appear, text: 工作台, timeout_ms: 4000 }
         risk_level: requires_confirmation
         approval_required: true
+
   - id: dashboard
-    description: 登录后的工作台
+    description: 登录后工作台 - 含若干统计卡（collection 示例）
     kind: page
     anchors:
-      - type: ocr_text
-        text: 工作台
-      - type: ocr_text
-        text: 待办
+      - { type: ocr_text, text: 工作台 }
+      - { type: ocr_text, text: 待办 }
+    match_policy: any_anchor
+    inherit_regions: [sidebar, toolbar, kbd]
     controls:
-      - id: nav_invoice
-        role: menu_item
-        label: 发票
+      # 4 张统计卡（待办 / 待付款 / 本月销售 / 客户数）—— collection 单条声明
+      - kind: collection
+        id: stats_card
+        role: button
+        label: 统计卡（仪表盘）
         action_types: [click]
-        locator_priority:
-          - type: accessibility
-            role: menu_item
-            name: 发票
-          - type: ocr_text
-            text: 发票
-            match: contains
-          - type: bbox_norm
-            value: [0.05, 0.15, 0.10, 0.05]
-        visual:
-          bbox_norm: [0.05, 0.15, 0.10, 0.05]
-          center_norm: [0.1, 0.175]
-        postcondition:
-          type: state_should_be
-          state_id: invoice.editor
-  - id: invoice.editor
-    description: 发票编辑页
+        locator_priority: [{ type: bbox_norm, value: [0.20, 0.10, 0.18, 0.12] }]
+        visual: { bbox_norm: [0.20, 0.10, 0.18, 0.12] }
+        enumeration:
+          layout: row
+          count: 4
+          cell_bbox_norm: [0.20, 0.10, 0.18, 0.12]
+          spacing_x: 0.20
+        notes: 按 dashboard.stats_card[N] 寻址（0..3）
+
+  - id: invoice.list
+    description: 发票列表页 - 表格行（collection 示例）
     kind: page
     anchors:
-      - type: ocr_text
-        text: 发票信息
-        match: contains
-        min_confidence: 0.85
-      - type: accessibility
-        role: window
-        name_regex: ".*发票.*"
+      - { type: ocr_text, text: 发票号 }
+      - { type: ocr_text, text: 客户 }
+      - { type: ocr_text, text: 金额 }
+    match_policy: all_anchors
+    inherit_regions: [sidebar, toolbar, kbd]
+    controls:
+      - kind: collection
+        id: row
+        role: container
+        label: 发票表格行
+        action_types: [click, double_click]
+        locator_priority: [{ type: bbox_norm, value: [0.18, 0.12, 0.80, 0.05] }]
+        visual: { bbox_norm: [0.18, 0.12, 0.80, 0.05] }
+        enumeration:
+          layout: column
+          count: 12
+          cell_bbox_norm: [0.18, 0.12, 0.80, 0.05]
+          spacing_y: 0.05
+        notes: |
+          按 invoice.list.row[N] 寻址（0..11）。双击进入发票详情。
+          表格滚动后 row[N] 会变成下一批 12 行；要找特定发票号建议
+          先 toolbar.global_search type 关键字过滤。
+
+  - id: invoice.editor
+    description: 发票编辑页 - 创建/修改发票
+    kind: page
+    anchors:
+      - { type: ocr_text, text: 发票信息, match: contains, min_confidence: 0.85 }
+      - { type: accessibility, role: window, name_regex: ".*发票.*" }
+    match_policy: any_anchor
+    inherit_regions: [sidebar, toolbar, kbd]
     controls:
       - id: customer_name
         role: textbox
         label: 客户名称
-        action_types: [type]
+        action_types: [type, click]
         locator_priority:
-          - type: accessibility
-            automation_id: txtCustomerName
-          - type: nearby_text
-            text: 客户名称
-            direction: right
-            max_distance_norm: 0.2
-          - type: bbox_norm
-            value: [0.32, 0.30, 0.40, 0.05]
-        visual:
-          bbox_norm: [0.32, 0.30, 0.40, 0.05]
+          - { type: accessibility, automation_id: txtCustomerName }
+          - { type: nearby_text, text: 客户名称, direction: right, max_distance_norm: 0.2 }
+          - { type: bbox_norm, value: [0.32, 0.30, 0.40, 0.05] }
+        visual: { bbox_norm: [0.32, 0.30, 0.40, 0.05], center_norm: [0.52, 0.325] }
       - id: amount
         role: textbox
         label: 金额
-        action_types: [type]
+        action_types: [type, click]
         locator_priority:
-          - type: accessibility
-            automation_id: txtAmount
-          - type: nearby_text
-            text: 金额
-            direction: right
-            max_distance_norm: 0.15
-          - type: bbox_norm
-            value: [0.32, 0.40, 0.20, 0.05]
-        visual:
-          bbox_norm: [0.32, 0.40, 0.20, 0.05]
+          - { type: accessibility, automation_id: txtAmount }
+          - { type: nearby_text, text: 金额, direction: right, max_distance_norm: 0.15 }
+          - { type: bbox_norm, value: [0.32, 0.40, 0.20, 0.05] }
+        visual: { bbox_norm: [0.32, 0.40, 0.20, 0.05], center_norm: [0.42, 0.425] }
       - id: submit
         role: button
         label: 提交
         action_types: [click]
         locator_priority:
-          - type: accessibility
-            role: button
-            name: 提交
-          - type: ocr_text
-            text: 提交
-            match: exact
-          - type: image_patch
-            file: patches/invoice_submit.png
-            min_similarity: 0.9
-          - type: bbox_norm
-            value: [0.72, 0.81, 0.08, 0.04]
-        visual:
-          bbox_norm: [0.72, 0.81, 0.08, 0.04]
-          center_norm: [0.76, 0.83]
-        precondition:
-          type: state_should_be
-          state_id: invoice.editor
+          - { type: accessibility, role: button, name: 提交 }
+          - { type: ocr_text, text: 提交, match: exact }
+          - { type: image_patch, file: patches/invoice_submit.png, min_similarity: 0.9 }
+          - { type: bbox_norm, value: [0.72, 0.81, 0.08, 0.04] }
+        visual: { bbox_norm: [0.72, 0.81, 0.08, 0.04], center_norm: [0.76, 0.83] }
+        precondition: { type: state_should_be, state_id: invoice.editor }
         postcondition:
           any:
-            - type: text_should_appear
-              text: 提交成功
-              timeout_ms: 5000
-            - type: state_should_be
-              state_id: invoice.detail
+            - { type: text_should_appear, text: 提交成功, timeout_ms: 5000 }
+            - { type: state_should_be, state_id: invoice.detail }
+            - { type: visual_diff_should_be, min: 0.15 }  # 至少 15% 视觉差异，证明界面真发生了变化
         risk_level: requires_confirmation
         approval_required: true
+
   - id: invoice.detail
-    description: 提交后的发票详情
+    description: 发票详情（提交成功后落到这里）
     kind: page
     anchors:
-      - type: ocr_text
-        text: 发票编号
-      - type: ocr_text
-        text: 提交成功
-        match: contains
+      - { type: ocr_text, text: 发票编号 }
+      - { type: ocr_text, text: 提交成功, match: contains }
+    match_policy: any_anchor
+    inherit_regions: [sidebar, toolbar, kbd]
     controls: []
-transitions:
-  - from: login
-    action_id: login.submit
-    to: dashboard
-    verify:
-      - type: text_appears
-        text: 工作台
-        timeout_ms: 4000
-  - from: dashboard
-    action_id: dashboard.nav_invoice
-    to: invoice.editor
-    verify:
-      - type: state_should_be
-        state_id: invoice.editor
-  - from: invoice.editor
-    action_id: invoice.editor.submit
-    to: invoice.detail
-    verify:
-      - type: text_appears
-        text: 提交成功
-        timeout_ms: 5000
+
+transitions: []
+
+# ============ Workflows ============
 workflows:
   - id: login_and_create_invoice
-    description: 登录后创建一张发票
+    description: |
+      端到端 demo：登录 → 用 kbd 快捷键打开新发票 → 填客户/金额 → 提交（高风险需审批）。
+      展示 kbd region 让 workflow 更简洁——不必 click sidebar→invoices→toolbar→new 四步。
     inputs:
-      - name: username
-        type: string
-      - name: password
-        type: secret
-      - name: customer_name
-        type: string
-      - name: amount
-        type: string
+      - { name: username, type: string }
+      - { name: password, type: secret }
+      - { name: customer_name, type: string }
+      - { name: amount, type: string }
     steps:
       - action_id: login.username
-        params:
-          text: "{{username}}"
+        params: { text: "{{username}}" }
       - action_id: login.password
-        params:
-          text: "{{password}}"
+        params: { text: "{{password}}" }
       - action_id: login.submit
         approval_required: true
         on_failure: ask_user
-      - action_id: dashboard.nav_invoice
+      - action_id: kbd.new_invoice
+        params: { combo: "ctrl+n" }
       - action_id: invoice.editor.customer_name
-        params:
-          text: "{{customer_name}}"
+        params: { text: "{{customer_name}}" }
       - action_id: invoice.editor.amount
-        params:
-          text: "{{amount}}"
+        params: { text: "{{amount}}" }
       - action_id: invoice.editor.submit
         approval_required: true
         on_failure: ask_user
     timeout_ms: 180000
+
+  - id: open_first_invoice
+    description: |
+      sidebar → 发票列表 → 双击第一行（collection 字面量寻址）。
+      Workflow.steps 必须是静态 action_id；要按动态 index 操作，请用
+      vision_map.perform_action 直接传 action_id "invoice.list.row[N]:double_click"。
+    steps:
+      - action_id: sidebar.invoices
+      - action_id: "invoice.list.row[0]:double_click"
+    timeout_ms: 6000
+
+  - id: filter_and_pick_invoice
+    description: |
+      搜索 + 选择：用 toolbar 的全局搜索过滤发票，然后双击第一行。
+      展示 kbd.search 比 click toolbar.global_search 更稳。
+    inputs:
+      - { name: keyword, type: string }
+    steps:
+      - action_id: sidebar.invoices
+      - action_id: kbd.search
+        params: { combo: "ctrl+f" }
+      - action_id: toolbar.global_search
+        params: { text: "{{keyword}}", clear_first: true }
+      - action_id: "invoice.list.row[0]:double_click"
+    timeout_ms: 8000
+
 repair_policy:
   max_auto_repair_level: 3
   geometry:
@@ -295,6 +373,7 @@ repair_policy:
   destructive_actions:
     auto_repair_before_action: false
     require_user_confirmation: true
+
 safety_policy:
   forbidden_action_categories:
     - payment
@@ -306,21 +385,30 @@ safety_policy:
     - requires_confirmation
     - destructive
   redaction_patterns:
-    - "(?<=密码[:：])\\\\S+"
-    - "\\\\b\\\\d{16,19}\\\\b"
+    - "(?<=密码[:：])\\S+"          # 密码字段
+    - "\\b\\d{16,19}\\b"             # 信用卡号
   allow_cloud_vlm: false
   audit_log_retention_days: 30
+
 input_lease_policy:
   default_lease_ms: 5000
   break_on_user_input: true
   break_hotkey: Esc Esc
   require_revalidate_after_break: true
+
 metadata:
   created_at: 2026-05-26T08:00:00.000Z
   created_by: vision-mcp-design-team
-  tags:
-    - example
-    - windows
-    - erp
-  notes: 设计文档 §19.1 的扩展版示例
+  tags: [example, windows, erp, region, collection, kbd]
+  notes: |
+    本 yaml 是设计文档配套的 hypothetical demo，**不能**对任何真实软件跑。
+    其作用是展示 vision-mcp 当前架构能力的完整组合：
+      - regions 跨 state 共享（sidebar/toolbar/kbd）
+      - kbd 把键盘快捷键虚拟成可寻址 controls，workflow 步骤更简洁
+      - collection 用一条声明覆盖 N 行/卡片（dashboard.stats_card / invoice.list.row）
+      - 多 locator 优先级 + image_patch fallback
+      - postcondition.any 多条件 OR + visual_diff_should_be 视觉验证
+      - approval_required + safety_policy.forbidden_action_categories 双层安全
+      - redaction_patterns 自动脱敏密码/信用卡号
+      - patches/ 目录有一个 trusted patch 示例（持续修正）
   builder_version: "0.1"
