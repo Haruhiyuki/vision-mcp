@@ -1,0 +1,16 @@
+id: bbox-steam-top_nav-store_tab-mpop53w5
+trust: session_only
+created_at: 2026-05-27T23:29:45.461Z
+created_by: vision-mcp-cli-patch
+reason: 实测：annotated 后微调位置（中心 ~0.045 而非 0.065）
+confidence: 1
+requires_review: false
+kind: control_bbox
+state_id: top_nav
+control_id: store_tab
+new_bbox_norm:
+  - 0.034
+  - 0.054
+  - 0.024
+  - 0.022
+method: 实测：annotated 后微调位置（中心 ~0.045 而非 0.065）

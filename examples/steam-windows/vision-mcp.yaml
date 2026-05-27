@@ -1,0 +1,165 @@
+version: "0.1"
+app:
+  id: steam
+  name: Steam
+  platform: windows
+  launch_hint: attach_after_launch
+visual_box:
+  id: steam-capsule
+  mode: same_session_virtual_display
+  platform: windows
+  display:
+    # Steam 有最小窗口尺寸 ~1364x810；用 capsule.migrate 实测尺寸做契约
+    width_px: 1364
+    height_px: 810
+    scale: 1
+    dpi_x: 96
+    dpi_y: 96
+    refresh_rate_hz: 60
+  target_window:
+    title_regex: ^Steam$
+  coordinate_space: normalized_client_rect
+  contract:
+    require_same_display: true
+    require_client_size_px:
+      - 1364
+      - 810
+    # Steam 不同子页（库 / 商店 / 详情）有时窗口微调；放宽到 80px
+    tolerate_client_size_delta_px: 80
+    require_unminimized: true
+    require_foreground_for_input: true
+    validate_before_each_action: true
+  fallbacks: []
+regions:
+  - id: top_nav
+    description: Steam 顶部导航栏（商店/库/社区 + 用户头像 + 窗口控件）。跨 state 共享。
+    bbox_norm: [0, 0.04, 1, 0.04]
+    controls:
+      - id: store_tab
+        role: button
+        action_types: [click]
+        locator_priority:
+          - type: bbox_norm
+            value: [0.045, 0.054, 0.04, 0.022]
+      - id: library_tab
+        role: button
+        action_types: [click]
+        locator_priority:
+          - type: ocr_text
+            text: "库"
+            match: exact
+          - type: bbox_norm
+            value: [0.125, 0.054, 0.025, 0.022]
+        # 不设 postcondition：idempotent click（再次点已选中的 tab 不应失败）
+
+states:
+  - id: store_home
+    description: Steam 商店首页（默认入口；推荐 + 特价）
+    kind: page
+    anchors:
+      - type: visual_hash
+        hash: 0f1312010f1d0d0c
+        min_similarity: 0.78
+    match_policy: any_anchor
+    controls: []
+    inherit_regions: [top_nav]
+    variants: []
+
+  - id: library_home
+    description: Steam 库主页（左侧游戏列表 + 右侧主要游戏卡片）
+    kind: page
+    anchors:
+      - type: visual_hash
+        hash: 0f005f67155a520e
+        min_similarity: 0.82
+      - type: ocr_text
+        text: "准备就绪"
+        min_confidence: 0.7
+    match_policy: any_anchor
+    controls:
+      # 左侧 sidebar 的 dropdown / search / 排序
+      - id: filter_dropdown
+        role: combobox
+        action_types: [click]
+        locator_priority:
+          - type: bbox_norm
+            value: [0.02, 0.21, 0.16, 0.04]
+      - id: search_icon
+        role: button
+        action_types: [click]
+        locator_priority:
+          - type: bbox_norm
+            value: [0.02, 0.27, 0.16, 0.04]
+    inherit_regions: [top_nav]
+    variants: []
+
+transitions:
+  - from: store_home
+    to: library_home
+    action_id: top_nav.library_tab
+
+workflows:
+  # 目标演示：把"任务驱动"链路打通——一条命令重放沉淀好的 map。
+  # 不再手工 click + 估坐标 + crop PNG 看位置。
+  #
+  # 注：locator 内容（如 ocr_text.text）固定，不支持 {{}} 模板（只 step.params 支持）。
+  # 所以动态文本目标（"打开游戏 X"，X 不定）应用 vision-mcp click-text 命令式，
+  # 而 workflow 只覆盖 UI 固定位置的元素。
+
+  - id: open_library
+    description: 切到 Library tab（idempotent，已在 library 也成功）
+    inputs: []
+    steps:
+      - action_id: top_nav.library_tab
+
+  - id: open_library_filter
+    description: 切到 Library + 打开 filter 下拉（多步组合，验证 sediment 链路）
+    inputs: []
+    steps:
+      - action_id: top_nav.library_tab
+      - action_id: library_home.filter_dropdown
+
+  - id: open_store
+    description: 切到 Store tab
+    inputs: []
+    steps:
+      - action_id: top_nav.store_tab
+repair_policy:
+  max_auto_repair_level: 3
+  geometry:
+    tolerate_client_size_delta_px: 2
+    tolerate_origin_change: true
+    require_same_dpi: true
+  state:
+    min_anchor_score: 0.86
+    min_ocr_similarity: 0.88
+    min_visual_similarity: 0.82
+  control_relocation:
+    confidence_threshold: 0.92
+    max_bbox_shift_norm: 0.08
+  destructive_actions:
+    auto_repair_before_action: false
+    require_user_confirmation: true
+safety_policy:
+  forbidden_action_categories:
+    - payment
+    - destructive
+    - external_communication
+    - permission_change
+    - captcha
+  require_approval_for_risk_levels:
+    - requires_confirmation
+    - destructive
+  redaction_patterns: []
+  allow_cloud_vlm: false
+  audit_log_retention_days: 30
+input_lease_policy:
+  default_lease_ms: 5000
+  break_on_user_input: true
+  break_hotkey: Esc Esc
+  require_revalidate_after_break: true
+metadata:
+  created_at: 2026-05-27T23:18:52.694Z
+  created_by: vision-mcp-builder
+  tags: []
+  builder_version: "0.1"
