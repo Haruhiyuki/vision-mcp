@@ -2206,13 +2206,34 @@ async function cmdInstallHelper(args: ParsedArgs) {
   if (platform === "win32") {
     const ps1Path = path.join(prefix, "windows", "src", "vision-mcp-helper.ps1");
     const exePath = path.join(prefix, "windows", "vision-mcp-helper.exe");
-    console.log(`Windows helper:`);
-    console.log(`  PowerShell 脚本：${ps1Path}`);
-    console.log(`  可选编译为 .exe（推荐）:`);
-    console.log(`    Install-Module -Name ps2exe -Scope CurrentUser`);
-    console.log(`    Invoke-ps2exe "${ps1Path}" "${exePath}"`);
-    console.log(`\n配置环境变量（无 .exe 时直接指向 .ps1）：`);
-    console.log(`  $env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
+    try {
+      await fs.access(ps1Path);
+    } catch {
+      throw new Error(`找不到 PowerShell 脚本 ${ps1Path}。请确保安装了完整源码（npm tarball 或 git clone）`);
+    }
+    try {
+      await fs.access(exePath);
+      if (!force) {
+        console.log(`✅ Windows helper.exe 已存在：${exePath}`);
+        console.log(`   重新编译请加 --force`);
+        console.log(`\n📋 配置环境变量：`);
+        console.log(`   $env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
+        return;
+      }
+    } catch {
+      // not exists
+    }
+    console.log(`📝 Windows helper 部署说明`);
+    console.log(`\n⚙️  开发期（直接运行 .ps1，启动 ~400ms）：`);
+    console.log(`   $env:VISION_MCP_NATIVE_HELPER = "${ps1Path}"`);
+    console.log(`\n🔨 生产（编译为 .exe，启动 ~10ms）：`);
+    console.log(`   Install-Module -Name ps2exe -Scope CurrentUser`);
+    console.log(`   Invoke-ps2exe "${ps1Path}" "${exePath}" -noConsole`);
+    console.log(`   $env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
+    console.log(`\n⚠️  权限要求：`);
+    console.log(`   - 高完整度 app（任务管理器/反作弊）：helper 需以管理员身份运行才能注入输入`);
+    console.log(`   - 普通用户级 app：直接跑即可`);
+    console.log(`\n📖 详细 RPC 协议见 native/windows/README.md`);
     return;
   }
 

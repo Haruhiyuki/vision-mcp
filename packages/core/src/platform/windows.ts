@@ -138,6 +138,34 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
     };
   }
 
+  /**
+   * 等价 macOS raiseWindow：把窗口拉到前台。
+   * Win32 SetForegroundWindow 在 Win10+ 有前台锁定保护（其他 app 偶尔会拒绝），
+   * helper 内部用 AttachThreadInput hack 兜底。
+   */
+  async raiseWindow(handle: string): Promise<void> {
+    try {
+      const r = await this.bridge.request<{ ok: boolean }>("window.raise", { handle });
+      if (r?.ok) return;
+    } catch {
+      // fallback
+    }
+    await this.bridge.request("window.activate", { handle });
+  }
+
+  /**
+   * 等价 macOS axPressInWindow：用 UIAutomation InvokePattern 直接对 norm 位置的元素
+   * 执行 Invoke / Select / Toggle / Expand，不依赖鼠标。
+   * 适用：所有暴露 UIA 模式的标准控件（WinForms / WPF / UWP / WinUI 都支持）。
+   * 不适用：自绘 UI（DirectX 游戏、自定义 control 不实现 UIA pattern）。
+   */
+  async axPressInWindow(
+    handle: string,
+    norm: [number, number],
+  ): Promise<{ ok: boolean; via: string; matched_role?: string; matched_name?: string }> {
+    return this.bridge.request("input.ax_press", { handle, norm });
+  }
+
   onWindowChanged(handle: string, cb: () => void): () => void {
     const handler = (data: { handle: string }) => {
       if (data?.handle === handle) cb();

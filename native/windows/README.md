@@ -1,69 +1,118 @@
 # vision-mcp-helper (Windows)
 
-骨架实现：PowerShell 写的 JSON-RPC sidecar，与 macOS swift helper 同协议。
+PowerShell + Win32 P/Invoke + UI Automation 实现的 JSON-RPC sidecar，与 macOS swift helper 同协议。
 
-## 直接运行
-
-```powershell
-powershell -ExecutionPolicy Bypass -File src/vision-mcp-helper.ps1
-```
-
-vision-mcp core 通过 `VISION_MCP_NATIVE_HELPER` 环境变量找到它。在 Windows 下：
+## 1. 直接运行（开发期）
 
 ```powershell
-$env:VISION_MCP_NATIVE_HELPER = "powershell"
-# 或者编译为 exe（推荐）
+powershell -ExecutionPolicy Bypass -File src\vision-mcp-helper.ps1
 ```
 
-## 编译为 exe（生产推荐）
+通过 `VISION_MCP_NATIVE_HELPER` 环境变量让 vision-mcp core 找到它：
 
 ```powershell
-Install-Module ps2exe -Scope CurrentUser
-Invoke-PS2EXE -inputFile src\vision-mcp-helper.ps1 -outputFile vision-mcp-helper.exe -noConsole
+$env:VISION_MCP_NATIVE_HELPER = "C:\path\to\src\vision-mcp-helper.ps1"
+# 或直接配 powershell + ps1 路径
 ```
 
-之后用：
+## 2. 编译为 exe（生产推荐）
+
+PowerShell 冷启动 ~400ms；exe 启动 ~10ms。
+
+```powershell
+Install-Module -Name ps2exe -Scope CurrentUser
+Invoke-ps2exe `
+  -inputFile src\vision-mcp-helper.ps1 `
+  -outputFile vision-mcp-helper.exe `
+  -noConsole
 ```
+
+然后：
+
+```powershell
 $env:VISION_MCP_NATIVE_HELPER = "C:\path\to\vision-mcp-helper.exe"
 ```
 
-## 已实现的方法
+## 3. 实现的 RPC 方法
 
 | RPC | 实现 | 性能 |
 | --- | ---- | ---- |
-| `version` | 返回 `{version, platform=windows}` | < 5ms |
-| `capsule.list_displays` | `System.Windows.Forms.Screen.AllScreens` | < 50ms |
-| `capsule.ensure_virtual_display` | 暂无虚拟显示器，返回主屏 | - |
-| `window.list` | `EnumWindows + GetWindowText + GetWindowRect` | ~50ms |
-| `window.get` | listWindows + filter | ~50ms |
-| `window.move` | `MoveWindow + SetForegroundWindow` | ~150ms |
-| `window.activate` | `SetForegroundWindow` | < 10ms |
+| `version` | 返回 `{version, platform=windows, elevated}` | < 5ms |
+| `capsule.list_displays` | `System.Windows.Forms.Screen.AllScreens` + `GetDpiForWindow` 拿真实 per-monitor DPI | < 30ms |
+| `capsule.ensure_virtual_display` | 不创建虚拟显示器；返回 displays[0]（runtime 走 pickStableDisplay） | < 30ms |
+| `window.list` | `EnumWindows + GetWindowText + GetWindowRect + GetClientRect`，含 is_foreground / is_maximized / native_handle=HWND | ~50ms |
+| `window.get` | `window.list` + filter | ~50ms |
+| `window.move` | `ShowWindow(SW_RESTORE)` → `MoveWindow` → `Raise-Window-Strong` | ~150ms |
+| `window.restore` | 同 `window.move` 用 snapshot.placement.bounds | ~150ms |
+| `window.activate` / `window.raise` | `Raise-Window-Strong`：`SetForegroundWindow` → 失败时 `AttachThreadInput` hack 兜底 | < 30ms |
+| **`ax.dump`** | `AutomationElement.FromHandle` + `TreeWalker.ControlViewWalker` 遍历控件树 | 50–500ms（取决于窗口复杂度） |
 | `capture.rect` | `Graphics.CopyFromScreen` → PNG | ~200ms |
+| **`capture.rect_annotated`** | `Graphics.DrawLine + DrawRectangle + DrawString` 画网格 / bbox / 标签 | ~250ms |
+| **`capture.window`** | `PrintWindow(hwnd, hdcBlt, PW_RENDERFULLCONTENT=2)` 抓窗口（含被遮挡 / 部分屏外） | ~150ms |
+| `capture.display` | `Capture-Rect(display.bounds)` | ~200ms |
 | `input.click` | `SetCursorPos + mouse_event` | < 10ms |
-| `input.type` | 剪贴板粘贴（支持中文 / Unicode） | ~100ms |
-| `input.key` | `SendKeys.SendWait` | < 50ms |
+| `input.type` | 剪贴板粘贴（`Clipboard.SetText + SendKeys ^v`）— 支持中文/Unicode | ~100ms |
+| `input.key` | `SendKeys.SendWait` + cmd/ctrl/shift/alt 标准映射 | < 50ms |
 | `input.scroll` | `mouse_event(MOUSEEVENTF_WHEEL)` | < 10ms |
+| **`input.drag`** | `SetCursorPos` 逐步 + `mouse_event(LEFT_DOWN/MOVE/UP)` | 200ms（默认 duration） |
+| **`input.ax_press`** | `AutomationElement.FromPoint(x,y)` + `InvokePattern → SelectionItem → Toggle → ExpandCollapse` 依次尝试 | < 30ms |
+| `input.subscribe` | no-op（lease 用键盘热键打断） | - |
 
-## 未实现 / 后续
+## 4. 与 macOS helper 等价的 protocol
 
-- **OCR**：Windows 10+ 有 `Windows.Media.Ocr`，可用类似 swift Vision 框架的封装。
-- **AX 树 dump**：用 `System.Windows.Automation.AutomationElement` 树遍历；性能可能不如 macOS swift，需测试。
-- **annotated snapshot**：用 `System.Drawing.Graphics` 在 Bitmap 上画 grid + bbox 标签后输出 PNG。
-- **IDD 虚拟显示器**：需要驱动签名，生产推荐与 IddCx sample 集成；MVP 用主屏 OK。
-- **Windows.Graphics.Capture**：比 BitBlt 快 5-10x，但需要 WinRT 绑定，编译为 C# exe 更简洁。
-
-## 限制
-
-- PowerShell 启动 ~400ms，每次冷启动慢。推荐编译为 exe。
-- `SendKeys` 在 elevated app 上不工作；vision-mcp 用 `INPUT` API 替代更稳。
-- `Graphics.CopyFromScreen` 在 fullscreen DirectX app 上拿不到画面；需要切到 Windows.Graphics.Capture。
-
-## 与 macOS helper 等价的 protocol
-
-```
+```jsonl
 > {"id":"1","method":"capsule.list_displays"}
-< {"id":"1","result":[{"id":"display-0", "bounds":{...}, "scale":1.0, ...}]}
+< {"id":"1","result":[{"id":"display-0","bounds":{...},"scale":1.5,"dpi_x":144,"kind":"primary","is_primary":true,...}]}
 
-> {"id":"2","method":"input.click","params":{"point":{"x":500,"y":400}}}
-< {"id":"2","result":{"ok":true}}
+> {"id":"2","method":"input.ax_press","params":{"handle":"131072","norm":[0.4,0.5]}}
+< {"id":"2","result":{"ok":true,"via":"invoke_pattern","matched_role":"ControlType.Button","matched_name":"提交"}}
+
+> {"id":"3","method":"capture.window","params":{"handle":"131072"}}
+< {"id":"3","result":{"png_base64":"...","width":1280,"height":800,"via":"print_window"}}
 ```
+
+## 5. Windows 平台优化要点（对照 macOS）
+
+| 优化 | macOS | Windows |
+| ---- | ----- | ------- |
+| 现代窗口截图 API | SCKit `SCScreenshotManager.captureImage` | `PrintWindow PW_RENDERFULLCONTENT` |
+| 零鼠标操作 | AXUIElement `AXPress` | UIAutomation `InvokePattern` |
+| 强力 raise window | AXRaise | `AttachThreadInput` hack |
+| 中文输入 | NSPasteboard 粘贴 | Clipboard + `SendKeys ^v` |
+| Per-monitor DPI | NSScreen.backingScaleFactor | `SetProcessDpiAwareness(2)` + `GetDpiForWindow` |
+| AX tree dump | `AXUIElementCreateApplication + AXChildren` | `AutomationElement.FromHandle + TreeWalker` |
+| Annotated 截图 | NSBitmap + NSBezierPath | `Graphics.DrawLine + DrawRectangle` |
+
+## 6. 已知限制 / 未实现
+
+- **OCR**：Windows 10+ 自带 `Windows.Media.Ocr` 但 WinRT 难直接从 PowerShell 调；生产建议 C# 包装。MVP 用 cloud OCR provider。
+- **AX 树 dump 性能**：UIA TreeWalker 对深层窗口（Chrome 等）可能 > 1s；helper 默认限制 maxNodes=500、maxDepth=6。
+- **IDD 虚拟显示器**：需要驱动签名 + 企业部署，**不在 MVP**；生产可与 IddCx sample 集成。
+- **Windows.Graphics.Capture (WGC)**：比 BitBlt 快 5–10x、能抓 DirectX 窗口，但需要 WinRT 绑定（C# 包装更简洁）。MVP 用 `PrintWindow`。
+- **`SendKeys`** 对 elevated app 失败：用 `SendInput INPUT` API 更稳，但映射工作量大；当前已 cover 大多数键。
+- **DPI manifest**：ps2exe 编译版需要在 manifest 里声明 `<dpiAwareness>PerMonitorV2</dpiAwareness>` 才完全准确（启动期 `SetProcessDpiAwareness` API 调用一般够用）。
+
+## 7. 性能基准（PowerShell 5.1 + Win10）
+
+| 操作 | 耗时 |
+| ---- | ---- |
+| `version` | < 5ms |
+| `window.list`（~50 个窗口） | 40–60ms |
+| `ax.dump`（VSCode，maxNodes=500） | 200–400ms |
+| `capture.rect`（1920x1080） | 150–250ms |
+| `capture.window`（1280x800 PrintWindow） | 100–200ms |
+| `input.click` | < 10ms |
+| `input.ax_press`（InvokePattern） | 20–40ms |
+
+冷启动（首次 RPC）会多 ~400ms（Add-Type 加载 UIA / Drawing assemblies）。
+
+## 8. 故障排查
+
+| 现象 | 原因 | 解决 |
+| ---- | ---- | ---- |
+| `INPUT_LEASE_DENIED` | 目标 app 是高完整度等级（任务管理器/反作弊） | helper 以管理员身份运行 |
+| `capture.window` 黑屏 | DirectX 全屏 / 反作弊保护 | 用 `capture.rect`（BitBlt）兜底；或迁出 fullscreen |
+| `input.ax_press` 返回 `no_pattern` | 元素是自绘 UI，不实现 UIA pattern | 改用 `input.click`（坐标） |
+| `Add-Type UIAutomationClient` 失败 | 用了 PowerShell Core (pwsh.exe) | 改用 Windows PowerShell 5.1（`powershell.exe`）或编译 exe |
+| 中文输入乱码 | Clipboard 编码错 | 确保 PowerShell session 用 UTF-8（`[Console]::OutputEncoding = [Text.UTF8Encoding]::new()`） |
+| `SetForegroundWindow` 静默失败 | Win10+ 前台锁定保护 | helper 已内置 `AttachThreadInput` hack；仍失败时用 `Alt+Tab` 模拟 |
