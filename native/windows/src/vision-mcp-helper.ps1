@@ -544,46 +544,66 @@ function Capture-Rect-Annotated($rect, $boxes, $gridStep) {
         [System.Drawing.Color]::FromArgb(220, 160, 60, 220),
         [System.Drawing.Color]::FromArgb(220, 40, 180, 200)
     )
-    # 网格
+    # 网格 + 坐标标签（每 2 * gridStep 一个）—— 与 macOS swift helper 一致
     if ($gridStep -gt 0) {
-        $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(90, 120, 120, 120), 1)
-        $font = New-Object System.Drawing.Font "Segoe UI", 9
-        $brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(180, 50, 100, 200))
+        $gridPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(90, 120, 120, 120), 1)
+        $axisFont = New-Object System.Drawing.Font "Segoe UI", 9
+        $axisBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(220, 50, 100, 200))
         $t = $gridStep
         while ($t -lt 1.0) {
             $xp = [int]($t * $rect.width)
             $yp = [int]($t * $rect.height)
-            $g.DrawLine($pen, $xp, 0, $xp, $rect.height)
-            $g.DrawLine($pen, 0, $yp, $rect.width, $yp)
+            $g.DrawLine($gridPen, $xp, 0, $xp, $rect.height)
+            $g.DrawLine($gridPen, 0, $yp, $rect.width, $yp)
             $t += $gridStep
         }
-        $pen.Dispose()
-        $font.Dispose()
-        $brush.Dispose()
+        # 坐标标签
+        $tl = 0.0
+        while ($tl -le 1.0) {
+            $xp = [int]($tl * $rect.width)
+            $yp = [int]($tl * $rect.height)
+            $label = "{0:F2}" -f $tl
+            # top axis
+            $g.DrawString($label, $axisFont, $axisBrush, [float]($xp + 2), 2.0)
+            # left axis
+            $g.DrawString($label, $axisFont, $axisBrush, 2.0, [float]($yp + 2))
+            $tl += $gridStep * 2
+        }
+        $gridPen.Dispose()
+        $axisFont.Dispose()
+        $axisBrush.Dispose()
     }
-    # box
+    # box + 序号 — tag 格式 "#N label"（macOS swift helper 同款）让 agent 说 "click #7"
+    # 用 ::new() 语法：PowerShell 的 New-Object 对多参 overload 解析不稳，
+    # 显式 ::new() 直接走 .NET 反射，类型推导正确
+    $boxFont = [System.Drawing.Font]::new("Segoe UI", [float]10, [System.Drawing.FontStyle]::Bold)
     $i = 0
     foreach ($b in $boxes) {
         $bx = $b.bbox_norm
         if ($bx -and $bx.Length -eq 4) {
             $col = $palette[$i % $palette.Length]
-            $pen = New-Object System.Drawing.Pen $col, 2
-            $rx = [int]($bx[0] * $rect.width)
-            $ry = [int]($bx[1] * $rect.height)
-            $rw = [int]($bx[2] * $rect.width)
-            $rh = [int]($bx[3] * $rect.height)
+            $pen = [System.Drawing.Pen]::new($col, [float]2)
+            $rx = [int]([Convert]::ToDouble($bx[0]) * $rect.width)
+            $ry = [int]([Convert]::ToDouble($bx[1]) * $rect.height)
+            $rw = [int]([Convert]::ToDouble($bx[2]) * $rect.width)
+            $rh = [int]([Convert]::ToDouble($bx[3]) * $rect.height)
             $g.DrawRectangle($pen, $rx, $ry, $rw, $rh)
-            if ($b.label) {
-                $font = New-Object System.Drawing.Font "Segoe UI", 10
-                $brush = New-Object System.Drawing.SolidBrush $col
-                $g.DrawString($b.label, $font, $brush, $rx + 2, $ry + 2)
-                $font.Dispose()
-                $brush.Dispose()
-            }
+            # 标签：背景填色 + 白字（"#1 Soundpad" 风格）
+            $idx = $i + 1
+            $tag = if ($b.label) { "#$idx $($b.label)" } else { "#$idx" }
+            $sz = $g.MeasureString($tag, $boxFont)
+            $bgRect = [System.Drawing.RectangleF]::new([float]$rx, [float]$ry, [float]($sz.Width + 4), [float]($sz.Height + 2))
+            $bgBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(230, $col.R, $col.G, $col.B))
+            $g.FillRectangle($bgBrush, $bgRect)
+            $textBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::White)
+            $g.DrawString($tag, $boxFont, $textBrush, [float]($rx + 2), [float]($ry + 1))
+            $bgBrush.Dispose()
+            $textBrush.Dispose()
             $pen.Dispose()
         }
         $i++
     }
+    $boxFont.Dispose()
     $g.Dispose()
     $ms2 = New-Object System.IO.MemoryStream
     $bmp.Save($ms2, [System.Drawing.Imaging.ImageFormat]::Png)

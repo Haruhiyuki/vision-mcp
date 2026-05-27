@@ -564,11 +564,13 @@ async function cmdBuild(args: ParsedArgs) {
   }
   await capsule.migrate(display.id);
   const { MapBuilder } = await import("@vision-mcp/core");
+  // 注入跨平台 accessibility provider，让 build 捕获 AX candidates 自动生成 controls
+  const axForBuild = makeAccessibilityProvider(capsule.adapter);
   const builder = new MapBuilder({
     app: loaded.effective.app,
     visualBoxId: loaded.effective.visual_box.id,
     capsule,
-    providers: {},
+    providers: axForBuild ? { accessibility: axForBuild } : {},
     outDir: loaded.baseDir,
   });
   const captured = await builder.captureCurrent({
@@ -580,6 +582,8 @@ async function cmdBuild(args: ParsedArgs) {
   console.log(
     `wrote ${loaded.baselinePath}: state=${state.id} controls=${state.controls.length} anchors=${state.anchors.length}`,
   );
+  // 必须 dispose helper 子进程；不然 Node 永远不退出
+  await capsule.adapter.dispose?.();
 }
 
 async function cmdRun(args: ParsedArgs) {
@@ -775,22 +779,9 @@ async function cmdExplore(args: ParsedArgs) {
   await new Promise((r) => setTimeout(r, 600));
   const status = await capsule.status();
   const frame = await capsule.capture();
-  // 也单独 screencapture 出一份 PNG 便于人类肉眼审阅
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const execFileP = promisify(execFile);
+  // 跨平台保存 PNG（之前只在 macOS 走 screencapture，Windows 拿不到 PNG）
   const pngPath = path.join(outDir, "frame.png");
-  const cr = status.geometry?.client_rect_px;
-  if (cr && adapter.platform === "macos") {
-    await execFileP("/usr/sbin/screencapture", [
-      "-x",
-      "-t",
-      "png",
-      "-R",
-      `${cr.x},${cr.y},${cr.width},${cr.height}`,
-      pngPath,
-    ]).catch(() => {});
-  }
+  await saveFrameToPng(frame, pngPath);
   const metaPath = path.join(outDir, "meta.json");
   await fs.writeFile(
     metaPath,
@@ -809,11 +800,11 @@ async function cmdExplore(args: ParsedArgs) {
       2,
     ),
   );
-  // 如果是 darwin，dump AX
+  // 跨平台 AX dump（之前只 darwin；现在 macOS / Windows 都走 makeAccessibilityProvider）
   let axNodes: unknown[] = [];
-  if (status.attached_window && isDarwinAdapter(adapter)) {
-    const provider = new DarwinAccessibilityProvider(adapter);
-    axNodes = await provider.snapshot(status.attached_window.native_handle);
+  const axProvider = makeAccessibilityProvider(adapter);
+  if (status.attached_window && axProvider) {
+    axNodes = await axProvider.snapshot(status.attached_window.native_handle);
     await fs.writeFile(path.join(outDir, "ax.json"), JSON.stringify(axNodes, null, 2));
   }
   // 输出汇总
@@ -894,7 +885,8 @@ async function cmdRecord(args: ParsedArgs) {
   await capsule.migrate(display.id);
   await new Promise((r) => setTimeout(r, 500));
 
-  const provider = isDarwinAdapter(adapter) ? new DarwinAccessibilityProvider(adapter) : undefined;
+  // 跨平台 AX provider（之前只 isDarwinAdapter 走，Windows 拿不到 AX）
+  const provider = makeAccessibilityProvider(adapter);
 
   const summary: Array<{ label: string; out_dir: string; ax_count: number; key_nodes: unknown }> = [];
 
@@ -902,23 +894,12 @@ async function cmdRecord(args: ParsedArgs) {
     const dir = path.join(outRoot, label.replace(/[^a-zA-Z0-9_.\-]/g, "_"));
     await fs.mkdir(dir, { recursive: true });
     const status = await capsule.status();
-    const cr = status.geometry?.client_rect_px;
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const execFileP = promisify(execFile);
-    if (cr && adapter.platform === "macos") {
-      await execFileP("/usr/sbin/screencapture", [
-        "-x",
-        "-t",
-        "png",
-        "-R",
-        `${cr.x},${cr.y},${cr.width},${cr.height}`,
-        path.join(dir, "frame.png"),
-      ]).catch(() => {});
-    }
+    // 跨平台保存 PNG（之前只 macOS 写 frame.png，Windows record 出来没图）
+    const frame = await capsule.capture();
+    await saveFrameToPng(frame, path.join(dir, "frame.png"));
     let axNodes: import("@vision-mcp/core").AccessibilityNode[] = [];
     if (provider && status.attached_window) {
-      provider.invalidate(status.attached_window.native_handle);
+      provider.invalidate?.(status.attached_window.native_handle);
       axNodes = await provider.snapshot(status.attached_window.native_handle);
       await fs.writeFile(path.join(dir, "ax.json"), JSON.stringify(axNodes, null, 2));
     }
@@ -1029,10 +1010,13 @@ async function cmdDiscover(args: ParsedArgs) {
   await capsule.migrate(display.id);
   await new Promise((r) => setTimeout(r, 500));
 
-  if (!isDarwinAdapter(adapter)) {
-    throw new Error("discover 当前仅在 macOS 上实现");
+  // Discoverer 只要 adapter (click/raise/key/capture) + AccessibilityProvider；
+  // 三平台（macOS swift/osascript、Windows UIA）都满足。makeAccessibilityProvider
+  // 自动选当前平台的实现。
+  const provider = makeAccessibilityProvider(adapter);
+  if (!provider) {
+    throw new Error(`discover 需要 accessibility provider（当前 ${adapter.platform} 不支持）`);
   }
-  const provider = new DarwinAccessibilityProvider(adapter);
   const discoverer = new Discoverer(capsule, adapter, provider, {
     out_dir: outDir,
     max_clicks: Number(args.flags["max-clicks"] ?? 12),
@@ -1089,27 +1073,43 @@ async function openCapsuleForRaw(args: ParsedArgs) {
 }
 
 /**
- * 用 swift helper 的 capture.rect_annotated 生成带网格 + 候选框 + 序号的 PNG。
+ * 用 helper 的 capture.rect_annotated 生成带网格 + 候选框 + 序号的 PNG。
  * 优先用 AX 候选（无 AX 时退化用 OCR token）作为候选 boxes。
+ * 跨平台：macOS swift helper / Windows ps1 helper 都实现了 capture.rect_annotated。
+ *
+ * 设计意图：agent 看注释图后能说『click #7』而不是估归一化坐标——这是 SKILL §1
+ * "视觉为主，AX 校准"的核心实现。
  */
 async function cmdAnnotated(args: ParsedArgs) {
-  const { adapter, capsule, loaded } = await openCapsuleForRaw(args);
-  const outPath = String(args.flags.out ?? "/tmp/annotated.png");
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const outPath = String(args.flags.out ?? defaultTempPath("vm-annotated.png"));
   const gridStep = Number(args.flags["grid-step"] ?? 0.1);
+  // capture.rect_annotated 走 GDI 屏幕像素（不是 PrintWindow）—— 目标窗口必须可见
+  // 在前台，否则截到上层别的窗口（终端等）。先 raise。
+  await capsule.raise().catch(() => {});
+  // 给 GDI 一点时间真把窗口绘到 screen buffer
+  await new Promise((r) => setTimeout(r, 200));
   const status = await capsule.status();
   const cr = status.geometry?.client_rect_px;
   if (!cr) throw new Error("client_rect missing");
-  if (!isDarwinAdapter(adapter)) throw new Error("annotated 当前仅支持 macOS helper");
+  // 跨平台 helperRequest 检测 —— mock/osascript 没有
+  const rawAdapter = adapter as unknown as {
+    helperRequest?: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
+  };
+  if (typeof rawAdapter.helperRequest !== "function") {
+    throw new Error(`annotated 需要 helper-based adapter（当前 ${adapter.platform}）`);
+  }
 
-  // 收集候选 boxes：优先 AX，其次 OCR
+  // 收集候选 boxes：优先 AX，OCR 兜底
   let boxes: { bbox_norm: [number, number, number, number]; label?: string }[] = [];
   let source = "none";
-  const ax = new DarwinAccessibilityProvider(adapter);
-  if (status.attached_window) {
-    const nodes = await ax.snapshot(status.attached_window.native_handle);
+  const axProvider = makeAccessibilityProvider(adapter);
+  if (axProvider && status.attached_window) {
+    const nodes = await axProvider.snapshot(status.attached_window.native_handle);
     const interactive = nodes
       .filter((n) => {
         const r = n.role ?? "";
+        // 跨平台 role 集合：macOS AX* 名字 + Windows ControlType.* 名字（WindowsAccessibilityProvider 已做映射）
         return /(AXButton|AXTextField|AXSearchField|AXPopUpButton|AXMenuItem|AXTab|AXLink|AXCheckBox|AXRadioButton)/.test(r)
           || (r === "AXCell" && (n.name || n.description));
       })
@@ -1120,12 +1120,24 @@ async function cmdAnnotated(args: ParsedArgs) {
     }));
     source = `ax (${boxes.length})`;
   }
-  // helper 调 annotated
-  const { DarwinHelperAdapter: HA } = await import("@vision-mcp/core");
-  if (!(adapter instanceof HA)) {
-    throw new Error("annotated 需要 swift helper（VISION_MCP_FORCE_OSASCRIPT 未设）");
+  // 还没有候选 → 用 OCR 兜底（agent 看图后说 "click 第 N 个文字"）
+  if (boxes.length === 0) {
+    const ocrProvider = await makeOcrProvider(adapter);
+    if (ocrProvider) {
+      const handle = status.attached_window?.native_handle;
+      const tokens = ocrProvider.recognizeWindow && handle
+        ? await ocrProvider.recognizeWindow(handle)
+        : await ocrProvider.recognizeRect(cr);
+      // bbox 走 OCR window path 时相对 window bounds；relative window 与 client_rect
+      // 在大部分 app 接近（window 内边框 + title bar 占少量）—— 注释图为人眼参考已够用
+      boxes = tokens.slice(0, 40).map((t) => ({
+        bbox_norm: t.bbox_norm,
+        label: t.text.slice(0, 12),
+      }));
+      source = `ocr (${boxes.length})`;
+    }
   }
-  const r = await adapter.helperRequest<{ png_base64: string; width: number; height: number; box_count: number }>(
+  const r = await rawAdapter.helperRequest!<{ png_base64: string; width: number; height: number; box_count: number }>(
     "capture.rect_annotated",
     {
       rect: { x: cr.x, y: cr.y, width: cr.width, height: cr.height },
@@ -1185,13 +1197,11 @@ async function cmdSnapshot(args: ParsedArgs) {
     // 优先用 capsule.capture() 拿到的 RGBA frame，编码为 PNG（兼容 off-screen workspace）
     // screencapture -R 在屏外失败，必须走 capture frame 路径
     try {
-      const { encodeRgbaToPng } = await import("@vision-mcp/core");
-      const png = encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels);
-      await fs.writeFile(outPath, png);
+      await saveFrameToPng(frame, outPath);
     } catch (err) {
-      // 兜底用 screencapture（屏内窗口）
+      // capsule.capture/encode 失败极少；只 macOS 走 screencapture 兜底（Windows 上 frame 永远来自 PrintWindow，不会 throw）
       const cr = status.geometry?.client_rect_px;
-      if (cr) {
+      if (cr && process.platform === "darwin") {
         const { execFile } = await import("node:child_process");
         const { promisify } = await import("node:util");
         const execFileP = promisify(execFile);
@@ -1892,6 +1902,20 @@ async function cmdHoverThenClick(args: ParsedArgs) {
 /** 跨平台默认临时目录（不能再 hardcode /tmp）。 */
 function defaultTempPath(name: string): string {
   return path.join(process.env.TEMP ?? process.env.TMP ?? (process.platform === "win32" ? "C:\\Windows\\Temp" : "/tmp"), name);
+}
+
+/**
+ * 跨平台保存 capsule frame 为 PNG。
+ * 之前 build/explore/record/snapshot 各自写了 macOS-only screencapture 分支
+ * （`if (adapter.platform === "macos") execFile("/usr/sbin/screencapture", ...)`）；
+ * 现在统一走 frame.pixels → encodeRgbaToPng，兼容 Windows / macOS / 屏外 workspace。
+ */
+async function saveFrameToPng(
+  frame: { width_px: number; height_px: number; pixels: Uint8Array },
+  outPath: string,
+): Promise<void> {
+  const { encodeRgbaToPng } = await import("@vision-mcp/core");
+  await fs.writeFile(outPath, encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels));
 }
 
 /** 在 RGBA frame 上裁剪指定像素 rect（frame 坐标系），返回 RGBA pixels + 尺寸。 */
