@@ -4,7 +4,7 @@
 
 > 阅读优先级：先读 1～7，再按需查阅 `references/`。
 > - **§6「持续修正」是 agent 主动义务**——map 永远在迭代，把每次实测发现的偏差写成 patch 是核心工作流。
-> - **§7「成本优化」是执行阶段铁律**——map 建好后非必要不 snapshot，靠 `run_workflow` / `perform_action` 直接命中，关键节点才看图。
+> - **§7「工作流：用户意图驱动 + 路径上混合」是核心交互范式**——不预先分"建图 / 执行"两段，按用户意图选入口，路径上按需切换，已截的 snapshot 顺带记下副产品。
 
 ## 1. 核心理念：视觉为主 + 稳定窗口
 
@@ -128,67 +128,123 @@ vision-mcp patch notes --state editor --control focus \
 vision-mcp patch <app> --state ... --reason "trace 2026-05-27T14:07Z 中 click_at (353,235) 实际命中主页 cell"
 ```
 
-## 7. 成本优化：执行阶段非必要不看截图
+## 7. 工作流：用户意图驱动 + 路径上混合
 
-vision-mcp 的核心价值是把"边看边判断"的高成本视觉环节，**前置到建图阶段**，让执行阶段通过封装命令（`run_workflow` / `perform_action` / `kbd.<action>`）直接命中。**map 建好后还每步 snapshot，等于地图白建了。**
+vision-mcp 不应该把工作切成"先建图再执行"两段——这是死板的设计。真实工作流是 **agent 根据用户意图选入口，路径上按需混合建图与执行，已截的 snapshot 顺带记下副产品**。这套机制让 map 随实际使用自然完善，成本永远摊销在"已经需要看"的视觉投入上。
 
-### 7.1 两种工作模式
+### 7.1 用户意图决定入口
 
-| 模式 | 何时进入 | 视觉投入 | 主要工具 |
-|------|----------|----------|----------|
-| **建图模式** | map 不存在 / `state_match=null` / locator 持续失败 / 新页面/弹窗 | **高**：每个候选元素都 snapshot 看 | `snapshot`, `annotated`, `click-text`, `commit_state` |
-| **执行模式** | map 已建好，跑成熟 workflow | **低**：只在节点回报时看 | `run_workflow`, `perform_action`, `patch`（修偏差） |
+| 用户说什么 | 意图 | agent 进入 |
+| ---------- | ---- | ---------- |
+| 「打开 Apple Music 播一首张学友」/「在备忘录写一段简介」/「按内存排序看占用最高的进程」 | **任务驱动**（默认 ⭐） | §7.2 混合工作流 |
+| 「帮我建一份 X 应用的 vision-mcp 地图」/「探索一下这个 app 的所有功能」/「记录下这个页面有哪些可点击元素」 | **建图驱动** | §7.3 系统建图 |
 
-### 7.2 执行模式 snapshot 仅在 4 个时机
+**判别要点**：
+- 任务驱动有**明确终态**（"播了一首歌" / "写完了" / "看到了答案"）
+- 建图驱动是**开放式探索**（"看看有什么" / "建好图待后续用"）
 
-agent 跑 workflow / perform_action **默认不 snapshot**。仅在以下时机看一次截图：
+不确定时按任务驱动办；agent 在路径上发现"映射严重不足"应主动告诉用户"map 不够完整，是否切到建图模式？"
 
-1. **任务开始** — 一次 `detect_state` 确认 state（**不需要 snapshot 拿 PNG**，detect_state 是轻量版只返回 state_id）
-2. **关键决策节点** — workflow 步骤含"看后选择 N"的语义（如"播放列表里挑黑色游行" / "选第 N 行"）时才看
-3. **postcondition 失败 + L0–L3 repair 仍失败** — runtime 已经重试过，agent snapshot 一次看实际状态，决定是写 patch 还是停下问用户
-4. **工作流结束** — 完整 workflow 跑完 / 长链路最后一步，看一眼最终画面给用户报告（"已完成 + 截图"）
+### 7.2 任务驱动 ⭐：路径上按需混合
 
-### 7.3 反模式（成本浪费典型）
-
-❌ 跑 5 步 workflow，每步 `snapshot` 一次 — 5 次 base64 PNG 进 context，等于 map 没用
-❌ `click_at` 完成后总 `snapshot` 验证 — `perform_action` 内置 postcondition 已自动验证
-❌ 一次跑完前每个 transition 都 `detect_state` — map 内置 anchors 已经做 state 检测
-❌ 失败时立即 `snapshot` 看 — 先 `repair_minimal`；repair 失败才看图
-
-### 7.4 决策树
+> 这是 95% 时间的工作模式。**不预先判断 map 是否完整**，直接试着完成任务；遇到缺失就当场补。
 
 ```
-跑 workflow / perform_action
+用户：在备忘录新建一条写明天会议安排
    │
-   ├─ map 完整 & state_match 高？
-   │     → run_workflow / perform_action（不 snapshot）
-   │     │
-   │     ├─ 成功 → 工作流结束时 snapshot 一次（给用户的"已完成"截图）
-   │     └─ 失败
-   │           ├─ runtime 自动 repair_minimal L0-L3
-   │           │     └─ 修好 → 继续
-   │           └─ 修不好 → snapshot 看现状
-   │                 ├─ map 偏差（坐标错 / action_type 错）→ vision-mcp patch 写 patch → 重试
-   │                 └─ 真未知 state → 告诉用户
+   ▼
+1. detect_state 看入口 state（轻量，无 PNG）
+2. 试 run_workflow(write_intro) 或 perform_action 链
    │
-   └─ map 缺失 / 不全 → 切到建图模式（每步 snapshot 是合理的）
+   ├─ 任务全程命中 map → ✅ 完成，工作流结束 snapshot 一次给用户报告
+   │
+   ├─ 某步失败 / state_match=null
+   │     ├─ runtime auto repair L0-L3 → 修复 → 继续
+   │     └─ 修不好 → snapshot 看现状
+   │           │
+   │           ├─ 是 map 偏差 → `vision-mcp patch` 一行命令固化 → 重试
+   │           │
+   │           └─ 是 unknown state / 缺 control → 当场建图（§7.3 子集）
+   │                 ├─ commit_state 把这页写入 baseline
+   │                 ├─ 补该 state 的关键 control
+   │                 ├─ 顺带在已有 snapshot 上看其他元素（§7.4 副产品）
+   │                 └─ 继续往前走任务
+   │
+   ▼
+3. 任务完成时 map 比任务开始时更完整（被"使用"出来）
 ```
 
-### 7.5 长任务的封装习惯
+**关键约束**：
+- 探索范围**仅限任务必经路径**——不深挖未访问过的菜单/子页
+- patch / commit_state 都**当场**写入，下次跑同任务直接命中
+- snapshot 用最少次数（任务起点 1 次 + 失败诊断时 1 次 + 结束 1 次）
 
-如果 workflow 包含 8+ 步骤还得"看一下当前状态再决定"，说明缺**子工作流抽象**：
-- 把"看后判断"的判断点拆成独立小 workflow（每段 3–5 步）
-- 让 agent 在两个 workflow 之间做一次视觉判断，而不是在 workflow 内部
+### 7.3 建图驱动：系统覆盖（用户明确要求时）
+
+> 用户说"建图"/"探索"时进入。这是**一次性深度投入**，把基础打好。
+
+```
+用户：帮我建一份 Apple Music 的 vision-mcp 地图
+   │
+   ▼
+1. capsule attach + migrate
+2. BFS 探索每个可达 state：
+     for 每个入口 state：
+       snapshot + annotated 看完整画面
+       识别 sidebar / toolbar / 主内容 / 弹窗
+       决定哪些是共享 region（跨 state 复用）
+       commit_state（含 anchors + 关键 controls）
+       探索每个可点 control 的下一个 state
+       记录返回路径（Escape / cmd+[ / 后退按钮）
+3. 抽象重复模式为 collection / inherit_regions
+4. 写代表性 workflows（用户后续可能要用的）
+```
+
+详细流程见 §8 Builder/录制。
+
+### 7.4 探索副产品：snapshot 已经截了，顺带记下不浪费
+
+任务驱动遇到 unknown 时不可避免要 snapshot。**那张图里 candidates 列表本来就含了**整个页面的所有可见元素：
+
+✅ **应该做**：commit_state 时把这页**几个明显的关键 control 一起**写入 baseline（不只写任务必须那一个）  
+✅ **应该做**：发现 sidebar 还有别的导航项，顺带在 region.controls 加几个  
+✅ **应该做**：把这次 snapshot 看到的 anchors（OCR 关键字）写入 state.anchors 让下次 detect_state 更准
+
+❌ **不应该做**：为了"看其他元素"专门多 snapshot 几次 → 那就是建图驱动了，违背任务驱动的"必经路径"原则  
+❌ **不应该做**：单次任务硬塞 20 个 control 进 commit_state → 留给后续任务自然补充更健康
+
+**度的把握**：snapshot 已经在 context 里，每多记 1 个 control 几乎零成本；但每多调一次 snapshot 就是真成本。
+
+### 7.5 snapshot 仅在 4 个时机（任务驱动下）
+
+1. **任务起点** — 一次 `detect_state`（轻量，无 PNG）；不确定 state 时才用 `snapshot` 拿 PNG
+2. **关键决策节点** — workflow 含"看后选 N"语义（如"挑列表里第几项" / "选最大的进程"）
+3. **失败诊断** — `repair_minimal` 修不好时，看一眼现状决定是 patch / commit_state / 还是告诉用户
+4. **任务结束** — 给用户的"已完成"回报截图
+
+### 7.6 反模式（成本浪费典型）
+
+❌ 跑 5 步 workflow，每步 `snapshot` 一次 — 已 covered 步骤不需要看
+❌ `click_at` 完成后总 `snapshot` 验证 — `perform_action` 内置 postcondition 已验证
+❌ 任务驱动下 BFS 探索整个 app — 那是建图驱动；任务驱动只走必经路径
+❌ 探索 unknown state 时死盯一个 element，忽略 snapshot 里其他 candidates — 副产品白扔了
+❌ 失败时立即 `snapshot` 看 — 先 `repair_minimal`；repair 不行才看图
+
+### 7.7 长任务的封装习惯
+
+如果任务路径涉及 8+ 步骤还得"看一下当前状态再决定"，说明缺**子工作流抽象**：
+- 拆"看后判断"的判断点为独立小 workflow（每段 3–5 步）
+- agent 在两个小 workflow 之间做视觉判断，不在 workflow 内部
 - 同类元素用 `collection[N]` 索引而非视觉找
 
-### 7.6 跟"持续修正"的关系
+### 7.8 跟"持续修正"的关系
 
-§6 的持续修正不是"每次都看图修"，而是"**遇到失败时**才主动写 patch"。理想流程：
+§6 的持续修正机制是**任务驱动的副产品**——每次任务路径上发现的偏差都 `vision-mcp patch` 写入。理想累积曲线：
 
-- 第 1 次跑 workflow：失败 → snapshot → 发现 sidebar 坐标偏差 → `vision-mcp patch` → 重试成功 → 修复进 trusted patch
-- 第 2 次起：直接跑，不 snapshot，0 失败
+- 第 1 次跑任务：失败 → snapshot → 发现 sidebar 坐标偏差 → patch → 重试成功
+- 第 2 次起：直接跑，0 snapshot，0 失败
 
-每次发现的偏差成本（snapshot + patch）都**摊销到永久修复**上 —— 这才是"越用越便宜"的本质。
+每次"必须看"的视觉投入都**摊销到永久修复 + map 副产品**上 —— 这才是"越用越便宜"的本质。
 
 ## 8. Builder/录制流程
 

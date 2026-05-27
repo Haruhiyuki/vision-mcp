@@ -2,28 +2,41 @@
 
 > 本文档面向 MCP host 中的 agent（Claude / Cursor / Codex 等）。介绍如何用 vision-mcp 提供的 tools「像人一样使用桌面软件」。
 >
-> 核心理念：**两种模式 + 持续修正 + 稳定窗口**。
+> 核心理念：**用户意图驱动 + 路径上混合 + 持续修正 + 稳定窗口**。
 >
-> - **建图模式**（map 不存在/不完整）：视觉为主，**snapshot 是核心工具**。agent 看截图 → 视觉判断 → click 估计坐标 → snapshot 验证 → 把发现的 control / state 写进 baseline。
-> - **执行模式**（map 已建好）：**靠封装命令直接命中**。`run_workflow` / `perform_action` / `kbd.<action>` 跑预定义流程，**默认不 snapshot**——map 建好后还每步看图等于地图白建了。
-> - **持续修正**：执行中遇到 map 偏差 → `vision-mcp patch` 写一行命令固化修正 → 下次直接命中。每次发现的视觉成本都摊销到永久修复上。
-> - 目标窗口被迁到用户主屏的稳定位置（默认 display 工作区中心），**完整可见**；agent 用归一化坐标操作。**不创建虚拟显示器**（macOS / Windows public API 都不可靠）。
+> ### 不要预先分"建图 / 执行"两段
 >
-> **执行模式 4 个看图时机**（其它时机不 snapshot）：
-> 1. **任务开始**：一次 `detect_state` 确认入口 state（轻量版，无 PNG）
+> 真实工作流是 agent 按**用户意图**选入口，路径上**按需混合**：
+>
+> - **任务驱动 ⭐**（默认）：用户给具体任务（"播一首歌" / "新建备忘录"）→ agent 直接试着完成，途中遇到 map 缺失就当场补、遇到偏差就当场 patch。任务结束时 map 比开始时更完整。
+> - **建图驱动**：用户明确说"建图" / "探索这个 app" → agent 进入系统覆盖模式，BFS 探索所有可达 state、commit 完整 anchors + controls、写 transitions。
+>
+> ### 任务驱动下 4 个 snapshot 时机
+>
+> 1. **任务起点**：`detect_state`（轻量，无 PNG）；不确定时才 `snapshot` 拿 PNG
 > 2. **关键决策节点**：workflow 含"看后选 N"语义（如挑列表第几项）
-> 3. **postcondition 失败 + repair 修不好**：snapshot 看现状决定 patch 还是停下
-> 4. **工作流结束**：给用户报告时附一张"已完成"截图
+> 3. **失败诊断**：`repair_minimal` 修不好时看现状，决定 patch / commit_state / 告诉用户
+> 4. **任务结束**：给用户的"已完成"回报截图
 >
-> **建图时**：每个候选元素都视觉验证是合理的；优先级：**视觉看图 → AX 校准（如有）→ commit_state 写入 baseline → 失败 retry**。
+> ### 探索副产品原则
+>
+> snapshot 已经截了，那张图里 candidates 列表本来就包含整页元素：
+> - ✅ 顺带把页面几个明显 control 一起 `commit_state` 入 baseline（边际成本几乎为零）
+> - ✅ 顺带补 anchors（OCR 关键字）让下次 `detect_state` 更准
+> - ❌ 不要为"看更多元素"额外多 snapshot 几次（那是建图驱动）
+>
+> ### 持续修正 + 稳定窗口
+>
+> - 路径上遇 map 偏差 → `vision-mcp patch` 一行命令固化修正 → 下次直接命中
+> - 目标窗口固定主屏中央**完整可见**；不创建虚拟显示器
+>
+> 详见 `skills/vision-mcp/SKILL.md` §7「工作流：用户意图驱动 + 路径上混合」。
 
-详见 `skills/vision-mcp/SKILL.md` §7「成本优化：执行阶段非必要不看截图」。
+## 1. 工具总览（按工作流位置分组）
 
-## 1. 工具总览（按使用模式分组）
+### 1.1 任务执行 ⭐ — 任务驱动下大部分时间用这些
 
-### 1.1 执行模式 ⭐ — map 已建好，跑预定义 workflow
-
-> **默认路径**。先用这些；除非失败或 4 个看图时机，否则**不要 snapshot**。
+> 任务驱动模式下的**默认工具**。优先调这些；只在 4 个时机才 snapshot；遇 map 偏差直接 patch。
 
 | 工具 | 用途 | 返回 |
 | ---- | ---- | ---- |
@@ -37,9 +50,9 @@
 | **`vision-mcp patch`** | 实战发现偏差 → 写 patch 固化修正（持续修正机制） | patch file path |
 | **`vision-mcp patches`** | 列出 app 已应用的 patch | patch list |
 
-### 1.2 建图模式 — map 不存在/不全，每步看图
+### 1.2 探索 / 建图 — 任务路径上遇 unknown 时按需 + 建图驱动时常用
 
-> 仅在建图或失败诊断时用。
+> 任务驱动遇 unknown state 时按需调（探索副产品原则）；建图驱动下系统使用。
 
 | 工具 | 用途 | 返回 |
 | ---- | ---- | ---- |
@@ -75,39 +88,65 @@
 | `vision-mcp trace-viewer` | 生成 HTML 时间线，每个 action 含前后截图 | { out, events_with_screenshot } |
 | `vision-mcp snapshot-crop` / `snapshot-tile` | 只截 region / 切 N×M 网格；省 agent context | { ok, out } |
 
-## 2. 执行模式 ⭐（map 已建好，主路径）
+## 2. 任务驱动 ⭐（默认入口，路径上混合）
 
-> 这是你**95% 时间**的工作模式。map 建好后，agent 应该尽量像调 RPC 一样调 workflow，不要每步看图。
+> **95% 时间的工作模式**。用户给具体任务时进入这里。不预先判断 map 是否完整——**直接试，失败再补**。
+
+### 2.1 标准流程
 
 ```
-# 1. 任务开始（轻量）
-detect_state(app)                 // 确认入口 state，不消耗 PNG
-# 如果 state 对，直接进 2；如果错，先 navigate 到正确 state
+# 1. 任务起点：轻量确认 state（无 PNG 进 context）
+detect_state(app)
 
-# 2. 跑预定义 workflow（核心）
+# 2. 试 workflow / perform_action 链
 run_workflow(app, workflow_id, inputs)
-# 内部：每步 perform_action → postcondition 自动验证 → 失败自动 repair L0-L3
-
-# 3. 结束验证（仅在长链路 / 给用户报告时）
-snapshot(app)                     // 看一眼最终画面，发给用户
-
-# 失败处理（仅当 repair 也修不好）
-snapshot(app)                     // 看现状
-patch(app, --state ... --control ... --bbox-norm ...)   // 固化偏差
-run_workflow(...)                 // 重试（patch 已生效）
+   │
+   ├─ 全程命中 map → 成功，结束时 snapshot 一次给用户
+   │
+   ├─ 某步失败 / state_match=null
+   │     ├─ runtime 自动 repair_minimal L0–L3 → 修复 → 继续
+   │     └─ repair 修不好 → snapshot 看现状
+   │           │
+   │           ├─ 是 map 偏差（坐标错 / action_types 顺序错）
+   │           │     → vision-mcp patch --state ... --control ... --bbox-norm ...
+   │           │     → 重试，patch 已生效
+   │           │
+   │           └─ 是 unknown state / 缺 control
+   │                 → 当场建图（小切片）：
+   │                    commit_state(state_id, anchors)
+   │                    把这页**几个明显 control** 一起加入 region（副产品原则）
+   │                 → 继续往任务终态走
+   │
+   └─ 任务完成 → map 变得更完整（被使用出来）
 ```
 
-**反模式**（成本浪费）：
+### 2.2 探索副产品（关键）
+
+任务驱动下 snapshot 已经截了，**那张图里 candidates 列表本来就包含整页元素**：
+
+✅ **应该做**：commit_state 时把这页**几个明显 control** 一起入 baseline（不只写任务必须那一个）
+✅ **应该做**：发现 sidebar 还有别的导航项，顺带加进 region.controls
+✅ **应该做**：把 OCR 关键字写入 state.anchors 让下次 detect_state 更准
+❌ **不应该做**：为"看其他元素"专门多 snapshot 几次 → 那是建图驱动了
+❌ **不应该做**：单次任务硬塞 20 个 control 进 commit_state → 留给后续任务自然补充
+
+**度的把握**：snapshot 已经在 context，每多记 1 个 control 几乎零成本；但每多调一次 snapshot 就是真成本。
+
+### 2.3 反模式（成本浪费）
 
 ```
-❌ 跑 5 步 workflow，每步 snapshot 一次     # map 没用
-❌ click_at 后总 snapshot 验证            # perform_action 内置 postcondition 已验证
-❌ 每个 transition 前 detect_state         # workflow 内部已做 anchors 检测
+❌ 跑 5 步 workflow，每步 snapshot 一次       # 已 covered 步骤不需要看
+❌ click_at 后总 snapshot 验证              # perform_action 内置 postcondition 已验证
+❌ 任务驱动下 BFS 探索整个 app              # 那是建图驱动；任务驱动只走必经路径
+❌ 探索 unknown 时死盯一个 element 忽略其他   # 副产品白扔了
+❌ 失败时立即 snapshot                      # 先 repair_minimal；不行才看图
 ```
 
-具体说明见 `skills/vision-mcp/SKILL.md` §7。
+详见 `skills/vision-mcp/SKILL.md` §7。
 
-## 3. 建图模式（map 不存在/不全，仅在初次或扩展时用）
+## 3. 建图驱动（用户明确要求"建图"/"探索"时）
+
+> **一次性深度投入**。用户说"帮我建一份 X 应用的地图"/"探索这个 app" → 进入这里。系统覆盖所有可达 UI，奠定 baseline。
 
 ### 阶段 A：把目标 app 吸入 capsule
 
@@ -166,7 +205,7 @@ if new_snap.state_match.state_id == parent_state {
 }
 ```
 
-### 阶段 D：用成品 workflow 复用建好的 map（=切换到 §2 执行模式）
+### 阶段 D：建图完成 → 后续任务进 §2 任务驱动模式
 
 建图完成后，agent 不需要再视觉判断每一步：
 
@@ -179,9 +218,9 @@ events = vision_map.export_trace(app_id)
 
 ## 4. Apple Music 真实演示
 
-### 4.1 执行模式（map 已建好，~~ 推荐用法 ~~）
+### 4.1 任务驱动（map 已建好，主路径）
 
-> 这就是 §2 模式 —— 调一条 workflow 完成完整任务，不看图。
+> §2 模式的典型实例 —— 调一条 workflow 完成完整任务，0–1 次 snapshot。
 
 ```bash
 # 已经有 examples/apple-music/vision-mcp.yaml（建好的 map）
@@ -201,9 +240,9 @@ vision-mcp snapshot apple-music --out /tmp/final.png
 # 把 final.png 附到回报里："已开始播放，截图见附件"
 ```
 
-### 4.2 建图模式（map 不存在时；§3 的展开）
+### 4.2 建图驱动（首次建 apple-music map 时；§3 的实例）
 
-下面是当初**建** apple-music map 时的视觉 + AX 双轨流程。**这是一次性投入**——map 建好后用 §4.1。
+下面是当初**建** apple-music map 时的视觉 + AX 双轨流程。**这是一次性深度投入**——建好后日常任务用 §4.1。
 
 ```bash
 # 1. snapshot 看主页：返回 image_base64 + AX 候选
