@@ -2,35 +2,50 @@
 
 > 本文档面向 MCP host 中的 agent（Claude / Cursor / Codex 等）。介绍如何用 vision-mcp 提供的 tools「像人一样使用桌面软件」。
 >
-> 核心理念：**用户意图驱动 + 路径上混合 + 持续修正 + 稳定窗口**。
+> 核心理念：**用户意图驱动 + 路径上混合 + 视觉为主 + 持续修正 + 稳定窗口**。
 >
-> ### 不要预先分"建图 / 执行"两段
+> ### 1. 用户意图决定入口（不预先分"建图 / 执行"两段）
 >
-> 真实工作流是 agent 按**用户意图**选入口，路径上**按需混合**：
+> 真实工作流是 agent 按**用户意图**选入口，路径上**按需混合建图与执行**：
 >
-> - **任务驱动 ⭐**（默认）：用户给具体任务（"播一首歌" / "新建备忘录"）→ agent 直接试着完成，途中遇到 map 缺失就当场补、遇到偏差就当场 patch。任务结束时 map 比开始时更完整。
+> - **任务驱动 ⭐**（默认）：用户给具体任务（"播一首歌" / "新建备忘录"）→ agent 直接试着完成，途中遇 map 缺失就当场补、遇偏差就当场 patch。任务结束时 map 比开始时更完整。
 > - **建图驱动**：用户明确说"建图" / "探索这个 app" → agent 进入系统覆盖模式，BFS 探索所有可达 state、commit 完整 anchors + controls、写 transitions。
 >
-> ### 任务驱动下 4 个 snapshot 时机
+> ### 2. map 已覆盖任务路径时：靠封装命令直接命中
 >
-> 1. **任务起点**：`detect_state`（轻量，无 PNG）；不确定时才 `snapshot` 拿 PNG
+> **靠 `run_workflow` / `perform_action` / `kbd.<action>` 跑预定义流程，默认不 snapshot。** map 建好后还每步看图等于地图白建了。
+>
+> 任务驱动下仅在 4 个时机才 snapshot：
+> 1. **任务起点**：`detect_state`（轻量，无 PNG）；不确定 state 时才 `snapshot` 拿 PNG
 > 2. **关键决策节点**：workflow 含"看后选 N"语义（如挑列表第几项）
 > 3. **失败诊断**：`repair_minimal` 修不好时看现状，决定 patch / commit_state / 告诉用户
 > 4. **任务结束**：给用户的"已完成"回报截图
 >
-> ### 探索副产品原则
+> ### 3. 遇 unknown / 失败时：视觉为主路径
 >
-> snapshot 已经截了，那张图里 candidates 列表本来就包含整页元素：
+> **agent 看截图 → 视觉判断 → click 估计坐标 → snapshot 验证 → 把发现的 control / state 写进 baseline。** AX 是校准辅助，不是首选——很多桌面 app（游戏 / Electron / 自绘 UI）根本不暴露 AX，但截图永远存在。
+>
+> - 第一选择 — **视觉**：snapshot 返回的 PNG，agent 用自己的视觉能力识别元素、估坐标
+> - 第二选择 — **AX 校准**：原生 app 的 candidates 给精确 bbox，把视觉坐标校准
+> - 第三选择 — **失败重试**：click 没生效？snapshot 再看、调坐标重试
+> - macOS 高级：有 `AXPress` 的元素（菜单/工具栏/普通按钮）可用 `ax-press` 零鼠标干预；NSTableView cell / SwiftUI 自绘元素不响应 AXPress，仍用普通 click
+>
+> ### 4. 探索副产品：snapshot 已截了，顺带记不浪费
+>
+> snapshot 那张图里 candidates 列表本来就包含整页元素：
 > - ✅ 顺带把页面几个明显 control 一起 `commit_state` 入 baseline（边际成本几乎为零）
 > - ✅ 顺带补 anchors（OCR 关键字）让下次 `detect_state` 更准
 > - ❌ 不要为"看更多元素"额外多 snapshot 几次（那是建图驱动）
 >
-> ### 持续修正 + 稳定窗口
+> ### 5. 持续修正：偏差当场固化
 >
-> - 路径上遇 map 偏差 → `vision-mcp patch` 一行命令固化修正 → 下次直接命中
-> - 目标窗口固定主屏中央**完整可见**；不创建虚拟显示器
+> 执行中遇 map 偏差 → `vision-mcp patch --state ... --control ... --bbox-norm ...` 一行命令固化修正 → 下次直接命中。每次发现的视觉成本都摊销到永久修复上。
 >
-> 详见 `skills/vision-mcp/SKILL.md` §7「工作流：用户意图驱动 + 路径上混合」。
+> ### 6. 稳定窗口
+>
+> 目标窗口被迁到用户主屏的稳定位置（默认 display 工作区中心），**完整可见**；agent 用归一化坐标操作。**不创建虚拟显示器**（macOS / Windows public API 都不可靠）。
+>
+> 详见 `skills/vision-mcp/SKILL.md` §6「持续修正」+ §7「工作流：用户意图驱动 + 路径上混合」。
 
 ## 1. 工具总览（按工作流位置分组）
 
