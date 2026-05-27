@@ -94,8 +94,10 @@ function usage(): string {
     "       Agent 视角：一次拿截图 + AX 候选 + state match。等同于 MCP tool vision_map.snapshot",
     "  annotated <app_id> [--out frame.png] [--grid-step 0.1]",
     "       叠加网格 + 候选框 + 序号的截图：agent 看图后能说『click #7』而非估坐标",
-    "  click <app_id> --norm <x,y> [--button left|right|middle] [--count 1]",
-    "       直接 click 归一化坐标。等同于 MCP tool vision_map.click_at",
+    "  click <app_id> --norm <x,y> [--button left|right|middle] [--count 1] [--cursor virtual|physical]",
+    "       直接 click 归一化坐标。--cursor virtual 在点击后还原鼠标位置（不抢用户主屏光标）",
+    "  ax-press <app_id> --norm <x,y>",
+    "       用 AX-press 操作 norm 位置元素：完全不动鼠标，能点屏外/半屏外窗口（off-screen workspace 必备）",
     "  type <app_id> --text <s> [--clear-first]",
     "       直接 type 文本（支持中文）。等同于 MCP tool vision_map.type_text",
     "  key <app_id> --combo <combo>",
@@ -118,6 +120,14 @@ function usage(): string {
     "       把当前帧切成 N×M 网格，输出 N×M 张 thumb；agent 用来快速定位感兴趣区域",
     "  verify-map <app_id> --baseline <dir> [--update]",
     "       回归测试：跑 plan 后对比 baseline 截图，visual_diff 超阈值报警；--update 写新 baseline",
+    "  displays [--json]",
+    "       列出当前所有显示器 + 自动评分推荐 workspace（macOS 兼 Sidecar/AirPlay/虚拟驱动）",
+    "  capsule <app_id> [--display <id>] [--off-screen] [--restore-on-exit]",
+    "       一键 ensureDisplay + attach + migrate；--off-screen 无副屏时启用屏外工作区",
+    "  restore <app_id>",
+    "       把窗口迁回 attach 前的原 placement（off-screen workspace 也可用此命令唤回主屏）",
+    "  live-view <app_id> [--port 7575] [--interval-ms 500]",
+    "       在浏览器实时查看 capsule workspace（http://localhost:port）：含画面 + 接管按钮",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -181,6 +191,9 @@ async function main() {
       case "click":
         await cmdRawClick(args);
         return;
+      case "ax-press":
+        await cmdAxPress(args);
+        return;
       case "type":
         await cmdRawType(args);
         return;
@@ -213,6 +226,18 @@ async function main() {
         return;
       case "verify-map":
         await cmdVerifyMap(args);
+        return;
+      case "displays":
+        await cmdDisplays(args);
+        return;
+      case "capsule":
+        await cmdCapsule(args);
+        return;
+      case "restore":
+        await cmdRestore(args);
+        return;
+      case "live-view":
+        await cmdLiveView(args);
         return;
       case "serve":
         await cmdServe(args);
@@ -310,8 +335,14 @@ interface OpenAppOptions {
   approveAll?: boolean;
   fallbackMock?: boolean;
   platform?: "auto" | "windows" | "macos" | "mock";
-  /** 默认 true：在创建 runtime 之前，自动 ensureDisplay + attach + migrate。 */
+  /** 默认 true：在创建 runtime 之前，自动 attach window（拿 handle）。 */
   autoAttach?: boolean;
+  /**
+   * 是否在 autoAttach 时同步迁移窗口到 capsule workspace。
+   * 默认 false——只 attach 不 migrate。这样后续 CLI 命令不会反复把屏外窗口拉回主屏。
+   * 由 `vision-mcp capsule` 显式做迁移；`vision-mcp build` 内部传 true。
+   */
+  autoMigrate?: boolean;
 }
 
 async function openAppRuntime(
@@ -335,17 +366,20 @@ async function openAppRuntime(
   if (isDarwinAdapter(adapter)) {
     providers.accessibility = new DarwinAccessibilityProvider(adapter);
   }
-  // 默认 auto-attach：用户运行 `vision-mcp run apple-music --action ...` 时不应被迫
-  // 先手动 attach。如不需要，可显式传 autoAttach=false。
+  // 默认 auto-attach：拿 window handle 让后续 click/snapshot 等命令可用。
+  // 默认 autoMigrate=false：不重新移动窗口，避免反复把 off-screen workspace 拉回主屏。
+  // 由 `vision-mcp capsule` 显式 ensureDisplay + migrate；`vision-mcp build` 显式传 autoMigrate=true。
   if ((opts.autoAttach ?? true) && loaded.effective.visual_box.target_window) {
-    const display = await capsule.ensureDisplay({
-      geometry: loaded.effective.visual_box.display,
-      mode: loaded.effective.visual_box.mode,
-      fallbacks: loaded.effective.visual_box.fallbacks,
-    });
     try {
       await capsule.attach({ target: loaded.effective.visual_box.target_window });
-      await capsule.migrate(display.id);
+      if (opts.autoMigrate) {
+        const display = await capsule.ensureDisplay({
+          geometry: loaded.effective.visual_box.display,
+          mode: loaded.effective.visual_box.mode,
+          fallbacks: loaded.effective.visual_box.fallbacks,
+        });
+        await capsule.migrate(display.id);
+      }
     } catch (err) {
       console.error(
         `[vision-mcp] auto-attach 失败：${(err as Error).message}。可手动调用 'vision-mcp explore <app>' 检查窗口是否打开。`,
@@ -384,6 +418,7 @@ async function cmdBuild(args: ParsedArgs) {
   const { capsule, loaded } = await openAppRuntime(appId, args, {
     fallbackMock: true,
     platform: args.flags.platform === "mock" ? "mock" : "auto",
+    autoMigrate: true,
   });
   if (args.flags["mock-window"]) {
     const { MockPlatformAdapter } = await import("@vision-mcp/core");
@@ -817,13 +852,16 @@ async function openCapsuleForRaw(args: ParsedArgs) {
   const adapter = await createPlatformAdapter({ platform: (args.flags.platform as never) ?? "auto" });
   const { Capsule } = await import("@vision-mcp/core");
   const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
-  const display = await capsule.ensureDisplay({
-    geometry: loaded.effective.visual_box.display,
-    mode: loaded.effective.visual_box.mode,
-  });
+  // 默认仅 attach 不 migrate，避免反复把窗口拉回主屏。
+  // migrate 只在显式传 --migrate 时执行（snapshot/click 等通常不需要）。
   if (loaded.effective.visual_box.target_window) {
     await capsule.attach({ target: loaded.effective.visual_box.target_window });
-    if (!args.flags["no-migrate"]) {
+    if (args.flags.migrate === true) {
+      const display = await capsule.ensureDisplay({
+        geometry: loaded.effective.visual_box.display,
+        mode: loaded.effective.visual_box.mode,
+        fallbacks: loaded.effective.visual_box.fallbacks,
+      });
       await capsule.migrate(display.id);
     }
   }
@@ -924,16 +962,25 @@ async function cmdSnapshot(args: ParsedArgs) {
   // --out 写 PNG 总是生效（--no-image 只是不在 JSON 里返回 base64）
   const outPath = args.flags.out ? String(args.flags.out) : undefined;
   if (outPath) {
-    const cr = status.geometry?.client_rect_px;
-    if (cr) {
-      const { execFile } = await import("node:child_process");
-      const { promisify } = await import("node:util");
-      const execFileP = promisify(execFile);
-      await execFileP("/usr/sbin/screencapture", [
-        "-x", "-t", "png", "-R",
-        `${cr.x},${cr.y},${cr.width},${cr.height}`,
-        outPath,
-      ]).catch(() => {});
+    // 优先用 capsule.capture() 拿到的 RGBA frame，编码为 PNG（兼容 off-screen workspace）
+    // screencapture -R 在屏外失败，必须走 capture frame 路径
+    try {
+      const { encodeRgbaToPng } = await import("@vision-mcp/core");
+      const png = encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels);
+      await fs.writeFile(outPath, png);
+    } catch (err) {
+      // 兜底用 screencapture（屏内窗口）
+      const cr = status.geometry?.client_rect_px;
+      if (cr) {
+        const { execFile } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const execFileP = promisify(execFile);
+        await execFileP("/usr/sbin/screencapture", [
+          "-x", "-t", "png", "-R",
+          `${cr.x},${cr.y},${cr.width},${cr.height}`,
+          outPath,
+        ]).catch(() => {});
+      }
     }
   }
   console.log(JSON.stringify({
@@ -956,6 +1003,7 @@ async function cmdRawClick(args: ParsedArgs) {
   if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw new Error("--norm 形式：x,y（归一化 0-1）");
   const button = (args.flags.button as never) ?? "left";
   const count = Number(args.flags.count ?? 1);
+  const cursorMode = args.flags.cursor ? String(args.flags.cursor) : undefined;
   await capsule.raise().catch(() => {});
   const geom = await capsule.validateGeometry();
   const cr = geom.client_rect_px;
@@ -963,8 +1011,31 @@ async function cmdRawClick(args: ParsedArgs) {
     x: Math.round(cr.x + nx * cr.width),
     y: Math.round(cr.y + ny * cr.height),
   };
-  await adapter.click(pt, { button, click_count: count });
-  console.log(JSON.stringify({ ok: true, point: pt, point_norm: [nx, ny] }));
+  await adapter.click(pt, {
+    button,
+    click_count: count,
+    cursor_mode: cursorMode as never,
+    try_ax_press: cursorMode === "ax_press",
+  });
+  console.log(JSON.stringify({ ok: true, point: pt, point_norm: [nx, ny], cursor_mode: cursorMode ?? "physical" }));
+  await adapter.dispose?.();
+}
+
+async function cmdAxPress(args: ParsedArgs) {
+  const { adapter, capsule } = await openCapsuleForRaw(args);
+  const normStr = String(args.flags.norm ?? "");
+  const [nxs, nys] = normStr.split(",");
+  const nx = Number(nxs), ny = Number(nys);
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw new Error("--norm 形式：x,y（归一化 0-1）");
+  const status = await capsule.status();
+  const handle = status.attached_window?.native_handle;
+  if (!handle) throw new Error("ax-press 需要 attach 窗口");
+  if (adapter.platform !== "macos") throw new Error("ax-press 仅支持 macOS（其他平台用 click 即可）");
+  // 仅 DarwinHelperAdapter 有 axPressInWindow 方法
+  const a = adapter as unknown as { axPressInWindow?: (h: string, n: [number, number]) => Promise<unknown> };
+  if (!a.axPressInWindow) throw new Error("当前 macOS adapter 不支持 ax_press（需重新编译 swift helper）");
+  const r = await a.axPressInWindow(handle, [nx, ny]);
+  console.log(JSON.stringify(r, null, 2));
   await adapter.dispose?.();
 }
 
@@ -1756,6 +1827,222 @@ function askApprovalViaStdin(req: import("@vision-mcp/core").ApprovalRequest): P
       resolve("expired");
     }, 60_000);
   });
+}
+
+// ============== macOS workspace display 命令族 ==============
+
+async function cmdDisplays(args: ParsedArgs) {
+  const adapter = await createPlatformAdapter({
+    platform: "auto",
+    fallbackToMock: Boolean(args.flags["fallback-mock"]),
+    helperPath: process.env.VISION_MCP_NATIVE_HELPER,
+  });
+  const { describeDisplay, pickWorkspaceDisplay } = await import("@vision-mcp/core");
+  const displays = await adapter.listDisplays();
+  const pick = pickWorkspaceDisplay(displays, { minClient: { width: 1280, height: 800 } });
+  if (args.flags.json) {
+    console.log(JSON.stringify({ displays, recommended: pick.display?.id ?? null, scored: pick.scored }, null, 2));
+  } else {
+    console.log("Displays:");
+    for (const d of displays) {
+      const isRec = pick.display?.id === d.id ? "  ⇐ recommended workspace" : "";
+      console.log("  " + describeDisplay(d) + isRec);
+    }
+    if (!pick.display) {
+      console.log("\n⚠️  没有真实 workspace 显示器。可选方案：");
+      console.log("  1. 连接副屏 / 启用 Sidecar / AirPlay");
+      console.log("  2. 安装 BetterDisplay / Deskreen 等虚拟显示驱动");
+      console.log("  3. 用 `vision-mcp capsule <app> --off-screen` 启用屏外工作区（窗口移到主屏外，配合 live-view 查看）");
+    }
+  }
+  await adapter.dispose?.();
+}
+
+async function cmdCapsule(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("capsule 需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  const adapter = await createPlatformAdapter({
+    platform: "auto",
+    helperPath: process.env.VISION_MCP_NATIVE_HELPER,
+  });
+  const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
+  const requestedDisplay = args.flags.display ? String(args.flags.display) : undefined;
+  const offScreen = Boolean(args.flags["off-screen"]);
+
+  let display;
+  if (requestedDisplay) {
+    const all = await adapter.listDisplays();
+    const found = all.find((d) => d.id === requestedDisplay);
+    if (!found) throw new Error(`display ${requestedDisplay} 不存在。可用：${all.map((d) => d.id).join(", ")}`);
+    display = found;
+    (capsule as unknown as { display: typeof found }).display = found;
+  } else {
+    display = await capsule.ensureDisplay({
+      geometry: loaded.effective.visual_box.display,
+      mode: offScreen ? "off_screen" : loaded.effective.visual_box.mode,
+      fallbacks: loaded.effective.visual_box.fallbacks,
+      allowOffScreen: offScreen,
+    });
+  }
+  console.log(`[capsule] workspace display: ${display.id} (${display.kind ?? "?"}) bounds=${JSON.stringify(display.bounds)}`);
+
+  if (!loaded.effective.visual_box.target_window) {
+    throw new Error(`vision-mcp.yaml 缺少 visual_box.target_window，无法 attach`);
+  }
+  const win = await capsule.attach({ target: loaded.effective.visual_box.target_window });
+  console.log(`[capsule] attached window: pid=${win.process_id} title="${win.title}" bounds=${JSON.stringify(win.bounds)}`);
+
+  const moved = await capsule.migrate(display.id);
+  console.log(`[capsule] migrated to ${display.id}: bounds=${JSON.stringify(moved.bounds)}`);
+
+  console.log(JSON.stringify({
+    capsule_id: capsule.id,
+    display, window: moved,
+    note: offScreen
+      ? "窗口已移到主屏外。运行 `vision-mcp live-view " + appId + "` 在浏览器查看；`vision-mcp restore " + appId + "` 唤回主屏。"
+      : "窗口已迁入 workspace display。",
+  }, null, 2));
+  await adapter.dispose?.();
+}
+
+async function cmdRestore(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("restore 需要 <app_id>");
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  const adapter = await createPlatformAdapter({
+    platform: "auto",
+    helperPath: process.env.VISION_MCP_NATIVE_HELPER,
+  });
+  const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
+
+  if (!loaded.effective.visual_box.target_window) {
+    throw new Error(`vision-mcp.yaml 缺少 visual_box.target_window`);
+  }
+  const win = await capsule.attach({ target: loaded.effective.visual_box.target_window });
+  // 把窗口移回主屏中央（restore 默认行为：因为我们没有真实快照——用户可能上次没用 capsule 来 attach）
+  const all = await adapter.listDisplays();
+  const primary = all.find((d) => d.is_primary) ?? all[0];
+  const w = loaded.effective.visual_box.display.width_px;
+  const h = loaded.effective.visual_box.display.height_px;
+  const x = primary.work_area.x + Math.max(0, Math.floor((primary.work_area.width - w) / 2));
+  const y = primary.work_area.y + Math.max(0, Math.floor((primary.work_area.height - h) / 2));
+  const moved = await adapter.moveWindow(win.native_handle, { x, y, width: w, height: h });
+  console.log(`[restore] moved to primary ${primary.id} center: bounds=${JSON.stringify(moved.bounds)}`);
+  await adapter.dispose?.();
+}
+
+async function cmdLiveView(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("live-view 需要 <app_id>");
+  const port = Number(args.flags.port ?? 7575);
+  const intervalMs = Number(args.flags["interval-ms"] ?? 500);
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+  const adapter = await createPlatformAdapter({
+    platform: "auto",
+    helperPath: process.env.VISION_MCP_NATIVE_HELPER,
+  });
+  const capsule = new Capsule(loaded.effective.visual_box, adapter, loaded.effective.input_lease_policy);
+
+  if (!loaded.effective.visual_box.target_window) {
+    throw new Error(`vision-mcp.yaml 缺少 visual_box.target_window，live-view 需要先 attach`);
+  }
+  await capsule.attach({ target: loaded.effective.visual_box.target_window });
+
+  // 直接 capture window（works for both real workspace and off-screen）
+  const http = await import("node:http");
+  const server = http.createServer(async (req, res) => {
+    try {
+      if (req.url === "/" || req.url === "/index.html") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderLiveViewHtml(appId, port, intervalMs));
+        return;
+      }
+      if (req.url === "/frame.png") {
+        const frame = await capsule.capture({ source: "window" });
+        const png = await encodeFrameAsPng(frame);
+        res.writeHead(200, {
+          "Content-Type": "image/png",
+          "Cache-Control": "no-store",
+        });
+        res.end(png);
+        return;
+      }
+      if (req.url === "/takeover" && req.method === "POST") {
+        // 接管：把窗口迁回主屏，让用户能直接操作
+        const all = await adapter.listDisplays();
+        const primary = all.find((d) => d.is_primary) ?? all[0];
+        const w = loaded.effective.visual_box.display.width_px;
+        const h = loaded.effective.visual_box.display.height_px;
+        const x = primary.work_area.x + Math.max(0, Math.floor((primary.work_area.width - w) / 2));
+        const y = primary.work_area.y + Math.max(0, Math.floor((primary.work_area.height - h) / 2));
+        const wins = await adapter.listWindows(loaded.effective.visual_box.target_window);
+        if (wins[0]) {
+          await adapter.moveWindow(wins[0].native_handle, { x, y, width: w, height: h });
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, note: "已迁回主屏。capsule 已暂停。" }));
+        return;
+      }
+      res.writeHead(404).end();
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: (err as Error).message }));
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(port, () => resolve()));
+  console.log(`[live-view] http://localhost:${port}/  (Ctrl+C 退出)`);
+  console.log(`[live-view] 接管按钮: POST /takeover —— 会把窗口迁回主屏`);
+  // 保持进程
+  await new Promise(() => {});
+}
+
+function renderLiveViewHtml(appId: string, port: number, intervalMs: number): string {
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>vision-mcp live-view: ${appId}</title>
+<style>
+body { margin:0; font-family:-apple-system,system-ui,sans-serif; background:#111; color:#eee; }
+header { padding:8px 16px; background:#222; display:flex; align-items:center; gap:12px; }
+header h1 { font-size:14px; margin:0; }
+button { padding:6px 14px; background:#c64; color:#fff; border:none; border-radius:4px; cursor:pointer; }
+button:hover { background:#e83; }
+.frame { padding:16px; text-align:center; }
+img { max-width:100%; height:auto; border:1px solid #333; box-shadow:0 4px 20px rgba(0,0,0,0.5); }
+.meta { padding:4px 16px; font-size:12px; color:#888; }
+</style></head>
+<body>
+<header>
+  <h1>📺 vision-mcp live-view — ${appId}</h1>
+  <span class="meta">poll ${intervalMs}ms · port ${port}</span>
+  <button onclick="takeover()">⏸ 接管 (迁回主屏)</button>
+</header>
+<div class="frame"><img id="f" src="/frame.png"></div>
+<div class="meta" id="status">streaming…</div>
+<script>
+const img = document.getElementById('f');
+const status = document.getElementById('status');
+let n = 0;
+setInterval(() => {
+  img.src = '/frame.png?t=' + Date.now();
+  n++;
+  status.textContent = 'frame #' + n + ' @ ' + new Date().toLocaleTimeString();
+}, ${intervalMs});
+async function takeover() {
+  const r = await fetch('/takeover', { method: 'POST' });
+  const j = await r.json();
+  alert(j.note ?? j.error ?? 'done');
+}
+</script>
+</body></html>`;
+}
+
+/** 把 RGBA Frame 编码为 PNG（用 core 提供的 encodeRgbaToPng）。 */
+async function encodeFrameAsPng(frame: { width_px: number; height_px: number; pixels: Uint8Array }): Promise<Buffer> {
+  const { encodeRgbaToPng } = await import("@vision-mcp/core");
+  return encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels);
 }
 
 main().catch((err) => {

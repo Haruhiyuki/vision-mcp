@@ -1,0 +1,299 @@
+version: "0.1"
+app:
+  id: activity-monitor
+  name: 活动监视器
+  platform: macos
+  launch_hint: attach_after_launch
+  description: |
+    macOS 活动监视器（Activity Monitor）vision-map。
+    顶部 5 个标签（CPU / 内存 / 能耗 / 磁盘 / 网络），每个标签下面是一张可排序的进程表格。
+    本 map 覆盖：
+      - 切换 5 个标签
+      - 在内存标签下点列头切换排序
+      - 双击行打开进程详情窗
+    顶部"退出/强制退出"是 destructive 动作，不暴露给 agent。
+
+visual_box:
+  id: activity-monitor-capsule
+  mode: real_window
+  platform: macos
+  display:
+    width_px: 1280
+    height_px: 800
+    scale: 2.0
+    dpi_x: 144
+    dpi_y: 144
+    refresh_rate_hz: 60
+  target_window:
+    bundle_id: com.apple.ActivityMonitor
+    title_regex: ".+"
+  coordinate_space: normalized_client_rect
+  contract:
+    require_same_display: true
+    require_client_size_px: [1280, 800]
+    tolerate_client_size_delta_px: 16
+    require_unminimized: true
+    require_foreground_for_input: true
+    validate_before_each_action: true
+  fallbacks:
+    - existing_display
+
+regions:
+  - id: tabs
+    description: 顶部 5 个分类标签（CPU / 内存 / 能耗 / 磁盘 / 网络）
+    bbox_norm: [0.4, 0.0, 0.3, 0.06]
+    controls:
+      - id: cpu
+        role: button
+        label: CPU 标签
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.40, 0.015, 0.05, 0.04] }]
+        visual: { center_norm: [0.425, 0.035] }
+      - id: memory
+        role: button
+        label: 内存 标签
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.45, 0.015, 0.05, 0.04] }]
+        visual: { center_norm: [0.475, 0.035] }
+        notes: 实测点击点约 (0.475, 0.035)，OCR confidence 1.0
+      - id: energy
+        role: button
+        label: 能耗 标签
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.51, 0.015, 0.05, 0.04] }]
+        visual: { center_norm: [0.53, 0.035] }
+      - id: disk
+        role: button
+        label: 磁盘 标签
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.56, 0.015, 0.05, 0.04] }]
+        visual: { center_norm: [0.585, 0.035] }
+      - id: network
+        role: button
+        label: 网络 标签
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.61, 0.015, 0.05, 0.04] }]
+        visual: { center_norm: [0.635, 0.035] }
+
+  - id: column_headers
+    description: 表格列头（不同标签下列头集合不同；通用排序方式 = click 对应列头一次切换 asc/desc）
+    bbox_norm: [0.0, 0.06, 1.0, 0.05]
+    controls:
+      - id: mem_col
+        role: button
+        label: 列头"内存"（仅内存标签下出现）
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.30, 0.07, 0.08, 0.04] }]
+        visual: { center_norm: [0.34, 0.085] }
+        notes: 实测点击 (0.34, 0.085) 后 ▼ 移到内存列，进程按内存降序
+
+  - id: footer
+    description: 底部内存压力 / 物理内存 / App 内存 / 已使用交换等汇总信息
+    bbox_norm: [0.0, 0.89, 1.0, 0.11]
+    controls: []
+
+  - id: search_bar
+    description: 顶部右侧搜索框
+    bbox_norm: [0.82, 0.005, 0.17, 0.05]
+    controls:
+      - id: input
+        role: textbox
+        label: 搜索文本框
+        action_types: [type, click]
+        locator_priority: [{ type: bbox_norm, value: [0.83, 0.015, 0.15, 0.04] }]
+        visual: { center_norm: [0.91, 0.035] }
+
+states:
+  - id: tab_cpu
+    description: CPU 标签：列头含 % CPU / CPU时间 / 线程 / 闲置唤醒 / 种类 / % GPU / GPU时间 / PID / 用户 / 内存
+    kind: page
+    anchors:
+      - { type: window_title, pattern: ".+" }
+      - { type: ocr_text, text: "% CPU" }
+    match_policy: any_anchor
+    inherit_regions: [tabs, column_headers, footer, search_bar]
+    controls: []
+
+  - id: tab_memory
+    description: 内存标签：列头含 进程名称 / 内存 / 线程 / 端口 / PID / 用户 / 实际内存
+    kind: page
+    anchors:
+      - { type: window_title, pattern: ".+" }
+      - { type: ocr_text, text: "实际内存" }
+    match_policy: any_anchor
+    inherit_regions: [tabs, column_headers, footer, search_bar]
+    controls:
+      # 进程表第一行（Top1，仅排序后有意义）双击 → 详情窗
+      - id: row_top1
+        role: button
+        label: 进程表第一行
+        action_types: [click, double_click]
+        locator_priority:
+          - { type: ordinal_in_region, region_id: process_table, role_regex: "AXRow|AXCell", index: 0 }
+          - { type: bbox_norm, value: [0.02, 0.115, 0.95, 0.025] }
+        visual: { center_norm: [0.065, 0.121] }
+        notes: 实测：OCR 找 python3.10 命中 (0.065, 0.121)
+
+  - id: tab_energy
+    description: 能耗标签
+    kind: page
+    anchors:
+      - { type: window_title, pattern: ".+" }
+      - { type: ocr_text, text: "能耗影响" }
+    match_policy: any_anchor
+    inherit_regions: [tabs, column_headers, footer, search_bar]
+    controls: []
+
+  - id: tab_disk
+    description: 磁盘标签
+    kind: page
+    anchors:
+      - { type: window_title, pattern: ".+" }
+      - { type: ocr_text, text: "已读字节" }
+    match_policy: any_anchor
+    inherit_regions: [tabs, column_headers, footer, search_bar]
+    controls: []
+
+  - id: tab_network
+    description: 网络标签
+    kind: page
+    anchors:
+      - { type: window_title, pattern: ".+" }
+      - { type: ocr_text, text: "已发送字节" }
+    match_policy: any_anchor
+    inherit_regions: [tabs, column_headers, footer, search_bar]
+    controls: []
+
+  - id: process_inspector
+    description: 双击某个进程后弹出的详情窗，含可执行路径 / 父进程 / 内存指标
+    kind: dialog
+    anchors:
+      - { type: ocr_text, text: "虚拟内存大小" }
+      - { type: ocr_text, text: "实际内存大小" }
+    match_policy: all_anchors
+    inherit_regions: []
+    controls:
+      - id: close
+        role: button
+        label: 详情窗左上角红色关闭按钮
+        action_types: [click]
+        locator_priority: [{ type: bbox_norm, value: [0.75, 0.10, 0.02, 0.02] }]
+        visual: { center_norm: [0.755, 0.105] }
+
+# process_table region 定义在 states 内层引用 ordinal_in_region 需用；
+# 这里补一个外部 region 给 row_top1 locator 用
+# (vision-mcp 当前实现允许 ordinal_in_region.region_id 引用顶层 regions)
+
+transitions: []
+
+workflows:
+  - id: switch_to_cpu
+    description: 切到 CPU 标签
+    steps: [{ action_id: "tabs.cpu" }]
+    timeout_ms: 3000
+
+  - id: switch_to_memory
+    description: 切到内存标签
+    steps: [{ action_id: "tabs.memory" }]
+    timeout_ms: 3000
+
+  - id: switch_to_energy
+    description: 切到能耗标签
+    steps: [{ action_id: "tabs.energy" }]
+    timeout_ms: 3000
+
+  - id: switch_to_disk
+    description: 切到磁盘标签
+    steps: [{ action_id: "tabs.disk" }]
+    timeout_ms: 3000
+
+  - id: switch_to_network
+    description: 切到网络标签
+    steps: [{ action_id: "tabs.network" }]
+    timeout_ms: 3000
+
+  - id: sort_by_memory_desc
+    description: |
+      在任意标签 → 切到内存标签 → 点列头"内存"两次确保得到 ▼ 降序。
+      原因：macOS NSTableHeaderView 的列头 click 是 toggle，第一次点切到该列默认 asc(▲)，
+      第二次点变 desc(▼)。两次点保证从"非内存列降序"和"非内存列升序"两种初态都能到 ▼。
+      副作用：如果 caller 在已经 ▼ 状态下又调一次本 workflow，结果会变 ▲；
+      调用方若需 idempotent，请用 sort_by_memory_desc_idempotent（用 OCR 检查 ▲/▼ 后判断）。
+    steps:
+      - { action_id: "tabs.memory" }
+      - { action_id: "column_headers.mem_col" }
+      - { action_id: "column_headers.mem_col" }
+    timeout_ms: 5000
+
+  - id: find_top_memory_process
+    description: |
+      切到内存标签 → 按内存降序排 → 调用方截图 process_table region 后用 OCR 解析 Top N 行。
+      Top1 字段顺序：进程名称 | 内存 | 线程 | 端口 | PID | 用户 | 实际内存。
+    steps:
+      - { action_id: "tabs.memory" }
+      - { action_id: "column_headers.mem_col" }
+      - { action_id: "column_headers.mem_col" }
+    timeout_ms: 5000
+
+  - id: inspect_top1
+    description: |
+      切内存标签 → 按内存降序 → 双击第 1 行打开进程详情窗。
+      详情窗含：可执行路径 / 父进程 / 进程组 / % CPU / 实际内存大小 / 虚拟内存大小 /
+      共享内存大小 / 专用内存大小。
+    steps:
+      - { action_id: "tabs.memory" }
+      - { action_id: "column_headers.mem_col" }
+      - { action_id: "column_headers.mem_col" }
+      - { action_id: "tab_memory.row_top1:double_click" }
+    timeout_ms: 8000
+
+  - id: close_inspector
+    description: 关闭详情窗（点左上红圆点）
+    steps: [{ action_id: "process_inspector.close" }]
+    timeout_ms: 3000
+
+repair_policy:
+  max_auto_repair_level: 3
+  geometry:
+    tolerate_client_size_delta_px: 12
+    tolerate_origin_change: true
+    require_same_dpi: true
+  state:
+    min_anchor_score: 0.5
+    min_ocr_similarity: 0.85
+    min_visual_similarity: 0.75
+  control_relocation:
+    confidence_threshold: 0.85
+    max_bbox_shift_norm: 0.15
+  destructive_actions:
+    auto_repair_before_action: false
+    require_user_confirmation: true
+
+safety_policy:
+  forbidden_action_categories:
+    - payment
+    - destructive   # 详情窗底部"退出"/"强制退出"会 kill 进程：本 map 明确不暴露
+    - external_communication
+    - permission_change
+    - captcha
+  require_approval_for_risk_levels:
+    - requires_confirmation
+    - destructive
+  redaction_patterns: []
+  allow_cloud_vlm: false
+  audit_log_retention_days: 14
+
+input_lease_policy:
+  default_lease_ms: 10000
+  break_on_user_input: true
+  break_hotkey: Esc Esc
+  require_revalidate_after_break: true
+
+metadata:
+  created_at: 2026-05-27T00:00:00.000Z
+  created_by: vision-mcp-activity-monitor
+  tags: [activity-monitor, system, observability, macos]
+  notes: |
+    1. 顶部"⨂"按钮（norm 约 0.49, 0.035 旁边）会触发"强制退出"对话框，安全策略禁止。
+    2. 进程表是 AXOutline，可滚动；row_top1 用 ordinal_in_region + bbox_norm 双 locator 兜底。
+    3. 排序后 Top1 在某些状态可能因实时刷新瞬间换位，inspect_top1 默认 timeout 8s 留出余量。

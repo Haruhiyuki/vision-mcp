@@ -14,6 +14,25 @@ export interface RectPx {
   height: number;
 }
 
+/**
+ * Display 的"形态"——决定它能否作为 agent workspace：
+ *   - primary：主显示器，agent 操作会抢用户屏幕；不推荐做 workspace
+ *   - extended：物理副屏；agent 操作不抢主屏，推荐
+ *   - mirror：镜像主屏；与 primary 同内容，不推荐
+ *   - sidecar：macOS Sidecar（iPad 当副屏）；推荐
+ *   - airplay：AirPlay 到外部接收端；推荐
+ *   - virtual：第三方虚拟显示驱动（BetterDisplay/Deskreen/DummyDisplay 等）或 Windows IDD；强推荐
+ *   - unknown：检测不出来
+ */
+export type DisplayKind =
+  | "primary"
+  | "extended"
+  | "mirror"
+  | "sidecar"
+  | "airplay"
+  | "virtual"
+  | "unknown";
+
 export interface DisplayInfo {
   id: string;
   bounds: RectPx;
@@ -24,6 +43,22 @@ export interface DisplayInfo {
   refresh_rate_hz: number;
   is_primary: boolean;
   is_virtual: boolean;
+  /**
+   * Display 的形态分类。capsule 选 workspace 时按 virtual > sidecar/airplay > extended > primary 排序。
+   * 老的 native helper 可能不返回此字段，runtime 会按 is_virtual / is_primary 兜底推断。
+   */
+  kind?: DisplayKind;
+  /** 显示器友好名称（NSScreen.localizedName / Windows monitor friendly name）。 */
+  name?: string;
+  /** EDID vendor ID 或字符串（"VID"）；用于识别第三方虚拟驱动白名单。 */
+  vendor?: string;
+  /** EDID product ID 或字符串。 */
+  product?: string;
+  /**
+   * runtime 判定：该 display 适合作为 agent workspace（即不会抢用户主屏）。
+   * = kind ∈ {virtual, sidecar, airplay, extended} && work_area 足够大。
+   */
+  recommended_for_workspace?: boolean;
   /** 平台原始 handle（HMONITOR / CGDirectDisplayID 序列化字符串）。 */
   native_handle?: string;
 }
@@ -61,6 +96,16 @@ export interface InputClickOptions {
   button?: "left" | "right" | "middle";
   modifiers?: ReadonlyArray<"ctrl" | "shift" | "alt" | "meta">;
   click_count?: number;
+  /**
+   * macOS：鼠标光标策略。
+   *   - "physical"（默认）：先 mouseMoved 让 cursor 飞到目标，再 down/up。用户主屏光标会跳过去。
+   *   - "virtual"：down/up 完成后立即 warp 回原位，看起来"鼠标没动"。适合 off-screen workspace。
+   *   - "virtual_no_warp"：完全不动 cursor（cursor 在哪里就在哪里）。配合 try_ax_press 用。
+   *   - "ax_press"：完全不用鼠标，直接 AX 操作（需窗口元素有 AXPress action）；不行 fallback physical。
+   */
+  cursor_mode?: "physical" | "virtual" | "virtual_no_warp" | "ax_press";
+  /** macOS：在 CG event 之前先尝试 AX-press 该位置元素；如果元素支持 AXPress 则完全不动鼠标。 */
+  try_ax_press?: boolean;
 }
 
 export interface InputTypeOptions {
@@ -138,6 +183,11 @@ export interface EnsureDisplayOptions {
   geometry: GeometryContract;
   mode: VisualBox["mode"];
   fallbacks?: VisualBox["fallbacks"];
+  /**
+   * macOS 专用：若没有真实的副屏 / virtual / sidecar / airplay，是否合成一个屏外工作区。
+   * 默认 false——抛 CAPSULE_DISPLAY_MISSING 让 caller 显式决定。
+   */
+  allowOffScreen?: boolean;
 }
 
 export interface ICapsule {

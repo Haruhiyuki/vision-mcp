@@ -136,24 +136,53 @@ export class Capsule implements ICapsule {
 
   async ensureDisplay(opts: EnsureDisplayOptions): Promise<DisplayInfo> {
     let display: DisplayInfo;
+    // 若 fallback 列表包含 off_screen，把 allowOffScreen 直传给 platform 适配器
+    const offScreenAllowed =
+      opts.allowOffScreen === true ||
+      (opts.fallbacks ?? []).includes("off_screen" as never);
     try {
-      display = await this.platform.ensureVirtualDisplay(opts);
+      display = await this.platform.ensureVirtualDisplay({
+        ...opts,
+        allowOffScreen: offScreenAllowed,
+      });
     } catch (err) {
       if (!opts.fallbacks?.length) throw err;
+      // fallback：按声明的顺序尝试。
+      //   - real_window：window 当前所在 display 作为"伪 workspace"，
+      //     contract 仍按 real_window 校验（无 workspace 切换）。
+      //   - existing_display：从全部 displays 里挑能容纳的（任意，不挑 workspace 评分）。
+      //   - off_screen：已在 ensureVirtualDisplay 内部处理，不会落到这里。
       const displays = await this.platform.listDisplays();
-      const existing = displays.find(
-        (d) =>
-          d.work_area.width >= opts.geometry.width_px &&
-          d.work_area.height >= opts.geometry.height_px,
-      );
-      if (!existing) {
+      let chosen: DisplayInfo | null = null;
+      for (const mode of opts.fallbacks) {
+        if (mode === "real_window") {
+          const winDisplayId = this.window?.display_id;
+          chosen =
+            displays.find((d) => d.id === winDisplayId) ??
+            displays.find((d) => d.is_primary) ??
+            displays[0] ??
+            null;
+        } else if (mode === "off_screen") {
+          // 已经在上面 try 路径里失败，意味着 allowOffScreen 也没生效（极少见，例如 platform 不支持）
+          continue;
+        } else {
+          chosen =
+            displays.find(
+              (d) =>
+                d.work_area.width >= opts.geometry.width_px &&
+                d.work_area.height >= opts.geometry.height_px,
+            ) ?? null;
+        }
+        if (chosen) break;
+      }
+      if (!chosen) {
         throw new VisionMcpError(
           "CAPSULE_DISPLAY_MISSING",
           "无法创建虚拟显示器且未找到符合尺寸的现有显示器",
           { cause: err },
         );
       }
-      display = existing;
+      display = chosen;
     }
     this.display = display;
     return display;
@@ -185,8 +214,14 @@ export class Capsule implements ICapsule {
         "尚未 attach 窗口，无法迁移",
       );
     }
-    const displays = await this.platform.listDisplays();
-    const display = displays.find((d) => d.id === displayId);
+    // 优先用 ensureDisplay 已设置的 this.display（兼容合成的 off-screen workspace）
+    let display: DisplayInfo | undefined;
+    if (this.display && this.display.id === displayId) {
+      display = this.display;
+    } else {
+      const displays = await this.platform.listDisplays();
+      display = displays.find((d) => d.id === displayId);
+    }
     if (!display) {
       throw new VisionMcpError(
         "CAPSULE_DISPLAY_MISSING",
@@ -241,6 +276,14 @@ export class Capsule implements ICapsule {
     if (opts?.source === "display") {
       if (!this.display) {
         throw new VisionMcpError("CAPSULE_DISPLAY_MISSING", "尚未创建/绑定显示器");
+      }
+      // off-screen workspace 是合成的伪 display，没有真实 framebuffer。
+      // 此时落回 captureWindow 抓窗口本身（CGWindowList 即使窗口在屏外仍能渲染抓帧）。
+      if (this.display.id === "off-screen-workspace" || this.display.native_handle === "off-screen") {
+        if (!this.window) {
+          throw new VisionMcpError("WINDOW_NOT_FOUND", "off-screen workspace 需要先 attach window 才能 capture");
+        }
+        return this.platform.captureWindow(this.window.native_handle);
       }
       return this.platform.captureDisplay(this.display.id);
     }

@@ -19,6 +19,7 @@ import CoreGraphics
 import IOKit.graphics
 import Vision
 import CoreImage
+import ScreenCaptureKit
 
 // ---------- JSON helpers ----------
 
@@ -54,12 +55,66 @@ func toDict(_ any: Any?) -> [String: Any] {
 
 // ---------- Displays ----------
 
+/// 已知第三方虚拟显示器驱动 / 系统副屏的关键字。
+/// 通过 NSScreen.localizedName 或 IOKit EDID product name 匹配。
+let VIRTUAL_DISPLAY_KEYWORDS: [(String, String)] = [
+    ("betterdisplay", "virtual"),
+    ("deskreen",      "virtual"),
+    ("dummy",         "virtual"),
+    ("virtual",       "virtual"),
+    ("astro",         "virtual"),
+    ("duet",          "virtual"),
+    ("luna",          "virtual"),
+    ("superdisplay",  "virtual"),
+    ("aerodisplay",   "virtual"),
+    ("idisplay",      "virtual"),
+    ("twomon",        "virtual"),
+    ("airdisplay",    "virtual"),
+    ("sidecar",       "sidecar"),
+    ("ipad",          "sidecar"),
+    ("airplay",       "airplay"),
+]
+
+func inferKindFromName(_ name: String, isPrimary: Bool) -> String {
+    let n = name.lowercased()
+    for (k, v) in VIRTUAL_DISPLAY_KEYWORDS {
+        if n.contains(k) { return v }
+    }
+    return isPrimary ? "primary" : "extended"
+}
+
+/// 用 CGDisplay 拿真实的 CGDirectDisplayID（NSScreen.deviceDescription 里有 "NSScreenNumber"），
+/// 然后用 CGDisplayIsBuiltin / CGDisplayMirrorsDisplay 检测内置/镜像状态。
+func displayMetaForScreen(_ s: NSScreen) -> (cgID: CGDirectDisplayID, isBuiltin: Bool, isMirror: Bool, vendor: UInt32, product: UInt32) {
+    let key = NSDeviceDescriptionKey("NSScreenNumber")
+    let cgID = (s.deviceDescription[key] as? NSNumber)?.uint32Value ?? 0
+    let builtin = CGDisplayIsBuiltin(cgID) != 0
+    let mirror = CGDisplayMirrorsDisplay(cgID) != 0
+    let vendor = CGDisplayVendorNumber(cgID)
+    let product = CGDisplayModelNumber(cgID)
+    return (cgID, builtin, mirror, vendor, product)
+}
+
 func listDisplays() -> [[String: Any]] {
     let screens = NSScreen.screens
     var out: [[String: Any]] = []
+    let mainID: CGDirectDisplayID = CGMainDisplayID()
     for (i, s) in screens.enumerated() {
         let f = s.frame
         let v = s.visibleFrame
+        let meta = displayMetaForScreen(s)
+        let isPrimary = meta.cgID == mainID
+        let name = s.localizedName
+        var kind: String
+        if meta.isMirror {
+            kind = "mirror"
+        } else {
+            // localizedName 优先；否则 builtin + primary -> primary，builtin && !primary 罕见
+            kind = inferKindFromName(name, isPrimary: isPrimary)
+            if kind == "extended" && isPrimary { kind = "primary" }
+        }
+        let isVirtual = (kind == "virtual")
+        let recommended = (kind == "virtual" || kind == "sidecar" || kind == "airplay" || kind == "extended")
         out.append([
             "id": "display-\(i)",
             "bounds": ["x": Int(f.origin.x), "y": Int(f.origin.y), "width": Int(f.size.width), "height": Int(f.size.height)],
@@ -68,12 +123,27 @@ func listDisplays() -> [[String: Any]] {
             "dpi_x": Int(72 * s.backingScaleFactor),
             "dpi_y": Int(72 * s.backingScaleFactor),
             "refresh_rate_hz": 60,
-            "is_primary": i == 0,
-            "is_virtual": false,
-            "native_handle": "\(i)"
+            "is_primary": isPrimary,
+            "is_virtual": isVirtual,
+            "kind": kind,
+            "name": name,
+            "vendor": String(meta.vendor),
+            "product": String(meta.product),
+            "recommended_for_workspace": recommended,
+            "native_handle": "\(meta.cgID)"
         ])
     }
     return out
+}
+
+/// 把一个屏幕坐标点映射到所在 display 的 id（"display-N"）。
+/// 用于 input.click 等返回判断"是否真的在 workspace 内"。
+func displayIdContaining(point: CGPoint) -> String? {
+    let screens = NSScreen.screens
+    for (i, s) in screens.enumerated() {
+        if s.frame.contains(point) { return "display-\(i)" }
+    }
+    return nil
 }
 
 // ---------- Windows via AX + CGWindowList ----------
@@ -316,7 +386,28 @@ func dumpAXTree(handle: String, maxNodes: Int, maxDepth: Int) -> [[String: Any]]
 
 // ---------- Input ----------
 
-func postClick(point: CGPoint, button: String, count: Int) {
+/// 当前鼠标位置（屏幕坐标，CGEvent 顶左原点）
+func currentCursorPosition() -> CGPoint {
+    if let e = CGEvent(source: nil) {
+        return e.location
+    }
+    return NSEvent.mouseLocation
+}
+
+/// 把鼠标光标"瞬移"到指定位置，不发任何鼠标事件。
+/// 用于 virtual click 模式：点击后还原 cursor。
+func warpCursor(to point: CGPoint) {
+    CGWarpMouseCursorPosition(point)
+}
+
+/// click options：
+///   - physical（默认）：先 mouseMoved 让 cursor 飞过去，再 down/up。app 能看到 hover。
+///   - virtual：点击前保存 cursor 位置 → warp 到目标 → down/up → warp 回原位。
+///     这样主屏用户的物理光标在 click 完成后看起来"没动"。
+///     副作用：不会触发 mouseEntered/mouseExited 钩子。
+///   - virtual_no_warp：直接 down/up，cursor 不移动，不还原（最快但很多 hitTest 会按 cursor 当前位置找目标 → 容易错）。
+///     除非配合 AX-press 否则不推荐。
+func postClick(point: CGPoint, button: String, count: Int, mode: String = "physical") {
     let buttonNum: CGMouseButton
     let downType: CGEventType
     let upType: CGEventType
@@ -329,10 +420,16 @@ func postClick(point: CGPoint, button: String, count: Int) {
         buttonNum = .left; downType = .leftMouseDown; upType = .leftMouseUp
     }
     let src = CGEventSource(stateID: .hidSystemState)
-    // 先把鼠标移过去（部分应用要求 mouseMoved 才显示 hover）
-    if let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
-        move.post(tap: .cghidEventTap)
+
+    let savedCursor = currentCursorPosition()
+
+    if mode != "virtual_no_warp" {
+        // physical + virtual 都把 cursor 移到目标。区别只在 click 完成后是否还原。
+        if let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+            move.post(tap: .cghidEventTap)
+        }
     }
+
     for i in 0..<max(1, count) {
         if let down = CGEvent(mouseEventSource: src, mouseType: downType, mouseCursorPosition: point, mouseButton: buttonNum) {
             if i > 0 { down.setIntegerValueField(.mouseEventClickState, value: Int64(i + 1)) }
@@ -346,6 +443,76 @@ func postClick(point: CGPoint, button: String, count: Int) {
             Thread.sleep(forTimeInterval: 0.05)
         }
     }
+
+    if mode == "virtual" {
+        // 短延时让目标 app 完整处理完 click，再把 cursor 还原（避免应用读到中间状态）
+        Thread.sleep(forTimeInterval: 0.02)
+        warpCursor(to: savedCursor)
+    }
+}
+
+/// AX-press：完全不动鼠标，直接对屏幕坐标 (point) 下面的 AXUIElement 发 AXPress 动作。
+/// 找元素方式：先用 system-wide AX root + AXCopyElementAtPosition。
+/// 返回 true 表示成功，false 表示该位置没有可 AXPress 的元素或调用失败。
+@discardableResult
+func axPressAtPoint(_ point: CGPoint) -> Bool {
+    let sys = AXUIElementCreateSystemWide()
+    var hit: AXUIElement?
+    let err = AXUIElementCopyElementAtPosition(sys, Float(point.x), Float(point.y), &hit)
+    guard err == .success, let el = hit else { return false }
+    let actions: [String] = ["AXPress"]
+    for action in actions {
+        let r = AXUIElementPerformAction(el, action as CFString)
+        if r == .success { return true }
+    }
+    return false
+}
+
+/// 在 window 的 AX tree 中找包含 (winRelX, winRelY) 的最小可点击 element 并 AXPress。
+/// 关键能力：完全不依赖鼠标坐标，可对屏外/半屏外的窗口元素动作。
+/// 适用：off-screen workspace 中点击 sidebar/tab/button 等有 AXPress action 的 UI。
+@discardableResult
+func axPressInWindowAtNorm(handle: String, normX: Double, normY: Double) -> (ok: Bool, role: String?, name: String?) {
+    guard let (_, axWin, desc) = findWindow(handle: handle) else { return (false, nil, nil) }
+    // 把 norm 转成窗口内 screen 坐标
+    let targetX = desc.bounds.origin.x + normX * desc.bounds.width
+    let targetY = desc.bounds.origin.y + normY * desc.bounds.height
+    // BFS 遍历 AX tree 找包含 (targetX, targetY) 的最小 leaf
+    var best: (el: AXUIElement, area: CGFloat, role: String, name: String?) = (axWin, .greatestFiniteMagnitude, "AXWindow", nil)
+    var queue: [AXUIElement] = [axWin]
+    var visited = 0
+    let maxVisit = 800
+    while !queue.isEmpty, visited < maxVisit {
+        let el = queue.removeFirst()
+        visited += 1
+        let pos = axPointAttr(el, kAXPositionAttribute) ?? .zero
+        let size = axSizeAttr(el, kAXSizeAttribute) ?? .zero
+        let rect = CGRect(origin: pos, size: size)
+        if !rect.contains(CGPoint(x: targetX, y: targetY)) { continue }
+        let area = size.width * size.height
+        if area > 0 && area < best.area {
+            let role = axStringAttr(el, kAXRoleAttribute) ?? "?"
+            let name = axStringAttr(el, kAXTitleAttribute) ?? axStringAttr(el, kAXValueAttribute)
+            best = (el, area, role, name)
+        }
+        for k in axChildren(el).prefix(80) {
+            queue.append(k)
+        }
+    }
+    // 尝试一系列 action：AXPress / AXOpen / AXShowMenu / AXIncrement
+    let actions = ["AXPress", "AXOpen", "AXShowMenu"]
+    for a in actions {
+        if AXUIElementPerformAction(best.el, a as CFString) == .success {
+            return (true, best.role, best.name)
+        }
+    }
+    // 如果是 AXCell 之类没有自身 action，可以试父级或第一个 child
+    for k in axChildren(best.el).prefix(3) {
+        if AXUIElementPerformAction(k, "AXPress" as CFString) == .success {
+            return (true, best.role, best.name)
+        }
+    }
+    return (false, best.role, best.name)
 }
 
 func postScroll(point: CGPoint, dx: Int, dy: Int) {
@@ -487,10 +654,35 @@ func clearInput() {
 
 // ---------- Activate / move / restore ----------
 
+/// 把整个 app 拉到前台。⚠️ 会触发 macOS 把所有该 app 的窗口拉回主屏可见区域。
+/// 不要在 off-screen workspace 模式下用——会把屏外窗口拉回主屏。
 func activate(pid: pid_t) {
     if let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) {
         app.activate(options: [.activateAllWindows])
     }
+}
+
+/// 单独把某个窗口 raise 到 app 内 z-order 最上（AXRaise），不触发 NSWorkspace.activate。
+/// 用于 off-screen workspace 模式下让窗口接受 keyboard input 而不被拉回主屏。
+/// 但注意：要让 keystroke 真到达，app 进程本身也得是 frontmost；如果不是，需要 activate。
+/// 用 keepPosition=true 时，调用 activate 后立即把窗口 setPosition 恢复（防止 macOS 自动 reposition）。
+func raiseWindowOnly(handle: String, keepPosition: Bool) -> Bool {
+    guard let (app, axWin, _) = findWindow(handle: handle) else { return false }
+    let savedPos = axPointAttr(axWin, kAXPositionAttribute)
+    // 1. AXRaise：把窗口在 app z-order 提到最上
+    AXUIElementPerformAction(axWin, "AXRaise" as CFString)
+    // 2. 只有不 frontmost 时才 activate，且立刻 restore 位置
+    if !app.isActive {
+        app.activate(options: [])    // 不带 .activateAllWindows
+        usleep(60_000)
+        if keepPosition, let p = savedPos {
+            var pos = p
+            if let posVal = AXValueCreate(.cgPoint, &pos) {
+                AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, posVal)
+            }
+        }
+    }
+    return true
 }
 
 func moveWindow(handle: String, rect: CGRect) -> [String: Any]? {
@@ -510,6 +702,10 @@ func moveWindow(handle: String, rect: CGRect) -> [String: Any]? {
     activate(pid: pid)
     // 等一拍让窗口稳定
     usleep(120_000)
+    // activate 可能让 macOS 自动 reposition 窗口（特别是放屏外时）；再 setPosition 一次确保到位
+    AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, posVal)
+    AXUIElementSetAttributeValue(axWin, kAXSizeAttribute as CFString, sizeVal)
+    usleep(60_000)
     if let (_, _, desc) = findWindow(handle: handle) {
         return toWindowInfo(desc)
     }
@@ -652,6 +848,111 @@ func ocrRect(_ rect: CGRect, languages: [String]) -> [[String: Any]] {
     return out
 }
 
+/// 通过 pid + 标题找到对应 SCWindow 的 windowID（用于 capture.window）。
+/// 优先 SCKit（更准确，包含半屏外的窗口）；失败 fallback 到 CGWindowList。
+func findWindowID(pid: pid_t, title: String) -> CGWindowID? {
+    // 先尝试 SCKit
+    let sem = DispatchSemaphore(value: 0)
+    let result = SyncBox<CGWindowID?>(nil)
+    Task.detached(priority: .userInitiated) {
+        defer { sem.signal() }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            var best: (id: CGWindowID, area: CGFloat) = (0, 0)
+            for w in content.windows where w.owningApplication?.processID == pid {
+                let area = w.frame.width * w.frame.height
+                if area > best.area { best = (w.windowID, area) }
+            }
+            if best.id != 0 { result.set(best.id) }
+        } catch {
+            // ignore
+        }
+    }
+    if sem.wait(timeout: .now() + 2.0) == .success, let id = result.get() {
+        return id
+    }
+    // fallback: CGWindowList
+    let opts: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+    guard let info = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else { return nil }
+    var candidates: [(id: CGWindowID, layer: Int, area: Int)] = []
+    for w in info {
+        guard let p = (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, p == pid else { continue }
+        let layer = (w[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+        let name = (w[kCGWindowName as String] as? String) ?? ""
+        if !title.isEmpty && !name.isEmpty && name != title { continue }
+        guard let bounds = w[kCGWindowBounds as String] as? [String: Any] else { continue }
+        let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
+        let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
+        let id = (w[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
+        if id == 0 { continue }
+        candidates.append((id, layer, width * height))
+    }
+    candidates.sort { (a, b) in
+        if a.layer != b.layer { return a.layer < b.layer }
+        return a.area > b.area
+    }
+    return candidates.first?.id
+}
+
+/// 用 ScreenCaptureKit 直接抓某个窗口（按 windowID）。
+/// 关键能力：能抓到完全或部分屏外的窗口（screencapture -R 做不到）。
+/// SCScreenshotManager.captureImage 是 macOS 14+ async API；用 semaphore + Task.detached 同步等待。
+@available(macOS 14.0, *)
+func captureWindowByID(_ windowID: CGWindowID) -> Data? {
+    let sem = DispatchSemaphore(value: 0)
+    let result = SyncBox<Data?>(nil)
+    let errBox = SyncBox<String?>(nil)
+    Task.detached(priority: .userInitiated) {
+        defer { sem.signal() }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                errBox.set("window \(windowID) not in SCShareableContent (\(content.windows.count) windows visible)")
+                return
+            }
+            FileHandle.standardError.write(Data("[sckit] win \(windowID) frame=\(window.frame)\n".utf8))
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let config = SCStreamConfiguration()
+            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+            let w = window.frame.width > 0 ? window.frame.width : 1280
+            let h = window.frame.height > 0 ? window.frame.height : 800
+            config.width = max(1, Int(w * scale))
+            config.height = max(1, Int(h * scale))
+            config.pixelFormat = kCVPixelFormatType_32BGRA
+            config.scalesToFit = false
+            config.showsCursor = false
+            config.capturesAudio = false
+            // 关键：sourceRect 用 window 的 frame 直接定位，相对 SCContentFilter 的 contentRect
+            // 不指定 sourceRect 时 SCKit 会用 filter 的整个 contentRect（=window frame）
+            let img = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            FileHandle.standardError.write(Data("[sckit] captured \(img.width)x\(img.height)\n".utf8))
+            let rep = NSBitmapImageRep(cgImage: img)
+            result.set(rep.representation(using: .png, properties: [:]))
+        } catch {
+            errBox.set("SCScreenshotManager error: \(error)")
+        }
+    }
+    // 5 秒超时
+    let r = sem.wait(timeout: .now() + 5.0)
+    if r == .timedOut {
+        FileHandle.standardError.write(Data("[helper] SCKit capture timed out for windowID \(windowID)\n".utf8))
+        return nil
+    }
+    if let e = errBox.get() {
+        FileHandle.standardError.write(Data("[helper] \(e)\n".utf8))
+    }
+    return result.get()
+}
+
+/// 跨线程 thread-safe 单值容器（Swift Task / RunLoop 间传值）。
+final class SyncBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+    init(_ initial: T) { self.value = initial }
+    func get() -> T { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
+}
+
 /// 截图：macOS 15+ 弃用了 CGWindowListCreateImage，统一用 /usr/sbin/screencapture
 /// 子进程。子进程 fork 约 ~300ms。后续可切到 ScreenCaptureKit（需要 async/Stream API）。
 func capture(rect: CGRect) -> Data? {
@@ -719,6 +1020,13 @@ func handle(method: String, params: [String: Any]) -> Any {
               let pid = pid_t(handle.split(separator: ":").first.map(String.init) ?? "") else { return ["error": "bad handle"] }
         activate(pid: pid)
         return ["ok": true]
+    case "window.raise":
+        // 只 raise 单个窗口（用 AXRaise），不调 NSWorkspace.activate。
+        // off-screen workspace 模式必须用这个而非 window.activate。
+        guard let handle = params["handle"] as? String else { return ["error": "handle required"] }
+        let keep = (params["keep_position"] as? Bool) ?? true
+        let ok = raiseWindowOnly(handle: handle, keepPosition: keep)
+        return ["ok": ok]
     case "ax.dump":
         guard let handle = params["handle"] as? String else { return ["error": "handle required"] }
         let maxNodes = (params["max_nodes"] as? NSNumber)?.intValue ?? 500
@@ -791,8 +1099,25 @@ func handle(method: String, params: [String: Any]) -> Any {
               let y = (p["y"] as? NSNumber)?.doubleValue else { return ["error": "bad params"] }
         let btn = (params["button"] as? String) ?? "left"
         let cnt = (params["click_count"] as? NSNumber)?.intValue ?? 1
-        postClick(point: CGPoint(x: x, y: y), button: btn, count: cnt)
-        return ["ok": true]
+        let mode = (params["cursor_mode"] as? String) ?? "physical"
+        let tryAx = (params["try_ax_press"] as? Bool) ?? false
+        // 如果调用方要求 AX-press 优先 + 该位置下有可 AXPress 的元素，则完全不动鼠标
+        if tryAx && cnt == 1 && btn == "left" {
+            let ok = axPressAtPoint(CGPoint(x: x, y: y))
+            if ok {
+                return [
+                    "ok": true,
+                    "via": "ax_press",
+                    "display_id": (displayIdContaining(point: CGPoint(x: x, y: y)) as Any?) ?? NSNull(),
+                ]
+            }
+        }
+        postClick(point: CGPoint(x: x, y: y), button: btn, count: cnt, mode: mode)
+        return [
+            "ok": true,
+            "via": "cg_event_\(mode)",
+            "display_id": (displayIdContaining(point: CGPoint(x: x, y: y)) as Any?) ?? NSNull(),
+        ]
     case "input.type":
         guard let text = params["text"] as? String else { return ["error": "text required"] }
         let clearFirst = (params["clear_first"] as? Bool) ?? false
@@ -825,12 +1150,99 @@ func handle(method: String, params: [String: Any]) -> Any {
     case "input.subscribe":
         // 暂不支持
         return ["ok": true]
+    case "capture.window":
+        // 通过 window handle (pid:idx) 截图——优先 SCKit（能抓屏外），失败 fallback screencapture rect
+        guard let handle = params["handle"] as? String else { return ["error": "handle required"] }
+        guard let (_, _, desc) = findWindow(handle: handle) else { return ["error": "window not found"] }
+        let pid = pid_t(handle.split(separator: ":").first.map(String.init) ?? "") ?? 0
+        if let wid = findWindowID(pid: pid, title: desc.title),
+           let png = captureWindowByID(wid) {
+            // 用 NSBitmapImageRep 解析真实像素尺寸
+            if let rep = NSBitmapImageRep(data: png) {
+                return [
+                    "png_base64": png.base64EncodedString(),
+                    "width": rep.pixelsWide,
+                    "height": rep.pixelsHigh,
+                    "via": "sckit"
+                ]
+            }
+        }
+        // fallback
+        guard let png = capture(rect: desc.bounds) else { return ["error": "capture failed"] }
+        return [
+            "png_base64": png.base64EncodedString(),
+            "width": Int(desc.bounds.size.width),
+            "height": Int(desc.bounds.size.height),
+            "via": "screencapture"
+        ]
+    case "capture.display":
+        // 截某个 display 的整屏。screencapture -D <n+1>（screencapture 用 1-based display index）。
+        guard let displayId = params["display_id"] as? String else { return ["error": "display_id required"] }
+        guard let idx = Int(displayId.replacingOccurrences(of: "display-", with: "")) else { return ["error": "bad display_id"] }
+        let screens = NSScreen.screens
+        guard idx >= 0 && idx < screens.count else { return ["error": "display index out of range"] }
+        let s = screens[idx]
+        let f = s.frame
+        guard let png = capture(rect: f) else { return ["error": "capture failed"] }
+        return [
+            "png_base64": png.base64EncodedString(),
+            "width": Int(f.width),
+            "height": Int(f.height),
+            "display_id": displayId,
+            "scale": s.backingScaleFactor,
+        ]
+    case "window.move_to_display":
+        // 把窗口移到指定 display 的工作区中心，保持期望 client size。
+        guard let handle = params["handle"] as? String,
+              let displayId = params["display_id"] as? String else { return ["error": "handle + display_id required"] }
+        let expectedW = (params["client_width"] as? NSNumber)?.intValue ?? 1280
+        let expectedH = (params["client_height"] as? NSNumber)?.intValue ?? 800
+        guard let idx = Int(displayId.replacingOccurrences(of: "display-", with: "")) else { return ["error": "bad display_id"] }
+        let screens = NSScreen.screens
+        guard idx >= 0 && idx < screens.count else { return ["error": "display index out of range"] }
+        let wa = screens[idx].visibleFrame
+        let w = min(Double(expectedW), Double(wa.width))
+        let h = min(Double(expectedH), Double(wa.height))
+        let x = wa.origin.x + (Double(wa.width) - w) / 2.0
+        let y = wa.origin.y + (Double(wa.height) - h) / 2.0
+        let rect = CGRect(x: x, y: y, width: w, height: h)
+        if let info = moveWindow(handle: handle, rect: rect) {
+            return info
+        }
+        return ["error": "move failed"]
+    case "input.ax_press":
+        // 完全用 AX 操作，不依赖鼠标坐标。适合 off-screen workspace 中点击。
+        // 入参：handle + norm: [x, y]（窗口客户区归一化）
+        guard let handle = params["handle"] as? String,
+              let norm = params["norm"] as? [Double], norm.count == 2 else { return ["error": "handle + norm required"] }
+        let r = axPressInWindowAtNorm(handle: handle, normX: norm[0], normY: norm[1])
+        return [
+            "ok": r.ok,
+            "via": "ax_press",
+            "matched_role": (r.role as Any?) ?? NSNull(),
+            "matched_name": (r.name as Any?) ?? NSNull(),
+        ]
+    case "capsule.restore_cursor":
+        // 用于 virtual cursor 模式手动还原；通常不需要 caller 调用，postClick 内部已做。
+        if let p = params["point"] as? [String: Any],
+           let x = (p["x"] as? NSNumber)?.doubleValue,
+           let y = (p["y"] as? NSNumber)?.doubleValue {
+            warpCursor(to: CGPoint(x: x, y: y))
+            return ["ok": true]
+        }
+        return ["error": "point required"]
     default:
         return ["error": "unknown method: \(method)"]
     }
 }
 
 // ---------- main loop: line-by-line stdin ----------
+
+// 初始化 NSApplication：SCKit / 某些 CG API 需要 CGS 初始化（CGSetSessionState 等），
+// 否则会触发 "CGS_REQUIRE_INIT" assertion。
+// .accessory = 不在 Dock 显示，不抢前台焦点；适合 sidecar tool。
+let _nsApp = NSApplication.shared
+_nsApp.setActivationPolicy(.accessory)
 
 let stdin = FileHandle.standardInput
 var buffer = Data()

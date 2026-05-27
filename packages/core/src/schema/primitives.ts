@@ -36,6 +36,11 @@ export const CapsuleMode = z.enum([
   "real_window",
   "existing_display",
   "third_party_virtual_display",
+  /**
+   * macOS off-screen workspace：把窗口放在主屏可视范围之外的合成 workspace。
+   * 适合无副屏 + 不想抢主屏的场景。必须配合 Live View 看画面。
+   */
+  "off_screen",
 ]);
 export type CapsuleMode = z.infer<typeof CapsuleMode>;
 
