@@ -31,7 +31,7 @@
 | ---- | ---- | ---- |
 | vision-mcp schema | ✅ | `schema/vision-mcp.schema.json`、`schema/vision-mcp-patch.schema.json` |
 | MCP tools schema | ✅ | 每个工具的 `inputSchema` 在 `packages/server/src/tools.ts`；运行时通过 `listTools` 即可拿到 JSON schema |
-| repair policy 文档 | ✅ | `skill/references/repair-policy.md` |
+| repair policy 文档 | ✅ | `skills/vision-mcp/references/repair-policy.md` |
 | 错误码文档 | ✅ | `docs/errors.md` |
 | 用户权限说明 | ✅ | `docs/permissions.md` |
 | 部署/卸载说明 | ✅ | `docs/deployment.md` |

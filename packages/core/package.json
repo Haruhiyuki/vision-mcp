@@ -41,16 +41,44 @@
   },
   "files": [
     "dist",
-    "schema"
+    "schema",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -b",
     "clean": "rimraf dist *.tsbuildinfo",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
     "zod": "^3.24.1",
     "yaml": "^2.7.0",
     "zod-to-json-schema": "^3.24.1"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "vision",
+    "gui-automation",
+    "schema",
+    "capsule",
+    "locator"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/vision-mcp.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/your-org/vision-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/your-org/vision-mcp/issues"
+  },
+  "author": "Vision-MCP Authors",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

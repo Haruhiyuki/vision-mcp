@@ -132,6 +132,8 @@ function usage(): string {
     "       把窗口迁回主屏中央",
     "  live-view <app_id> [--port 7575] [--interval-ms 500]",
     "       在浏览器实时查看 capsule 画面（http://localhost:port）：含画面 + 接管按钮",
+    "  install-helper [--force] [--prefix <path>]",
+    "       检测并编译 native helper（macOS swiftc / Windows ps2exe）。安装后续运行的前置依赖",
     "  serve [--apps-root ./apps] [--trace-dir ./.traces] [--fallback-mock]",
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
@@ -248,6 +250,9 @@ async function main() {
         return;
       case "live-view":
         await cmdLiveView(args);
+        return;
+      case "install-helper":
+        await cmdInstallHelper(args);
         return;
       case "serve":
         await cmdServe(args);
@@ -2137,6 +2142,81 @@ async function takeover() {
 async function encodeFrameAsPng(frame: { width_px: number; height_px: number; pixels: Uint8Array }): Promise<Buffer> {
   const { encodeRgbaToPng } = await import("@vision-mcp/core");
   return encodeRgbaToPng(frame.width_px, frame.height_px, frame.pixels);
+}
+
+async function cmdInstallHelper(args: ParsedArgs) {
+  const force = Boolean(args.flags.force);
+  const platform = process.platform;
+  const prefix = args.flags.prefix
+    ? String(args.flags.prefix)
+    : path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "..", "native");
+
+  if (platform === "darwin") {
+    const helperPath = path.join(prefix, "macos", "vision-mcp-helper");
+    const srcPath = path.join(prefix, "macos", "src", "main.swift");
+    try {
+      await fs.access(helperPath);
+      if (!force) {
+        console.log(`✅ macOS helper 已存在：${helperPath}`);
+        console.log(`   重新编译请加 --force`);
+        return;
+      }
+    } catch {
+      // not exists, build
+    }
+    try {
+      await fs.access(srcPath);
+    } catch {
+      throw new Error(`找不到 swift 源码 ${srcPath}。请确保安装了完整源码（npm tarball 或 git clone）`);
+    }
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const exec = promisify(execFile);
+    console.log(`🔨 编译 macOS helper：swiftc -O -o ${helperPath} ${srcPath} ...`);
+    try {
+      await exec("swiftc", [
+        "-O",
+        "-o", helperPath,
+        srcPath,
+        "-framework", "AppKit",
+        "-framework", "ApplicationServices",
+        "-framework", "CoreGraphics",
+        "-framework", "IOKit",
+        "-framework", "Vision",
+        "-framework", "CoreImage",
+        "-framework", "ScreenCaptureKit",
+      ]);
+    } catch (err) {
+      throw new Error(
+        `swiftc 编译失败：${(err as Error).message}\n` +
+          `请确认已安装 Xcode Command Line Tools：\n` +
+          `   xcode-select --install\n` +
+          `如果 helper 已存在但版本旧，加 --force 重编。`,
+      );
+    }
+    console.log(`✅ 编译完成：${helperPath}`);
+    console.log(`📋 配置环境变量：`);
+    console.log(`   export VISION_MCP_NATIVE_HELPER="${helperPath}"`);
+    console.log(`\n⚠️  第一次运行时请到 系统设置 → 隐私 中授予：`);
+    console.log(`   1. 屏幕录制（Screen Recording）`);
+    console.log(`   2. 辅助功能（Accessibility）`);
+    return;
+  }
+
+  if (platform === "win32") {
+    const ps1Path = path.join(prefix, "windows", "src", "vision-mcp-helper.ps1");
+    const exePath = path.join(prefix, "windows", "vision-mcp-helper.exe");
+    console.log(`Windows helper:`);
+    console.log(`  PowerShell 脚本：${ps1Path}`);
+    console.log(`  可选编译为 .exe（推荐）:`);
+    console.log(`    Install-Module -Name ps2exe -Scope CurrentUser`);
+    console.log(`    Invoke-ps2exe "${ps1Path}" "${exePath}"`);
+    console.log(`\n配置环境变量（无 .exe 时直接指向 .ps1）：`);
+    console.log(`  $env:VISION_MCP_NATIVE_HELPER = "${exePath}"`);
+    return;
+  }
+
+  throw new Error(`install-helper 只支持 macOS / Windows，当前 platform=${platform}`);
 }
 
 main().catch((err) => {

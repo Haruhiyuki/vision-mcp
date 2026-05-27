@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "vision-mcp": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/packages/cli/dist/index.js",
+        "serve",
+        "--apps-root",
+        "${CLAUDE_PLUGIN_ROOT}/apps"
+      ],
+      "env": {
+        "VISION_MCP_NATIVE_HELPER": "${CLAUDE_PLUGIN_ROOT}/native/macos/vision-mcp-helper",
+        "VISION_MCP_PLATFORM": "auto",
+        "VISION_MCP_FALLBACK_MOCK": "0"
+      }
+    }
+  }
+}

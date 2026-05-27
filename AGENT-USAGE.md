@@ -230,7 +230,7 @@ vision-mcp patches <app>
 - `apple-music sidebar.search` 原 bbox 中心 `(0.04, 0.085)` 实际指向"主页"→ patch 改成 `(0.0, 0.05, 0.04, 0.025)` 命中真正搜索 cell
 - `notes editor.focus` 原 `action_types: [click, type]` 默认 click 反而丢焦点 → patch 改为 `[type, click]`
 
-详见 `skill/SKILL.md` §6。
+详见 `skills/vision-mcp/SKILL.md` §6。
 
 ### 4.8 Capsule 行为：稳定窗口 + 完整可见
 

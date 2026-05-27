@@ -1,7 +1,18 @@
 {
   "name": "@vision-mcp/cli",
   "version": "0.1.0",
-  "description": "Vision-MCP CLI：init / serve / build / run / repair / trace 命令",
+  "description": "Vision-MCP CLI：视觉为主的桌面 GUI 操作 MCP server + 工具集（init / serve / capsule / snapshot / patch / install-helper 等）",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "vision",
+    "gui-automation",
+    "desktop",
+    "macos",
+    "windows",
+    "agent",
+    "claude"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,16 +26,35 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -b",
     "clean": "rimraf dist *.tsbuildinfo",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
     "@vision-mcp/core": "0.1.0",
     "@vision-mcp/server": "0.1.0",
     "yaml": "^2.7.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/vision-mcp.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/your-org/vision-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/your-org/vision-mcp/issues"
+  },
+  "author": "Vision-MCP Authors",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -1,0 +1,23 @@
+{
+  "name": "vision-mcp",
+  "version": "0.1.0",
+  "description": "Vision-MCP: 视觉为主的桌面 GUI 操作 MCP server + Skill。Agent 可像人一样使用真实桌面应用（截图 → 视觉/AX 双轨识别 → click/type/key），支持持续修正 + 安全审批。",
+  "author": {
+    "name": "Vision-MCP Authors",
+    "url": "https://github.com/your-org/vision-mcp"
+  },
+  "homepage": "https://github.com/your-org/vision-mcp",
+  "repository": "https://github.com/your-org/vision-mcp",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "vision",
+    "gui-automation",
+    "desktop",
+    "macos",
+    "windows",
+    "agent",
+    "skill"
+  ],
+  "skills": "./skills"
+}

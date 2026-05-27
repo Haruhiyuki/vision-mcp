@@ -23,7 +23,7 @@ helper stdin/stdout：每行一个 JSON 消息
   <- {"event": "user_input", "data": {...}}   // 异步事件
 ```
 
-支持方法见 `skill/references/platform-windows.md` 与 `skill/references/platform-macos.md`。
+支持方法见 `skills/vision-mcp/references/platform-windows.md` 与 `skills/vision-mcp/references/platform-macos.md`。
 
 ### Windows
 

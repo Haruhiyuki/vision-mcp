@@ -14,7 +14,7 @@
 | ---- | ---- | ---- |
 | Schema + Map IO + Patch overlay | ✅ 完整 | 见 `packages/core/src/schema/*`、`map/*`、`schema/vision-mcp.schema.json` |
 | Capsule Manager / Geometry Contract / Input Lease | ✅ 完整 | `packages/core/src/capsule/*` |
-| Platform Adapter（mock + Windows + macOS JSON-RPC 桥） | ✅ 接口完整 | mock 适配器开箱可用；Windows/macOS helper 协议见 `skill/references/platform-*.md` |
+| Platform Adapter（mock + Windows + macOS JSON-RPC 桥） | ✅ 接口完整 | mock 适配器开箱可用；Windows/macOS helper 协议见 `skills/vision-mcp/references/platform-*.md` |
 | Locator（Accessibility / OCR / nearby_text / image_patch / bbox_norm / VLM） | ✅ 完整 | `packages/core/src/locator/*`，含 dHash 视觉相似度 |
 | Runtime Executor + postcondition + audit trace | ✅ 完整 | `packages/core/src/runtime/*` |
 | Repair Engine L0–L3 + patch overlay | ✅ 完整 | `packages/core/src/repair/*` |
@@ -24,7 +24,7 @@
 | **macOS SCKit window capture** | ✅ 完整 | `capture.window` 用 ScreenCaptureKit 抓窗口（2560×1600 retina） |
 | **macOS AX-press**（高级输入） | ✅ 完整 | `input.ax_press` BFS 找窗口元素发 AXPerformAction("AXPress")，对有 AXPress action 的元素零鼠标干预 |
 | **CLI 命令族** | ✅ 完整 | `vision-mcp displays / capsule / restore / live-view / ax-press` |
-| Skill 文档 / 示例 map / trace 样例 | ✅ 完整 | `skill/`、`examples/`、`apps/activity-monitor/` |
+| Skill 文档 / 示例 map / trace 样例 | ✅ 完整 | `skills/vision-mcp/`、`examples/`、`apps/activity-monitor/` |
 | 测试覆盖（schema, capsule, locator, runtime, repair, trace, workspace, MCP server e2e） | ✅ 43 个 vitest 测试全部通过 | `packages/*/tests/*.test.ts` |
 
 不在交付范围内（设计文档明示 P2 / 长期研究项）：
@@ -69,10 +69,14 @@ vision-mcp/
 ├── examples/
 │   ├── example-erp/          # Windows ERP 示例（含 patch + trace 样例）
 │   └── example-notes/        # macOS Real-window Capsule 示例
-├── skill/
-│   ├── SKILL.md              # agent 操作手册
-│   ├── references/           # schema、repair、safety、platform-* 参考
-│   └── assets/               # JSON Schema + 审阅模板
+├── .claude-plugin/
+│   └── plugin.json           # Claude Code Plugin manifest（一键安装入口）
+├── .mcp.json                 # Plugin 加载时使用的 MCP server 配置
+├── skills/
+│   └── vision-mcp/
+│       ├── SKILL.md          # agent 操作手册
+│       ├── references/       # schema、repair、safety、platform-* 参考
+│       └── assets/           # JSON Schema + 审阅模板
 ├── schema/                   # 自动导出的 JSON Schema
 ├── docs/                     # 部署、权限、错误码、验收清单
 ├── tsconfig.base.json / tsconfig.json
@@ -114,9 +118,9 @@ Claude Desktop / Cursor / 其他 MCP 客户端配置示例：
 - `docs/permissions.md`：Windows / macOS 权限清单与卸载流程。
 - `docs/errors.md`：错误码、recoverable 标志、默认处理建议。
 - `docs/acceptance.md`：对照设计文档 §17 的 MVP / Beta 验收对照表。
-- `skill/SKILL.md`：agent 操作手册（注册到 host 后 agent 第一时间应读这一份）。
-- `skill/references/platform-macos.md`：**macOS workspace 体系、virtual cursor、AX-press、SCKit 详解**。
-- `skill/references/safety.md`：高风险动作、prompt injection 防护、workspace 安全约束。
+- `skills/vision-mcp/SKILL.md`：agent 操作手册（注册到 host 后 agent 第一时间应读这一份）。
+- `skills/vision-mcp/references/platform-macos.md`：**macOS workspace 体系、virtual cursor、AX-press、SCKit 详解**。
+- `skills/vision-mcp/references/safety.md`：高风险动作、prompt injection 防护、workspace 安全约束。
 - `vision_mcp_windows_macos_design.md`：原始设计文档。
 
 ## 协议
