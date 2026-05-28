@@ -10,7 +10,7 @@
     {
       "name": "vision-mcp",
       "description": "Vision-MCP: 让 Agent 在使用桌面软件时沉淀指令化操作方法的框架（macOS + Windows）",
-      "source": ".",
+      "source": "./",
       "version": "0.1.1",
       "keywords": [
         "mcp",
