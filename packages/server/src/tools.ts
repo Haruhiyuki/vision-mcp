@@ -130,7 +130,7 @@ const ERROR_HINTS: Partial<Record<string, string>> = {
   LOCATOR_FAILED:
     "用 vision_map.snapshot 看现状 + vision_map.describe_action 看 locator 详情；偏差 → vision-mcp patch 修正",
   GEOMETRY_MISMATCH:
-    "用 vision_map.repair_minimal --max-level 3 自动修复；不行用 capsule.migrate_window 重排窗口",
+    "看 details.reason：(1) foreground_timeout → 目标窗口切不到前台。可能是 host (Claude Code 等) 持续 frontmost 触发了 macOS 焦点窃取保护。让用户手动 cmd+tab 一次，或 host 自身让出焦点后重试。这种情况 repair_minimal 救不了；(2) 尺寸/位置不对 → vision_map.repair_minimal --max-level 3 自动修；(3) 窗口被拖出 → capsule.migrate_window 重排",
   POSTCONDITION_FAILED:
     "用 vision_map.snapshot 看实际状态；可能 postcondition 太严 → patch；或动作真的没生效 → 重试",
   PRECONDITION_FAILED:

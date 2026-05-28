@@ -597,6 +597,24 @@ func activate(pid: pid_t) {
     }
 }
 
+/// activate + polling 直到目标 PID 变成 frontmostApplication，或 timeoutMs 超时。
+/// macOS 14+ Stage Manager / 焦点窃取保护下，NSWorkspace.activate 是异步的——立刻调用
+/// validate_geometry 会看到 is_foreground=false，给上层误判。这里同步等到 NSWorkspace
+/// 真切到目标 PID 才返回。
+/// 返回 (success, frontmost_pid_at_exit)。success=false 时上层应直接抛 error。
+func activateAndWaitForeground(pid: pid_t, timeoutMs: Int = 1500) -> (Bool, pid_t) {
+    activate(pid: pid)
+    let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+    var frontPid: pid_t = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+    if frontPid == pid { return (true, frontPid) }
+    while Date() < deadline {
+        usleep(60_000) // 60ms
+        frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        if frontPid == pid { return (true, frontPid) }
+    }
+    return (false, frontPid)
+}
+
 func moveWindow(handle: String, rect: CGRect) -> [String: Any]? {
     guard let (_, axWin, _) = findWindow(handle: handle) else { return nil }
     if axBoolAttr(axWin, kAXMinimizedAttribute) == true {
@@ -609,8 +627,8 @@ func moveWindow(handle: String, rect: CGRect) -> [String: Any]? {
     AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, posVal)
     AXUIElementSetAttributeValue(axWin, kAXSizeAttribute as CFString, sizeVal)
     let pid = pid_t(handle.split(separator: ":").first!)!
-    activate(pid: pid)
-    usleep(120_000)
+    // 同步等到 PID 真切前台。120ms 在 macOS 14+ 焦点窃取保护下经常不够。
+    _ = activateAndWaitForeground(pid: pid)
     if let (_, _, desc) = findWindow(handle: handle) {
         return toWindowInfo(desc)
     }
@@ -926,14 +944,29 @@ func handle(method: String, params: [String: Any]) -> Any {
     case "window.activate":
         guard let handle = params["handle"] as? String,
               let pid = pid_t(handle.split(separator: ":").first.map(String.init) ?? "") else { return ["error": "bad handle"] }
-        activate(pid: pid)
-        return ["ok": true]
+        let (ok, frontPid) = activateAndWaitForeground(pid: pid)
+        if ok { return ["ok": true, "frontmost_pid": Int(frontPid)] }
+        // 超时——给上层提供详细诊断让 agent 知道为什么 raise 失败
+        return [
+            "ok": false,
+            "reason": "foreground_timeout",
+            "target_pid": Int(pid),
+            "frontmost_pid": Int(frontPid),
+            "hint": "macOS 焦点窃取保护拦截了 activation；调用者可能持续 frontmost。让用户手动 cmd+tab 到目标 app，或在 Claude Code 中先点击桌面再重试"
+        ]
     case "window.raise":
         // window.raise 等价于 window.activate（保留向后兼容）
         guard let handle = params["handle"] as? String,
               let pid = pid_t(handle.split(separator: ":").first.map(String.init) ?? "") else { return ["error": "bad handle"] }
-        activate(pid: pid)
-        return ["ok": true]
+        let (ok, frontPid) = activateAndWaitForeground(pid: pid)
+        if ok { return ["ok": true, "frontmost_pid": Int(frontPid)] }
+        return [
+            "ok": false,
+            "reason": "foreground_timeout",
+            "target_pid": Int(pid),
+            "frontmost_pid": Int(frontPid),
+            "hint": "macOS 焦点窃取保护拦截了 activation；调用者可能持续 frontmost。让用户手动 cmd+tab 到目标 app，或在 Claude Code 中先点击桌面再重试"
+        ]
     case "ax.dump":
         guard let handle = params["handle"] as? String else { return ["error": "handle required"] }
         let maxNodes = (params["max_nodes"] as? NSNumber)?.intValue ?? 500

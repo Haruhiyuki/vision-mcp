@@ -213,8 +213,23 @@ export class DarwinHelperAdapter implements PlatformAdapter {
   }
 
   async raiseWindow(handle: string): Promise<void> {
-    await this.bridge.request("window.activate", { handle });
-    await sleep(180);
+    // helper 内部 polling 等到目标 PID 真切前台或 timeout（1500ms）。
+    // 之前 sleep(180) 在 macOS 14+ Stage Manager / 焦点窃取保护下经常不够，
+    // 导致 capsule.raise 报 ok=true 但紧接 validate_geometry 看到 is_foreground=false。
+    const r = await this.bridge.request<{
+      ok: boolean;
+      reason?: string;
+      target_pid?: number;
+      frontmost_pid?: number;
+      hint?: string;
+    }>("window.activate", { handle });
+    if (!r.ok) {
+      throw new VisionMcpError(
+        "GEOMETRY_MISMATCH",
+        `raise 失败: ${r.reason ?? "unknown"}（target_pid=${r.target_pid}, frontmost_pid=${r.frontmost_pid}）。${r.hint ?? ""}`,
+        { details: { reason: r.reason, target_pid: r.target_pid, frontmost_pid: r.frontmost_pid } },
+      );
+    }
   }
 
   /**
