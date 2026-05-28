@@ -97,6 +97,7 @@ export class RuntimeExecutor {
   async performAction(
     actionId: string,
     params: ActionParams = {},
+    overrides: { postcondition?: import("../schema/index.js").Condition } = {},
   ): Promise<ActionResult> {
     const resolved = findAction(this.opts.map, actionId);
     const { state, control, effectiveControl, actionType } = resolved;
@@ -356,43 +357,77 @@ export class RuntimeExecutor {
       }
 
       // 7. 等待 postcondition
-      if (ctx.control.postcondition) {
-        // P1：判断 postcondition 是否含 ocr_should_appear / text_should_appear；
-        // 若是且 OCR provider 可用，wait 的每次 refresh 主动 OCR 一次（不只是 analyze）。
-        const needsOcr = conditionNeedsOcr(ctx.control.postcondition);
+      // step-level postcondition（runWorkflow 透传）覆盖 control.postcondition——让
+      // harvest_session 沉淀出的 workflow 能加 state_should_be 检查而不污染 control。
+      const effectivePostcondition = overrides.postcondition ?? ctx.control.postcondition;
+      if (effectivePostcondition) {
+        // refresh 按需收集："信号 → AX → OCR → 视觉" 优先级链。
+        // 用户配 window_title_should_match 只付信号成本（~5ms）；
+        // 配 text_should_appear 才付 OCR；配 state_should_be 才全收集（最贵）。
         const result = await waitForCondition(
-          ctx.control.postcondition,
-          async () => {
-            const frame = await this.opts.capsule.capture();
-            const ins = await this.resolver.analyze(frame);
+          effectivePostcondition,
+          async (reqs) => {
             const st = await this.opts.capsule.status();
-            if (st.attached_window) {
-              ins.window_title = st.attached_window.title;
-              await this.resolver.setAccessibility(ins, st.attached_window.native_handle);
-            }
-            // 关键 P1：postcondition 需要 OCR 时主动调 OCR provider 填充 tokens。
-            if (needsOcr && this.opts.providers.ocr) {
-              const maybeOcr = this.opts.providers.ocr as {
-                recognizeRect?: (rect: import("../capsule/types.js").RectPx) => Promise<import("../locator/types.js").OcrToken[]>;
-                recognize: (f: typeof frame) => Promise<import("../locator/types.js").OcrToken[]>;
+            const windowTitle = st.attached_window?.title;
+            const emptyFrame = {
+              width_px: 0,
+              height_px: 0,
+              pixels: new Uint8Array(0),
+              captured_at: new Date().toISOString(),
+              source: "window" as const,
+              client_rect_in_frame: { x: 0, y: 0, width: 0, height: 0 },
+            };
+            // 默认空 insights — 不需要 frame 的 condition（window_title_should_match 等）
+            // 直接走这条短路，整轮 ~5ms 不付任何视觉/AX/OCR 成本。
+            let ins: import("../locator/types.js").FrameInsights = {
+              frame: emptyFrame,
+              ocr: [],
+              accessibility: [],
+              visual_hash: undefined,
+              window_title: windowTitle,
+            };
+            const needsFrame = reqs.needsVisualHash || reqs.needsOcr || reqs.needsAx || reqs.needsState;
+            if (needsFrame) {
+              const frame = await this.opts.capsule.capture();
+              ins = {
+                frame,
+                ocr: [],
+                accessibility: [],
+                visual_hash: undefined,
+                window_title: windowTitle,
               };
-              try {
-                if (maybeOcr.recognizeRect && st.geometry?.client_rect_px) {
-                  ins.ocr = await maybeOcr.recognizeRect(st.geometry.client_rect_px);
-                } else {
-                  ins.ocr = await maybeOcr.recognize(frame);
-                }
-              } catch {
-                // 失败保持原 ocr=[]
+              if (reqs.needsVisualHash || reqs.needsState) {
+                ins.visual_hash = await this.hasher.hash(frame);
+              }
+              // OCR 按需 — 优先 recognizeRect（限定客户区，比全图快 5-10x）
+              if ((reqs.needsOcr || reqs.needsState) && this.opts.providers.ocr) {
+                const maybeOcr = this.opts.providers.ocr as {
+                  recognizeRect?: (rect: import("../capsule/types.js").RectPx) => Promise<import("../locator/types.js").OcrToken[]>;
+                  recognize: (f: typeof frame) => Promise<import("../locator/types.js").OcrToken[]>;
+                };
+                try {
+                  if (maybeOcr.recognizeRect && st.geometry?.client_rect_px) {
+                    ins.ocr = await maybeOcr.recognizeRect(st.geometry.client_rect_px);
+                  } else {
+                    ins.ocr = await maybeOcr.recognize(frame);
+                  }
+                } catch { /* OCR best-effort */ }
+              }
+              if ((reqs.needsAx || reqs.needsState) && st.attached_window) {
+                await this.resolver.setAccessibility(ins, st.attached_window.native_handle);
               }
             }
-            const detected2 = this.resolver.detectState(this.opts.map, ins);
-            stateAfter = detected2;
+            // state_should_be / modal_should_close 走 detect_state（综合判定）
+            let detected2: StateMatch | null = null;
+            if (reqs.needsState) {
+              detected2 = this.resolver.detectState(this.opts.map, ins);
+              stateAfter = detected2;
+            }
             return {
               map: this.opts.map,
               state_match: detected2,
               insights: ins,
-              window_title: st.attached_window?.title,
+              window_title: windowTitle,
               recent_controls: this.recentControls,
               baseline_visual_hash: beforeHash,
             };
@@ -488,7 +523,9 @@ export class RuntimeExecutor {
       const attempts = step.retry?.max_attempts ?? 1;
       for (let attempt = 0; attempt < attempts; attempt++) {
         try {
-          stepResult = await this.performAction(step.action_id, params);
+          stepResult = await this.performAction(step.action_id, params, {
+            postcondition: step.postcondition,
+          });
           if (stepResult.succeeded) break;
           lastErr = new Error(stepResult.message ?? "action failed");
         } catch (err) {
@@ -605,18 +642,8 @@ export class RuntimeExecutor {
   }
 }
 
-function conditionNeedsOcr(cond: import("../schema/index.js").Condition): boolean {
-  const check = (c: import("../schema/index.js").ConditionAtom): boolean =>
-    c.type === "ocr_should_appear" ||
-    c.type === "text_should_appear" ||
-    c.type === "text_should_disappear";
-  if ("type" in cond) return check(cond as import("../schema/index.js").ConditionAtom);
-  const g = cond as import("../schema/index.js").ConditionGroup;
-  if (g.all?.some(check)) return true;
-  if (g.any?.some(check)) return true;
-  if (g.not && check(g.not)) return true;
-  return false;
-}
+// conditionNeedsOcr() 已被 postcondition.ts 的 getConditionDataRequirements 取代
+// （按需收集"信号→AX→OCR→视觉"全套，不只 OCR）。保留函数声明已删除。
 
 function resolveParams(
   params: Record<string, unknown>,

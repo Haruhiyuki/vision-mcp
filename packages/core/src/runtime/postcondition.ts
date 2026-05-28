@@ -76,10 +76,12 @@ async function evaluateAtom(
       };
     }
     case "text_should_disappear": {
+      // 用 atom.min_confidence 而不是写死 0.6 — schema 暴露了字段就应该尊重用户的阈值
+      // 默认 0.6 是 disappear 的合理保守值：低置信度的残留也算"还在"，更严谨
       const r = matchText(ctx.insights.ocr, {
         text: atom.text,
         match: "contains",
-        min_confidence: 0.6,
+        min_confidence: (atom as { min_confidence?: number }).min_confidence ?? 0.6,
       });
       return {
         ok: !r,
@@ -186,15 +188,94 @@ function hamming(a: string, b: string): number {
 }
 
 /**
- * 等待某个 postcondition 在 timeout 内变为 true，每 polling_ms 重新生成 insights。
+ * Condition 评估需要的数据类型集合。
+ *
+ * 按"信号 → AX/UIA → OCR → 视觉"成本递增排序：
+ *   needsWindowTitle  ~5ms   信号（window.get RPC）
+ *   needsVisualHash   ~60ms  capture frame + dHash
+ *   needsAx           ~200ms（CEF/Chrome 可能 1s+）
+ *   needsOcr          ~200ms（限定 client_rect 较快）
+ *   needsState        最贵   capture + OCR + AX + visual_hash 综合
+ *
+ * waitForCondition 用这个决定 refresh 收集什么——能用信号验出来就不付视觉成本。
+ */
+export interface ConditionDataKinds {
+  needsWindowTitle: boolean;
+  needsVisualHash: boolean;
+  needsOcr: boolean;
+  needsAx: boolean;
+  needsState: boolean;
+  needsControls: boolean;
+}
+
+/**
+ * 推断 condition 整棵树需要的数据类型。`any` / `all` / `not` 都展开看每个 atom。
+ *
+ * 关键：state_should_be / modal_should_close 这种基于 detect_state 的 condition 触发全收集
+ * （AX + OCR + visual_hash），因为 detect_state 是综合判定。
+ */
+export function getConditionDataRequirements(cond: Condition): ConditionDataKinds {
+  const reqs: ConditionDataKinds = {
+    needsWindowTitle: false,
+    needsVisualHash: false,
+    needsOcr: false,
+    needsAx: false,
+    needsState: false,
+    needsControls: false,
+  };
+  function visit(c: Condition) {
+    if (isGroup(c)) {
+      if (c.all) c.all.forEach(visit);
+      if (c.any) c.any.forEach(visit);
+      if (c.not) visit(c.not);
+      return;
+    }
+    switch (c.type) {
+      case "window_title_should_match":
+        reqs.needsWindowTitle = true; break;
+      case "text_should_appear":
+      case "text_should_disappear":
+      case "ocr_should_appear":
+        reqs.needsOcr = true; break;
+      case "visual_similar_should_be":
+      case "visual_diff_should_be":
+        reqs.needsVisualHash = true; break;
+      case "state_should_be":
+      case "modal_should_close":
+        reqs.needsState = true; break;
+      case "control_should_exist":
+      case "control_should_not_exist":
+        reqs.needsControls = true; break;
+    }
+  }
+  visit(cond);
+  // detect_state 需要综合 OCR + AX + visual_hash
+  if (reqs.needsState) {
+    reqs.needsAx = true;
+    reqs.needsOcr = true;
+    reqs.needsVisualHash = true;
+  }
+  return reqs;
+}
+
+/**
+ * 等待某个 postcondition 在 timeout 内变为 true。
+ *
+ * refresh 函数接收 ConditionDataKinds 参数——按需收集数据，不必每轮都做全套 capture+AX+OCR。
+ * 比如用户只配 window_title_should_match，refresh 只需调 capsule.status 拿 window title，
+ * 整轮 ~5ms，不付视觉成本。
+ *
+ * `any: [...]` 复合 condition 会按顺序短路求值（evaluateCondition 内实现）。这意味着用户
+ * 可以配 `any: [信号 cond, OCR cond, 视觉 cond]` 表达"前面过就不验后面"。
  */
 export async function waitForCondition(
   cond: Condition,
-  refresh: () => Promise<ConditionContext>,
+  refresh: (reqs: ConditionDataKinds) => Promise<ConditionContext>,
   options: { timeout_ms?: number; polling_ms?: number } = {},
 ): Promise<{ ok: boolean; reasons: string[]; iterations: number }> {
   const timeout = options.timeout_ms ?? 15000;
   const polling = options.polling_ms ?? 250;
+  const reqs = getConditionDataRequirements(cond);
   const start = Date.now();
   let iterations = 0;
   let last: { ok: boolean; reasons: string[] } = { ok: false, reasons: [] };
@@ -202,7 +283,7 @@ export async function waitForCondition(
   // 也应给条件一次评估机会，否则永远超时。
   do {
     iterations++;
-    const ctx = await refresh();
+    const ctx = await refresh(reqs);
     last = await evaluateCondition(cond, ctx);
     if (last.ok) return { ...last, iterations };
     if (Date.now() - start >= timeout) break;

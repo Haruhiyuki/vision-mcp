@@ -1,5 +1,22 @@
 # @vision-mcp/server
 
+## 0.3.0
+
+### Minor Changes
+
+- 实现 postcondition "信号 → AX → OCR → 视觉" 短路链。前面的能验出执行成功就不付后面的成本。
+
+  - `waitForCondition` 按 condition 类型按需收集数据：用户配 `window_title_should_match` 只付信号成本（~5ms），配 `text_should_appear` 才付 OCR，配 `state_should_be` 才全收集（capture + OCR + AX + visual_hash）。
+  - `WorkflowStep` 加 `postcondition` 字段，覆盖 control.postcondition。runtime 在 runWorkflow 时优先用 step.postcondition。
+  - `harvest_session` 自动给每个 step 加 `state_should_be: <next_state>` postcondition（从 perform_action 历史记录的 state_after 推断），让沉淀出来的 workflow 复用时真做视觉/AX 验证而不只看 RPC ok。
+  - `text_should_disappear` 用 `atom.min_confidence`（之前硬编码 0.6 忽略 schema 字段）。
+  - `visual_diff_should_be` 默认 `max_similarity` 0.95 → 0.85（之前 5% 变化就算"变了"太宽松，弹小提示就过；现在要 15% 才认为有实质变化）。
+
+### Patch Changes
+
+- Updated dependencies
+  - @vision-mcp/core@0.3.0
+
 ## 0.2.2
 
 ### Patch Changes

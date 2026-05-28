@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Vision-MCP Authors
 import { z } from "zod";
+import { Condition } from "./condition.js";
 
 export const WorkflowInput = z.object({
   name: z.string().min(1),
@@ -25,6 +26,15 @@ export const WorkflowStep = z.object({
   on_failure: z
     .enum(["abort", "skip", "repair", "ask_user"])
     .default("repair"),
+  /**
+   * Step-level postcondition 覆盖 control.postcondition。runtime 在执行这一步时优先
+   * 用 step.postcondition；没有就 fallback 到 control.postcondition。
+   *
+   * 典型场景：harvest_session 沉淀 workflow 时自动给每个 step 加
+   * `{ type: state_should_be, state_id: <next_state_id> }`，让 workflow 复用时
+   * 真做视觉/AX 验证而非只看 input RPC ok。
+   */
+  postcondition: Condition.optional(),
   notes: z.string().optional(),
 });
 

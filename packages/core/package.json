@@ -1,6 +1,6 @@
 {
   "name": "@vision-mcp/core",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Vision-MCP 核心库：数据模型、Capsule、Runtime、Repair、Locator、Trace",
   "type": "module",
   "main": "./dist/index.js",

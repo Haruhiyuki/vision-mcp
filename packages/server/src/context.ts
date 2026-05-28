@@ -46,6 +46,8 @@ export interface SessionActionRecord {
   ts: number;
   /** 失败的不算（commit_workflow 只串成功步骤）。 */
   succeeded: boolean;
+  /** 动作后 detect_state 推断的 state_id，让 harvest_session 自动加 state_should_be postcondition。 */
+  state_after?: string;
 }
 
 export interface AppHandle {

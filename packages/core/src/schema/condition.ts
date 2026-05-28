@@ -55,7 +55,7 @@ const VisualSimilarShouldBe = z.object({
  * click 前后局部区域的 dHash 应有显著差异。比 visual_similar_should_be 强：
  * 不需要预定义 baseline state，只对比"动作前后"。
  *
- * 用法：postcondition: { type: visual_diff_should_be, region_norm: [...], max_similarity: 0.95 }
+ * 用法：postcondition: { type: visual_diff_should_be, region_norm: [...], max_similarity: 0.85 }
  *   - 在 action 前 capsule.capture 取 region 子图 → 算 dHash A
  *   - 在 action 后 capsule.capture 取同 region → 算 dHash B
  *   - 若 similarity(A, B) <= max_similarity 视为变化已发生 → ok
@@ -73,7 +73,7 @@ const VisualDiffShouldBe = z.object({
     ])
     .optional()
     .describe("可选；不填则取整个 client rect 比对"),
-  max_similarity: z.number().min(0).max(1).default(0.95),
+  max_similarity: z.number().min(0).max(1).default(0.85),
   timeout_ms: z.number().int().positive().default(3000),
 });
 

@@ -950,6 +950,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             params,
             ts: Date.now(),
             succeeded: result.succeeded,
+            state_after: (result as { state_after?: { state_id?: string } }).state_after?.state_id,
           });
           return StructuredOk(
             {
@@ -1468,6 +1469,16 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               params: r.params,
               approval_required: false,
               on_failure: "abort" as const,
+              // 自动加 state_should_be postcondition 让 workflow 复用时有视觉/AX 验证
+              // 而不只是看 input RPC ok。如果 detect_state 没拿到 state_after 就不加。
+              ...(r.state_after
+                ? {
+                    postcondition: {
+                      type: "state_should_be" as const,
+                      state_id: r.state_after,
+                    },
+                  }
+                : {}),
             })),
             timeout_ms,
           });
