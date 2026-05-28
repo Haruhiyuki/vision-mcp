@@ -1,3 +1,23 @@
+---
+name: vision-mcp
+description: |
+  让 agent 像人一样用桌面软件（macOS / Windows）—— 截图、估坐标、点击、输入、验证 ——
+  并把每次实测的路径沉淀成可复用的 vision-mcp.yaml map，下次直接 run_workflow 命中。
+when_to_use: |
+  用户要求操作桌面 GUI 软件（不是 web / API），尤其：
+  - 在某 app 里跑流程：「在 Steam 卸载 Portal 2」「Apple Music 播张学友」「Notes 写新备忘」
+  - 跨 app 自动化：「打开 X，复制结果到 Y」
+  - 探索建图：「帮我建立 X 的 vision-mcp」/「学一下这个 app」
+  - 视觉验证：「截图给我看看现在 X 的状态」
+  不适用：纯 web 任务（用浏览器工具）、纯 CLI 任务（直接 shell）。
+discovery_flow: |
+  1. vision_map.list_apps               → 看可用 app + workflows 摘要
+  2. vision_map.list_workflows app_id   → 选 workflow
+  3. vision_map.describe_workflow ...   → 看 steps 含 risk_level（destructive 时必看）
+  4. vision_map.run_workflow ...        → 执行
+  失败 → snapshot + describe_action + vision-mcp patch + 重试
+---
+
 # Skill：Vision-MCP 操作手册
 
 让 agent 像人一样用桌面软件——看截图、估坐标、点击、验证——但把每次实测的路径沉淀为可复用的"地图"，下次直接调用而不再视觉判断。

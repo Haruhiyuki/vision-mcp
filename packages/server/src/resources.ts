@@ -217,7 +217,10 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       },
     }),
     {
-      title: "单个 state JSON",
+      title: "单个 state 完整 JSON（含 controls + anchors）",
+      description:
+        "返回 state.id/kind/description/anchors/controls/inherit_regions/parent_state_id 完整结构。"
+        + "用 vision_map.list_actions 列 action_id 后想看某个 control 的 locator 细节时调。",
       mimeType: MIME_JSON,
     },
     async (uri, vars) => {
@@ -252,7 +255,11 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       list: undefined,
     }),
     {
-      title: "单个 action 描述",
+      title: "单个 action 详情（control + locator + 风险）",
+      description:
+        "返回 action_id 对应的 control 详情（locator_priority / postcondition / risk_level / action_types）"
+        + " 加上其所在 state 的 kind。perform_action 失败时 / 写 patch 前调。"
+        + "等价于 vision_map.describe_action 工具，但走 resource 通道。",
       mimeType: MIME_JSON,
     },
     async (uri, vars) => {
@@ -314,7 +321,10 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       },
     }),
     {
-      title: "单个 workflow JSON",
+      title: "单个 workflow 完整 JSON（含 steps）",
+      description:
+        "返回 workflow 完整定义含 steps[] / inputs / timeout_ms。"
+        + "用 vision_map.describe_workflow 工具拿同样数据 + 每步 control 附带描述（更易读）。",
       mimeType: MIME_JSON,
     },
     async (uri, vars) => {

@@ -5,6 +5,7 @@ import type {
   VisionMap,
   Workflow,
 } from "../schema/index.js";
+import { VisionMcpError } from "../errors.js";
 
 /**
  * action_id 三种形式：
@@ -106,14 +107,17 @@ export function findAction(map: VisionMap, actionId: string): ResolvedAction {
   const { ownerId, controlId, actionType, index } = parseActionId(actionId);
   const hit = findControl(map, ownerId, controlId);
   if (!hit) {
-    throw new Error(
+    // 抛 VisionMcpError 而非裸 Error → server 错误处理会自动加 ERROR_HINTS 提示
+    throw new VisionMcpError(
+      "ACTION_NOT_FOUND",
       `action_id "${actionId}" 未找到对应 control（owner=${ownerId}, control=${controlId}）`,
     );
   }
   const { control } = hit;
   const resolvedType = actionType ?? control.action_types[0];
   if (!control.action_types.includes(resolvedType as never)) {
-    throw new Error(
+    throw new VisionMcpError(
+      "ACTION_NOT_FOUND",
       `控件 ${controlId} 不支持动作 ${resolvedType}（支持：${control.action_types.join(", ")}）`,
     );
   }

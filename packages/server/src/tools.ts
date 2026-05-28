@@ -115,12 +115,44 @@ const StructuredOk = (data: Record<string, unknown>, summary?: string) => ({
   structuredContent: data,
 });
 
+/** 错误码 → 下一步提示，让 agent 看错误就知道调哪个工具排查。 */
+const ERROR_HINTS: Partial<Record<string, string>> = {
+  ACTION_NOT_FOUND:
+    "用 vision_map.list_actions(app_id, state_id?) 看可用 action_id；或 vision_map.list_workflows(app_id) 看 workflows",
+  MAP_VALIDATION_FAILED:
+    "用 vision_map.list_apps 看可用 app_id；新建 map 用 vision_map.init",
+  STATE_UNKNOWN:
+    "用 vision_map.snapshot(app_id) 拿 PNG + candidates；可能是新页面 → vision_map.commit_state 写入；或现有 state 偏差 → vision-mcp patch",
+  LOCATOR_FAILED:
+    "用 vision_map.snapshot 看现状 + vision_map.describe_action 看 locator 详情；偏差 → vision-mcp patch 修正",
+  GEOMETRY_MISMATCH:
+    "用 vision_map.repair_minimal --max-level 3 自动修复；不行用 capsule.migrate_window 重排窗口",
+  POSTCONDITION_FAILED:
+    "用 vision_map.snapshot 看实际状态；可能 postcondition 太严 → patch；或动作真的没生效 → 重试",
+  PRECONDITION_FAILED:
+    "前置 state 不满足。用 vision_map.detect_state 确认当前 state；可能需要先 perform_action 切到正确 state",
+  INPUT_LEASE_DENIED:
+    "Windows UIPI 拒绝输入（任务管理器/反作弊 app）。vision-mcp 进程需 elevated；或目标 app 不支持自动化",
+  PERMISSION_DENIED:
+    "系统权限缺失。macOS：系统设置→隐私→屏幕录制 + 辅助功能；Windows：见 vision-mcp doctor",
+  CAPSULE_DISPLAY_MISSING:
+    "用 vision-mcp displays 看可用显示器；指定 visual_box.display 尺寸适配实际屏幕",
+  CAPSULE_PLATFORM_UNAVAILABLE:
+    "native helper 未装。跑 vision-mcp install-helper 或 vision-mcp doctor 看诊断",
+  SAFETY_POLICY_BLOCKED:
+    "动作被 safety_policy.forbidden_action_categories 拦截。不绕过——告诉用户为什么",
+  ACTION_RISK_REQUIRES_CONFIRMATION:
+    "destructive 动作需 approval。perform_action / run_workflow 加 approve_all 或经审批通道",
+};
+
 function errorResult(err: unknown): { content: { type: "text"; text: string }[]; isError: true; structuredContent: Record<string, unknown> } {
   if (isVisionMcpError(err)) {
+    const hint = ERROR_HINTS[err.code];
+    const text = hint ? `[${err.code}] ${err.message}\n→ ${hint}` : `[${err.code}] ${err.message}`;
     return {
       isError: true,
-      content: [{ type: "text", text: `[${err.code}] ${err.message}` }],
-      structuredContent: err.toJSON() as Record<string, unknown>,
+      content: [{ type: "text", text }],
+      structuredContent: { ...(err.toJSON() as Record<string, unknown>), hint },
     };
   }
   const e = err as Error;
@@ -445,7 +477,10 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "vision_map.type_text",
     {
-      title: "在当前焦点 type 文本（支持中文，走粘贴）",
+      title: "在当前焦点 type 文本",
+      description:
+        "在 capsule 目标窗口的当前焦点位置输入文本。支持中文 / Unicode（macOS 走 NSPasteboard，Windows 走 SendInput VK_PACKET 绕过 IME）。" +
+        "调用前会自动 capsule.raise()。clear_first=true 时先 Cmd/Ctrl+A → Delete 清掉再输。",
       inputSchema: {
         app_id: z.string(),
         text: z.string(),
@@ -469,7 +504,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "vision_map.press_key",
     {
-      title: "按下键盘组合（如 return / cmd+f / Escape）",
+      title: "按下键盘组合",
+      description:
+        "发键盘组合到 capsule 目标窗口（自动 raise）。combo 格式："
+        + "单键 'return' / 'escape' / 'tab' / 'space' / 'f5' / 'pageup' 等；"
+        + "组合 'cmd+s' (macOS) / 'ctrl+s' (Windows) / 'shift+tab' / 'alt+left'。"
+        + "modifier 别名：cmd=win=meta / ctrl=control / alt=option。",
       inputSchema: { app_id: z.string(), combo: z.string() },
     },
     async ({ app_id, combo }) => {
@@ -490,6 +530,9 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     "vision_map.scroll",
     {
       title: "在归一化点滚动",
+      description:
+        "在 capsule 客户区 [nx, ny] 位置发滚轮事件。dy 正值=向下滚（屏幕内容上移），与 macOS 一致；一格 ≈ 120（Windows WHEEL_DELTA）。"
+        + "若要按 OCR 文本边滚边找停下来，用 scroll-until-text（CLI）/ recipe 而非这个 raw 工具。",
       inputSchema: {
         app_id: z.string(),
         point_norm: z.tuple([z.number().min(0).max(1.5), z.number().min(0).max(1.5)]),
@@ -825,6 +868,11 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     "vision_map.describe_action",
     {
       title: "返回单个 action 的详细信息",
+      description:
+        "返回 action_id 对应的 control 完整定义：role / action_types / locator_priority / "
+        + "visual / precondition / postcondition / risk_level。"
+        + "用于 perform_action 失败后排查 / 写 patch 前看现状 / 学习一个 map 的具体 control 设计。"
+        + "action_id 形式 '<state|region>.<control>[:action_type]'，如 'sidebar.search' / 'music.app.result_card[2]:double_click'。",
       inputSchema: {
         app_id: z.string(),
         action_id: z.string(),
@@ -942,6 +990,11 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     "vision_map.verify",
     {
       title: "重新验证当前 state 是否满足某个 condition",
+      description:
+        "运行 detect_state 后对单个 condition 求值。condition schema 同 control.postcondition："
+        + "{ type: 'state_should_be', state_id: '...' } / { type: 'text_should_appear', text: '...' } / "
+        + "{ type: 'modal_should_close' } / { type: 'visual_diff_should_be', min: 0.15 } 等。"
+        + "用于 agent 手动验证 perform_action 后状态是否符合预期（runtime 自动 postcondition 不够时）。",
       inputSchema: {
         app_id: z.string(),
         condition: z.record(z.unknown()),
