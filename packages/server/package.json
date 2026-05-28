@@ -13,7 +13,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "vision-mcp-server": "./dist/bin.js"
+    "vision-mcp-server": "dist/bin.js"
   },
   "exports": {
     ".": {
@@ -30,21 +30,21 @@
     "clean": "rimraf dist *.tsbuildinfo",
     "start": "node dist/bin.js",
     "test": "vitest run",
-    "prepublishOnly": "npm run clean && npm run build && find dist \\( -name '*tsbuildinfo' -o -name '*.map' \\) -delete"
+    "prepublishOnly": "node ./scripts/prepublish.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "@vision-mcp/core": "0.1.0",
+    "@vision-mcp/core": "^0.1.0",
     "zod": "^3.24.1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/your-org/vision-mcp.git",
+    "url": "git+https://github.com/Haruhiyuki/vision-mcp.git",
     "directory": "packages/server"
   },
-  "homepage": "https://github.com/your-org/vision-mcp#readme",
+  "homepage": "https://github.com/Haruhiyuki/vision-mcp#readme",
   "bugs": {
-    "url": "https://github.com/your-org/vision-mcp/issues"
+    "url": "https://github.com/Haruhiyuki/vision-mcp/issues"
   },
   "author": "Vision-MCP Authors",
   "license": "Apache-2.0",

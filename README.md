@@ -28,12 +28,14 @@ Vision-MCP **不替代** Computer Use，是 amortize 那笔成本的复用层：
 
 ```bash
 # 在 Claude Code 内
-/plugin install vision-mcp/vision-mcp@main
-# 首次启动自动跑 install-helper（macOS swiftc 编译 / Windows 自检 PowerShell 5.1）
-# 授权 Screen Recording + Accessibility（macOS） / OCR 语言包（Windows，按需）
+/plugin marketplace add Haruhiyuki/vision-mcp
+/plugin install vision-mcp@vision-mcp
+# Plugin 自带 skill + 示例 map + .mcp.json；MCP server 通过 npx 拉 @vision-mcp/cli
+# npm 包的 postinstall 自动跑 install-helper（macOS swiftc 编译 / Windows 自检 PowerShell 5.1）
+# 首次使用时授权 Screen Recording + Accessibility（macOS） / OCR 语言包（Windows，按需）
 ```
 
-Plugin 自带 `.mcp.json` + `skills/vision-mcp/`，安装后 agent 立刻能用 `vision_map.*` 工具 + skill 操作手册。
+Plugin 自包含 `.claude-plugin/plugin.json` + `.mcp.json` + `skills/vision-mcp/` + `examples/`。安装后 agent 立刻能用 `vision_map.*` 工具 + skill 操作手册。
 
 其他 host（Codex CLI / Cursor / Cline / OpenClaw）配置见 [INSTALL.md](INSTALL.md)。
 

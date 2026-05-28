@@ -17,7 +17,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "vision-mcp": "./dist/index.js"
+    "vision-mcp": "dist/index.js"
   },
   "exports": {
     ".": {
@@ -38,18 +38,18 @@
     "prepublishOnly": "node ./scripts/prepublish.mjs"
   },
   "dependencies": {
-    "@vision-mcp/core": "0.1.0",
-    "@vision-mcp/server": "0.1.0",
+    "@vision-mcp/core": "^0.1.0",
+    "@vision-mcp/server": "^0.1.0",
     "yaml": "^2.7.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/your-org/vision-mcp.git",
+    "url": "git+https://github.com/Haruhiyuki/vision-mcp.git",
     "directory": "packages/cli"
   },
-  "homepage": "https://github.com/your-org/vision-mcp#readme",
+  "homepage": "https://github.com/Haruhiyuki/vision-mcp#readme",
   "bugs": {
-    "url": "https://github.com/your-org/vision-mcp/issues"
+    "url": "https://github.com/Haruhiyuki/vision-mcp/issues"
   },
   "author": "Vision-MCP Authors",
   "license": "Apache-2.0",

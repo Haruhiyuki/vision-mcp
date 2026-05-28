@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Changesets action 自动开 "Release PR"（累积 .changeset/*.md）；
+# merge 这个 PR 时再次触发本 workflow → changesets/action 检测无 pending changeset
+# → 直接 npm publish + 打 git tag + 建 GitHub release（含 CHANGELOG）。
+#
+# 需要 repo settings → secrets 配：
+#   NPM_TOKEN — npm "Automation" type token，对 @vision-mcp scope publish 权限
+# GITHUB_TOKEN 由 actions 自动注入。
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # 不要中途取消（publish 是不可重入的）
+
+jobs:
+  release:
+    name: Publish to npm + GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # 推 tag + 创建 release
+      pull-requests: write  # 自动开/更新 Release PR
+      id-token: write       # npm provenance（包带 GitHub build attestation）
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # changesets 需要完整 git 历史来生成 changelog
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          # npm publish 用的 registry
+          registry-url: https://registry.npmjs.org
+
+      - name: install
+        # 不跑 postinstall：CI 不需要编译 helper
+        run: npm install --ignore-scripts
+
+      - name: build
+        run: npm run build
+
+      - name: test
+        run: npm test
+
+      - name: changeset action（开 Release PR / 执行 publish）
+        uses: changesets/action@v1
+        with:
+          # 有 pending changeset → 开/更新 Release PR
+          # 无 pending（即 Release PR 已 merge）→ 跑 publish
+          publish: npx changeset publish
+          version: npx changeset version
+          createGithubReleases: true
+          commit: "chore(release): bump versions"
+          title: "chore(release): version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # npm provenance：让发布的 tarball 带 GitHub Actions build attestation
+          NPM_CONFIG_PROVENANCE: "true"

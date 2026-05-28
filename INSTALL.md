@@ -14,35 +14,46 @@ Vision-MCP 同时是一个 **MCP server**（暴露 `capsule.*` / `vision_map.*` 
 
 ## A. Claude Code Plugin（推荐）
 
-> Plugin 自带 `.mcp.json` 让 MCP server 在 plugin enable 后自动注册；自带 `skills/vision-mcp/` 让 agent 自动加载操作手册。一条 `/plugin install` 全装好。
+> Plugin 仓库自带 `.claude-plugin/plugin.json` + `.mcp.json` + `skills/vision-mcp/` + `examples/`。
+> MCP server 不在 plugin 仓库里——`.mcp.json` 用 `npx -y @vision-mcp/cli@latest serve` 从 npm registry 拉，
+> npm 包的 `postinstall` 又会自动跑 `install-helper` 编 / 检 native helper。一条 `/plugin install` 跑通整链。
 
 ### A.1 从 GitHub 直装
 
 ```bash
 # Claude Code 内
-/plugin install your-org/vision-mcp@main
+/plugin marketplace add Haruhiyuki/vision-mcp
+/plugin install vision-mcp@vision-mcp
 ```
 
-这会从 `github.com/your-org/vision-mcp` 克隆仓库到 `~/.claude/plugins/vision-mcp/`，自动按 `.claude-plugin/plugin.json` 加载 skill + MCP server。
+第一条命令把 `Haruhiyuki/vision-mcp` 仓库当成单 plugin marketplace 注册；
+第二条 `vision-mcp@vision-mcp` 的格式是 `<plugin-name>@<marketplace-name>`。
+首次安装会 git clone 到 `~/.claude/plugins/vision-mcp/`，自动加载 `.claude-plugin/plugin.json`。
 
-### A.2 从 marketplace（待发布）
+### A.2 从官方 marketplace（待提交）
 
 ```bash
-# 待 claude-community marketplace 收录后
+# 待提交到 anthropics/claude-plugins-community 后
 /plugin install vision-mcp
 ```
 
+提交入口：[claude.ai/settings/plugins/submit](https://claude.ai/settings/plugins/submit)。
+
 ### A.3 安装后
 
-第一次 enable 时会自动跑 `vision-mcp install-helper` 检查 native helper：
+`.mcp.json` 的 `command: npx -y @vision-mcp/cli@latest` 在 plugin enable 时拉 cli 包（首次 ~30s 下载），
+npm install 触发 `@vision-mcp/cli` 的 postinstall 自动跑 `install-helper --silent`：
 - **macOS**：需要 `swiftc`（Xcode Command Line Tools），自动编译 `native/macos/vision-mcp-helper`。第一次操作时系统会弹 Screen Recording / Accessibility 权限对话框，按引导授权。
-- **Windows**：使用 PowerShell helper 或预编译 `.exe`。
+- **Windows**：使用 PowerShell helper（自动 wrap `powershell.exe`）。安装期只验证 PowerShell 5.1 是否可用，不需要 ps2exe。
 
 验证安装：
 ```bash
 # Claude Code 内
 /mcp                            # 应显示 vision-mcp 已 connected
-/skill vision-mcp                # 加载 skill
+/skill vision-mcp               # 加载 skill
+
+# 终端
+npx -y @vision-mcp/cli doctor   # 一键自检：OS / Node / helper / displays
 ```
 
 ---
@@ -52,42 +63,26 @@ Vision-MCP 同时是一个 **MCP server**（暴露 `capsule.*` / `vision_map.*` 
 ### B.1 安装
 
 ```bash
-# 全局安装（提供 vision-mcp / vision-mcp-server 两个 bin）
-npm install -g @vision-mcp/cli @vision-mcp/server
+# 全局安装（cli 包提供 vision-mcp bin；server 通过 cli 的 dep 自动装）
+npm install -g @vision-mcp/cli
 
-# 或单次运行（不安装到全局）
-npx -y @vision-mcp/cli serve
+# 或单次运行（不安装到全局，每次冷下载 ~30s）
+npx -y @vision-mcp/cli@latest serve
 ```
 
-> ⚠️ 当前仓库**尚未发布**到 npm registry。先用路径 C 源码安装。发布后此节生效。
+> ⚠️ 当前仓库**尚未发布**到 npm registry。`@vision-mcp/{core,server,cli}` scope 已抢注但 0.1.0 未 publish。
+> 发布前用路径 C 源码安装；发布后本节即可用。
 
-### B.2 编译 native helper
+cli 的 `postinstall` 自动跑 `install-helper --silent`：
+- **macOS**：检测 `swiftc`（Xcode Command Line Tools）后自动编译 helper。`xcode-select --install` 装好开发工具后再装 cli 一次（或事后跑 `vision-mcp install-helper --force`）。
+- **Windows**：检测 Windows PowerShell 5.1（pwsh 7 不行）。helper 走 `.ps1` 由 NativeBridge 自动用 `powershell.exe -File` 包一层，不需要 ps2exe（默认 PS host 拦 `[Console]::In` 不能做 stdio sidecar）。
 
-**macOS**:
-```bash
-# 装 Xcode Command Line Tools（如未装）
-xcode-select --install
+postinstall 任何失败都不会染红 `npm install`；事后用 `vision-mcp doctor` 看详情。
 
-# 编译 helper
-cd "$(npm root -g)/@vision-mcp/cli/native/macos"
-swiftc -O -o vision-mcp-helper src/main.swift \
-  -framework AppKit -framework ApplicationServices -framework CoreGraphics \
-  -framework IOKit -framework Vision -framework CoreImage \
-  -framework ScreenCaptureKit
-```
+### B.2 在各 host 中配置
 
-或一键：
-```bash
-vision-mcp install-helper
-```
-
-**Windows**: 使用 `native/windows/src/vision-mcp-helper.ps1`；可选用 `ps2exe` 编译为 `.exe`：
-```powershell
-Install-Module -Name ps2exe -Scope CurrentUser
-Invoke-ps2exe vision-mcp-helper.ps1 vision-mcp-helper.exe
-```
-
-### B.3 在各 host 中配置
+> 不需要设 `VISION_MCP_NATIVE_HELPER`：cli 的 `resolveBundledHelper()` 会自动找
+> npm 安装目录的 helper；只在你想覆盖默认时才设。
 
 #### Claude Code（`~/.claude/settings.json` 或项目级 `.mcp.json`）
 
@@ -98,14 +93,11 @@ Invoke-ps2exe vision-mcp-helper.ps1 vision-mcp-helper.exe
       "command": "npx",
       "args": [
         "-y",
-        "@vision-mcp/cli",
+        "@vision-mcp/cli@latest",
         "serve",
         "--apps-root",
         "${HOME}/.vision-mcp/apps"
-      ],
-      "env": {
-        "VISION_MCP_NATIVE_HELPER": "/usr/local/lib/node_modules/@vision-mcp/cli/native/macos/vision-mcp-helper"
-      }
+      ]
     }
   }
 }
@@ -116,10 +108,7 @@ Invoke-ps2exe vision-mcp-helper.ps1 vision-mcp-helper.exe
 ```toml
 [mcp_servers.vision-mcp]
 command = "npx"
-args = ["-y", "@vision-mcp/cli", "serve", "--apps-root", "/Users/you/.vision-mcp/apps"]
-
-[mcp_servers.vision-mcp.env]
-VISION_MCP_NATIVE_HELPER = "/usr/local/lib/node_modules/@vision-mcp/cli/native/macos/vision-mcp-helper"
+args = ["-y", "@vision-mcp/cli@latest", "serve", "--apps-root", "/Users/you/.vision-mcp/apps"]
 ```
 
 #### Cursor（`~/.cursor/mcp.json`）
@@ -131,7 +120,7 @@ VISION_MCP_NATIVE_HELPER = "/usr/local/lib/node_modules/@vision-mcp/cli/native/m
   "mcpServers": {
     "vision-mcp": {
       "command": "npx",
-      "args": ["-y", "@vision-mcp/cli", "serve", "--apps-root", "/Users/you/.vision-mcp/apps"]
+      "args": ["-y", "@vision-mcp/cli@latest", "serve", "--apps-root", "/Users/you/.vision-mcp/apps"]
     }
   }
 }
@@ -139,15 +128,16 @@ VISION_MCP_NATIVE_HELPER = "/usr/local/lib/node_modules/@vision-mcp/cli/native/m
 
 #### OpenClaw / Cline / 其他 stdio MCP host
 
-通用模式：`command: node` + `args: [<path>/index.js, serve]`，或直接 `command: vision-mcp` + `args: [serve]`。详见各 host 的 MCP 配置文档。
+通用模式：`command: npx` + `args: [-y, @vision-mcp/cli@latest, serve]`，或全局装 cli 后直接 `command: vision-mcp` + `args: [serve]`。详见各 host 的 MCP 配置文档。
 
-### B.4 准备 apps 目录
+### B.3 准备 apps 目录
 
 `--apps-root` 指向放 `vision-mcp.yaml` 的目录（用户自己的 map data；仓库 `apps/` 已加进 .gitignore，是用户专属工作区）。仓库 `examples/` 提供了参考 maps：
-- `examples/apple-music/` — Apple Music
+- `examples/apple-music/` — Apple Music（macOS）
 - `examples/notes/` — macOS 备忘录
-- `examples/activity-monitor/` — 活动监视器
+- `examples/activity-monitor/` — 活动监视器（macOS）
 - `examples/example-erp/` — 虚构 Windows ERP demo（架构完整展示）
+- `examples/steam-windows/` — Steam Windows 真机实测 demo（6 workflow + 1 destructive 卸载链）
 
 复制示例到你的 apps-root：
 
@@ -161,21 +151,15 @@ cp -r ./examples/* ~/.vision-mcp/apps/
 ## C. 源码克隆
 
 ```bash
-git clone https://github.com/your-org/vision-mcp ~/vision-mcp
+git clone https://github.com/Haruhiyuki/vision-mcp ~/vision-mcp
 cd ~/vision-mcp
-npm install
+npm install                   # 触发 cli 的 postinstall 自动跑 install-helper
 npm run build
-npm test                      # 应显示 43 tests passed
-
-# 编译 macOS helper
-cd native/macos
-swiftc -O -o vision-mcp-helper src/main.swift \
-  -framework AppKit -framework ApplicationServices -framework CoreGraphics \
-  -framework IOKit -framework Vision -framework CoreImage -framework ScreenCaptureKit
-cd ../..
+npm test                      # 应显示 53 tests passed
 
 # 把本地路径配到 host
-# 参考 B.3 的配置，把 npx -y @vision-mcp/cli 改成 node /Users/you/vision-mcp/packages/cli/dist/index.js
+# 参考 B.2 的配置，把 npx -y @vision-mcp/cli@latest 改成
+#   node /Users/you/vision-mcp/packages/cli/dist/index.js
 ```
 
 ---
@@ -266,8 +250,10 @@ macOS 系统设置中**手动**取消屏幕录制 / 辅助功能授权。
 
 ## 分发渠道（持续推进）
 
-- [ ] **npm publish**：`@vision-mcp/core` / `@vision-mcp/server` / `@vision-mcp/cli` 上 npm registry
-- [ ] **GitHub Release**：CI 跑 macOS x64/arm64 + Windows x64 预编译 helper，随 release tarball 分发
-- [ ] **Claude Code Plugin Marketplace**：提交到 `claude-plugins-community`
+- [x] **npm scope 抢注**：`@vision-mcp` scope 已占
+- [ ] **npm publish 0.1.0**：`@vision-mcp/{core,server,cli}` 上 npm registry（依赖顺序 core→server→cli）
+- [ ] **GitHub Release v0.1.0**：tag + release notes
+- [ ] **Claude Code Plugin Marketplace**：提交到 `claude-plugins-community`（[提交入口](https://claude.ai/settings/plugins/submit)）
+- [ ] **GitHub Release prebuilt helper artifacts**：CI 跑 macOS x64/arm64 + Windows x64 预编译 helper，随 release 分发供网络受限环境用
 - [ ] **smithery.ai / mcp.so / glama.ai**：MCP server registry 同步发布
 - [ ] **Homebrew Formula**：`brew install vision-mcp`（macOS 用户最熟悉的安装方式）

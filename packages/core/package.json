@@ -48,7 +48,7 @@
     "build": "tsc -b",
     "clean": "rimraf dist *.tsbuildinfo",
     "test": "vitest run",
-    "prepublishOnly": "npm run clean && npm run build && find dist \\( -name '*tsbuildinfo' -o -name '*.map' \\) -delete"
+    "prepublishOnly": "node ./scripts/prepublish.mjs"
   },
   "dependencies": {
     "zod": "^3.24.1",
@@ -66,12 +66,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/your-org/vision-mcp.git",
+    "url": "git+https://github.com/Haruhiyuki/vision-mcp.git",
     "directory": "packages/core"
   },
-  "homepage": "https://github.com/your-org/vision-mcp#readme",
+  "homepage": "https://github.com/Haruhiyuki/vision-mcp#readme",
   "bugs": {
-    "url": "https://github.com/your-org/vision-mcp/issues"
+    "url": "https://github.com/Haruhiyuki/vision-mcp/issues"
   },
   "author": "Vision-MCP Authors",
   "license": "Apache-2.0",
