@@ -14,6 +14,8 @@ import {
   findWorkflow,
   listActions as listActionsForMap,
   Patch as PatchSchema,
+  Control as ControlSchema,
+  Workflow as WorkflowSchema,
   hasErrors,
 } from "@vision-mcp/core";
 import type { AccessibilityNode, Frame } from "@vision-mcp/core";
@@ -1183,6 +1185,178 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           return StructuredOk(
             { state_id: state.id, controls: state.controls.length },
             `committed state ${state.id}`,
+          );
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.add_control",
+    {
+      title: "往现有 state 或 region 加新 control（走 patch overlay）",
+      description:
+        "agent 探索时发现 baseline 缺一个可交互元素时调。" +
+        "走 ControlAddPatch 渐进沉淀（默认 trust=session_only，验证后升级 trusted），" +
+        "不污染手编 baseline。state_id 既可以是 state.id 也可以是 region.id（往共享 region 加）。" +
+        "已存在同 id control 时幂等忽略；要替换走 vision-mcp patch / apply_patch 的 control_locator。",
+      inputSchema: {
+        app_id: z.string(),
+        state_id: z.string().describe("state.id 或 region.id"),
+        control: ControlSchema.describe("完整 control 定义，含 id / role / action_types / locator_priority"),
+        trust: z
+          .enum(["session_only", "trusted", "untrusted_proposal"])
+          .default("session_only"),
+        reason: z.string().optional().describe("加 control 的依据，便于 patches 列表里 review"),
+      },
+    },
+    async ({ app_id, state_id, control, trust, reason }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          // 验证 state_id 存在（state 或 region）
+          const stateExists = app.effective.states.some((s) => s.id === state_id);
+          const regionExists = app.effective.regions.some((r) => r.id === state_id);
+          if (!stateExists && !regionExists) {
+            throw new VisionMcpError(
+              ERROR_CODES.STATE_UNKNOWN,
+              `state_id ${state_id} 不在 map 里（既不是 state.id 也不是 region.id）`,
+            );
+          }
+          const { writePatch, applyPatches } = await import("@vision-mcp/core");
+          const patch = PatchSchema.parse({
+            kind: "control_add",
+            id: `add-${state_id}-${control.id}-${Date.now().toString(36)}`,
+            trust,
+            state_id,
+            control,
+            reason,
+            created_at: new Date().toISOString(),
+            created_by: "vision_map.add_control",
+            confidence: 1,
+            requires_review: trust === "untrusted_proposal",
+          });
+          const filePath = await writePatch(app.baseDir, patch);
+          app.patches.push(patch);
+          app.effective = applyPatches(app.map, app.patches);
+          return StructuredOk(
+            {
+              patch_file: filePath,
+              state_id,
+              control_id: control.id,
+              trust: patch.trust,
+            },
+            `added control ${control.id} → ${state_id} (trust=${trust})`,
+          );
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.commit_workflow",
+    {
+      title: "把一段验证过的操作序列沉淀为 workflow 写入 baseline",
+      description:
+        "agent 在没有现成 workflow 时用 perform_action 渐进试错、跑通后调本工具沉淀。" +
+        "走 baseline（与 commit_state 一致；workflow 无部分覆盖语义，commit 意味着已验证）。" +
+        "已存在同 id workflow 时直接覆盖。每个 step 引用必须是 map 里现有的 action_id；" +
+        "如果引用了不存在的 action，先用 vision_map.add_control 把 control 加进 map。",
+      inputSchema: {
+        app_id: z.string(),
+        workflow_id: z.string(),
+        steps: z
+          .array(
+            z.object({
+              action_id: z.string().describe("形如 state.control_id 或 region.control_id[N]:action_type"),
+              params: z.record(z.unknown()).optional(),
+              approval_required: z.boolean().optional(),
+              on_failure: z
+                .enum(["abort", "ask_user", "repair", "skip"])
+                .default("abort")
+                .optional(),
+              notes: z.string().optional(),
+            }),
+          )
+          .min(1),
+        description: z.string().optional(),
+        inputs: z
+          .array(
+            z.object({
+              name: z.string(),
+              type: z.enum(["string", "number", "boolean"]),
+              description: z.string().optional(),
+              required: z.boolean().optional(),
+            }),
+          )
+          .optional(),
+        timeout_ms: z.number().int().positive().default(120_000),
+        overwrite: z
+          .boolean()
+          .default(false)
+          .describe("默认 false：已存在同 id workflow 时报错；true 则覆盖"),
+      },
+    },
+    async ({ app_id, workflow_id, steps, description, inputs, timeout_ms, overwrite }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          // 1. 验证所有 step.action_id 在 effective map 里能找到
+          const missing: string[] = [];
+          for (const s of steps) {
+            try {
+              const parsed = parseActionId(s.action_id);
+              const found = findControl(app.effective, parsed.ownerId, parsed.controlId);
+              if (!found) missing.push(s.action_id);
+            } catch {
+              missing.push(s.action_id);
+            }
+          }
+          if (missing.length > 0) {
+            throw new VisionMcpError(
+              ERROR_CODES.ACTION_NOT_FOUND,
+              `steps 引用了 ${missing.length} 个不存在的 action_id：${missing.slice(0, 5).join(", ")}` +
+                (missing.length > 5 ? ` (+${missing.length - 5} more)` : "") +
+                "。先用 vision_map.add_control 加 control 或检查 step.action_id 拼写。",
+            );
+          }
+          // 2. 检查重复 workflow_id
+          const existingIdx = app.map.workflows.findIndex((w) => w.id === workflow_id);
+          if (existingIdx >= 0 && !overwrite) {
+            throw new VisionMcpError(
+              ERROR_CODES.MAP_VALIDATION_FAILED,
+              `workflow ${workflow_id} 已存在；要覆盖请传 overwrite=true，或换 workflow_id`,
+            );
+          }
+          // 3. 构 Workflow + validate
+          const workflow = WorkflowSchema.parse({
+            id: workflow_id,
+            description,
+            inputs: inputs ?? [],
+            steps: steps.map((s) => ({
+              action_id: s.action_id,
+              params: s.params,
+              approval_required: s.approval_required ?? false,
+              on_failure: s.on_failure ?? "abort",
+              notes: s.notes,
+            })),
+            timeout_ms,
+          });
+          // 4. 写 baseline
+          if (existingIdx >= 0) app.map.workflows[existingIdx] = workflow;
+          else app.map.workflows.push(workflow);
+          const { applyPatches } = await import("@vision-mcp/core");
+          app.effective = applyPatches(app.map, app.patches);
+          await writeEffective(app);
+          return StructuredOk(
+            {
+              workflow_id,
+              steps_count: steps.length,
+              overwritten: existingIdx >= 0,
+            },
+            `committed workflow ${workflow_id} (${steps.length} steps)`,
           );
         });
       } catch (err) {

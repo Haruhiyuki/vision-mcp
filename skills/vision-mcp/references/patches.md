@@ -9,8 +9,10 @@ SKILL §5 的扩展。**核心原则**：map 永远是渐近完善的，agent �
 | **locator 命中但点错元素**（如 sidebar 第 2 项实际选中第 3 项） | `control_bbox` | `vision-mcp patch <app> --state <id> --control <id> --bbox-norm x,y,w,h` |
 | **action_types 顺序导致默认动作失败**（如 click 编辑区反而丢焦点，应改 type 优先） | `control_locator` | `--partial '{"action_types":["type","click"]}'` |
 | **locator 优先级错误**（如 AX name 应改 description；OCR 应替换 AX） | `control_locator` | `--partial '{"locator_priority":[...]}'` |
+| **现有 state/region 里缺一个新发现的 control**（探索时发现 baseline 漏建模） | `control_add` | `vision-mcp add-control <app> --state <id> --control '<json>' [--trust trusted]` |
 | **新弹窗 / 子页面未建模** | `state` (add) | 用 `vision-mcp build` 或人工补 YAML |
 | **窗口尺寸/DPI 飘移** | `geometry_profile` | 让 runtime 自动 L2 修复或人工 patch |
+| **多步 action 组合稳定** | （非 patch，走 baseline） | `vision-mcp commit-workflow <app> --id <wid> --steps '<json>'` |
 
 ## 2. 决策树
 
@@ -47,6 +49,30 @@ vision-mcp patch apple-music --state sidebar --control search \
 vision-mcp patch notes --state editor --control focus \
   --partial '{"action_types":["type","click"]}' \
   --reason "实测: cmd+n 后焦点自动在编辑区，click 反而丢焦点"
+```
+
+**例 3：探索时发现 sidebar 多了帮助链接（control_add）**
+```bash
+vision-mcp add-control example-erp --state sidebar \
+  --control '{"id":"help_link","role":"link","action_types":["click"],
+              "locator_priority":[{"type":"ocr_text","text":"帮助","match":"exact"}],
+              "visual":{"center_norm":[0.05,0.95]}}' \
+  --trust session_only \
+  --reason "实测: sidebar 底部新增帮助链接"
+# 验证稳定后人工把对应 patch 文件的 trust 改成 trusted（写入 git）
+```
+
+**例 4：跑通一段新流程，沉淀为 workflow（commit-workflow）**
+```bash
+# agent 用 perform_action 一步步试通：sidebar.invoices → invoice.list.new → ...
+vision-mcp commit-workflow example-erp --id "create_invoice_quick" \
+  --description "客户列表 → 新建发票 → 提交" \
+  --steps '[
+    {"action_id":"sidebar.invoices","on_failure":"abort"},
+    {"action_id":"invoice.list.new","on_failure":"abort"},
+    {"action_id":"invoice.editor.submit","approval_required":true,"on_failure":"abort"}
+  ]'
+# 下次同任务直接 vision_map.run_workflow 命中，零视觉成本
 ```
 
 ## 4. Trust 等级渐进

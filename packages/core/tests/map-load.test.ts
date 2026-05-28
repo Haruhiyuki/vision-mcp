@@ -96,4 +96,97 @@ describe("map io", () => {
     expect(next.visual_box.display.width_px).toBe(1024);
     expect(next.visual_box.contract.require_client_size_px).toEqual([1024, 768]);
   });
+
+  it("applyPatches: control_add 往现有 state 加新 control", () => {
+    const baseline = sampleMap();
+    const next = applyPatches(baseline, [
+      {
+        kind: "control_add",
+        id: "add-1",
+        trust: "session_only",
+        state_id: "home",
+        control: {
+          id: "new_btn",
+          role: "button",
+          action_types: ["click"],
+          locator_priority: [
+            { type: "ocr_text", text: "设置", match: "exact" },
+          ],
+          visual: { center_norm: [0.7, 0.1] },
+        },
+        confidence: 0.9,
+        requires_review: false,
+      } as never,
+    ]);
+    const state = next.states.find((s) => s.id === "home")!;
+    expect(state.controls).toHaveLength(2);
+    expect(state.controls.map((c) => c.id)).toContain("new_btn");
+    // 原 control 不动
+    expect(state.controls.find((c) => c.id === "btn")).toBeTruthy();
+  });
+
+  it("applyPatches: control_add 幂等（重复 id 不报错也不重复添加）", () => {
+    const baseline = sampleMap();
+    const next = applyPatches(baseline, [
+      {
+        kind: "control_add",
+        id: "add-dup",
+        trust: "session_only",
+        state_id: "home",
+        control: {
+          id: "btn", // 与 sample 已有的 control 同 id
+          role: "button",
+          action_types: ["click"],
+          locator_priority: [{ type: "bbox_norm", value: [0.9, 0.9, 0.05, 0.05] }],
+        },
+        confidence: 1,
+        requires_review: false,
+      } as never,
+    ]);
+    const state = next.states.find((s) => s.id === "home")!;
+    // 只剩原 control，没多
+    expect(state.controls).toHaveLength(1);
+    // 原 bbox 不被覆盖（要替换走 control_locator）
+    expect(
+      (state.controls[0].locator_priority[0] as { type: string; value: number[] }).value,
+    ).toEqual([0.2, 0.2, 0.3, 0.1]);
+  });
+
+  it("applyPatches: control_add state_id 是 region.id 时往 region.controls 加", () => {
+    const baseline = VisionMap.parse({
+      ...sampleMap(),
+      regions: [
+        {
+          id: "sidebar",
+          controls: [
+            {
+              id: "old_item",
+              role: "button",
+              action_types: ["click"],
+              locator_priority: [{ type: "bbox_norm", value: [0.0, 0.1, 0.2, 0.05] }],
+            },
+          ],
+        },
+      ],
+    });
+    const next = applyPatches(baseline, [
+      {
+        kind: "control_add",
+        id: "add-region",
+        trust: "trusted",
+        state_id: "sidebar",
+        control: {
+          id: "new_item",
+          role: "button",
+          action_types: ["click"],
+          locator_priority: [{ type: "ocr_text", text: "Library" }],
+        },
+        confidence: 1,
+        requires_review: false,
+      } as never,
+    ]);
+    const region = next.regions.find((r) => r.id === "sidebar")!;
+    expect(region.controls).toHaveLength(2);
+    expect(region.controls.map((c) => c.id)).toContain("new_item");
+  });
 });

@@ -1,8 +1,14 @@
 # Vision-MCP
 
-> **桌面 GUI 操作的性能 / 长期成本优化层** — 把 agent 视觉操作的路径（截图、坐标、AX/OCR、点击序列）沉淀进 `vision-mcp.yaml` map，下次同任务直接 `run_workflow` 命中，跳过视觉判断。**第一次跑成本与 Computer Use 相当；第二次起每次都摊销**。
->
-> macOS 与 Windows 双平台一等支持，跨平台同接口；MCP server + Claude Skill 双层暴露。
+Vision-MCP 是一个能够让 Agent 在通过视觉操作软件时沉淀指令化操作方法的框架，从而改善 Agent 进行桌面 GUI 操作的性能与长期成本。
+
+而这两项开销正是阻碍 OpenClaw / Hermes Agent 这类通用 Agent 具备更强实用性的关键，开销主要来自反复地调用视觉模型、估算坐标。
+ 
+Vision-MCP 能够让这类操作就像使用 MCP 一样高效、廉价。第一次要求 Agent 完成某项 GUI 操作任务时，Agent 会在开展这项工作的同时探索其操作路径上的界面结构、可点击元素、状态切换，并沉淀为 `vision-mcp.yaml`，包括每个可独立执行的 action，以及用多个 action 封装的 workflow。每个 action 和 workflow 都可以用指令触发，Agent 通过 list_workflows → describe_workflow 渐进发现。
+
+第二次让 Agent 执行相同软件上的操作时，Agent 便会读取 action 和 workflow 并尝试在尽可能多的操作环节复用。如果无法完全复用，Agent 会在使用视觉能力时继续对 `vision-mcp.yaml` 进行补充。因此安装此项目后，Agent 的长期成本和任务耗时将会是一个下降曲线。
+
+
 
 ## 它解决什么问题
 

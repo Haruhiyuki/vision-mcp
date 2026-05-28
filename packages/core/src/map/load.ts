@@ -140,6 +140,17 @@ export function applyPatches(
         }
         break;
       }
+      case "control_add": {
+        // state_id 既可以是 state.id 也可以是 region.id（与 findControlInDraft 对称）
+        const state = draft.states.find((s) => s.id === p.state_id);
+        const region = state ? null : draft.regions.find((r) => r.id === p.state_id);
+        const targetControls = state?.controls ?? region?.controls;
+        if (!targetControls) break;
+        // 幂等：已存在同 id control → 跳过（不报错；要替换请用 control_locator patch）
+        if (targetControls.find((c) => c.id === p.control.id)) break;
+        targetControls.push(p.control);
+        break;
+      }
     }
   }
   return draft;

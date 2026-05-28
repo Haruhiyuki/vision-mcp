@@ -24,7 +24,13 @@ discovery_flow: |
   2. vision_map.list_workflows app_id   → 现成 workflow 覆盖任务？有 → 跳到 4
   3. vision_map.describe_workflow ...   → 看 steps + risk_level（destructive 必看）
   4. vision_map.run_workflow ...        → 执行；命中即免看图
-  失败 / 没现成 workflow → snapshot 看图 → 操作 + 当场 commit_state / patch 沉淀 → 下次命中
+  失败 / 没现成 workflow（探索 + 沉淀闭环）：
+    a. list_actions app_id              → 现有 action 够用？
+    b. snapshot + describe_action       → 看现状 + locator 细节；新元素 → propose_controls
+    c. perform_action 一步步试          → 跑通后两条沉淀路径：
+       · 单个新 action  → vision_map.add_control（走 patch overlay，trust 渐进）
+       · 多步组合稳定  → vision_map.commit_workflow（走 baseline，下次同任务直接 run_workflow）
+    d. 偏差 → vision_map.apply_patch 修正
 ---
 
 # Skill：Vision-MCP 操作手册

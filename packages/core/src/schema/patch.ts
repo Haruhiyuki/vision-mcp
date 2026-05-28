@@ -54,11 +54,29 @@ export const StatePatch = PatchBase.extend({
   operation: z.enum(["add", "replace", "remove"]).default("add"),
 });
 
+/**
+ * 往现有 state（或 region）加新 control。
+ *
+ * 与 ControlLocatorPatch 区分：
+ *   - ControlLocatorPatch：state 里已有此 control_id → 修字段
+ *   - ControlAddPatch：state 里没有此 control_id → 新增；已存在则忽略（幂等）
+ *
+ * 设计动机：agent 探索新页面时发现 baseline state 缺一个可交互元素，
+ * 应该走 patch 渐进沉淀（trust=session_only → 验证后升级 trusted），
+ * 而不是 commit_state 整覆盖（会丢手编 control 的 risk_level / locator 等）。
+ */
+export const ControlAddPatch = PatchBase.extend({
+  kind: z.literal("control_add"),
+  state_id: z.string().describe("state.id 或 region.id；后者支持往共享 region 加 control"),
+  control: Control,
+});
+
 export const Patch = z.discriminatedUnion("kind", [
   GeometryProfilePatch,
   ControlBBoxPatch,
   ControlLocatorPatch,
   StatePatch,
+  ControlAddPatch,
 ]);
 
 export type Patch = z.infer<typeof Patch>;
@@ -66,3 +84,4 @@ export type GeometryProfilePatch = z.infer<typeof GeometryProfilePatch>;
 export type ControlBBoxPatch = z.infer<typeof ControlBBoxPatch>;
 export type ControlLocatorPatch = z.infer<typeof ControlLocatorPatch>;
 export type StatePatch = z.infer<typeof StatePatch>;
+export type ControlAddPatch = z.infer<typeof ControlAddPatch>;

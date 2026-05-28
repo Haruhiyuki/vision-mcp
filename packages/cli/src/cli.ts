@@ -130,6 +130,10 @@ function usage(): string {
     "       主动写一个 control patch（修正 bbox 或 locator）。agent 在实战中发现 map 偏差时应直接调用，逐步把 map 校准到位",
     "  patches <app_id>",
     "       列出 app 当前所有已应用的 patch",
+    "  add-control <app_id> --state <id> --control '<json>' [--trust session_only|trusted|untrusted_proposal] [--reason <text>]",
+    "       走 control_add patch 往现有 state/region 加新 control（探索阶段渐进沉淀，不污染 baseline）",
+    "  commit-workflow <app_id> --id <workflow_id> --steps '<json>' [--description <text>] [--timeout-ms 120000] [--overwrite]",
+    "       把一段验证过的 step 序列沉淀为 workflow 写入 baseline。每个 step 引用必须是 map 里现有 action_id",
     "  trace <app_id> [--session <id>] [--limit 100]",
     "       打印最近 trace 事件",
     "  trace-viewer <app_id> [--out trace.html] [--session <id>]",
@@ -236,6 +240,12 @@ async function main() {
         return;
       case "patches":
         await cmdPatches(args);
+        return;
+      case "add-control":
+        await cmdAddControl(args);
+        return;
+      case "commit-workflow":
+        await cmdCommitWorkflow(args);
         return;
       case "trace":
         await cmdTrace(args);
@@ -713,11 +723,14 @@ async function cmdPatches(args: ParsedArgs) {
   }
   console.log(`${appId} 已应用 ${loaded.patches.length} patch:`);
   for (const p of loaded.patches) {
-    const target = p.kind === "geometry_profile"
-      ? p.visual_box_id
-      : p.kind === "state"
-      ? p.state.id
-      : `${p.state_id}.${p.control_id}`;
+    let target: string;
+    switch (p.kind) {
+      case "geometry_profile": target = p.visual_box_id; break;
+      case "state":            target = p.state.id; break;
+      case "control_add":      target = `${p.state_id}.${p.control.id}`; break;
+      case "control_bbox":
+      case "control_locator":  target = `${p.state_id}.${p.control_id}`; break;
+    }
     console.log(`  - ${p.id} [${p.kind}] target=${target} trust=${p.trust} confidence=${p.confidence}`);
     if (p.reason) console.log(`    reason: ${p.reason}`);
   }
@@ -731,6 +744,117 @@ async function cmdRepair(args: ParsedArgs) {
   const r = await runtime.repairAttempt(max);
   console.log(JSON.stringify(r, null, 2));
   await capsule.adapter.dispose?.();
+}
+
+async function cmdAddControl(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("add-control 需要 <app_id>");
+  const stateId = String(args.flags.state ?? "");
+  const controlJson = String(args.flags.control ?? "");
+  if (!stateId) throw new Error("add-control 需要 --state <id>");
+  if (!controlJson) throw new Error("add-control 需要 --control '<json>'");
+  const trust = (String(args.flags.trust ?? "session_only")) as
+    | "session_only" | "trusted" | "untrusted_proposal";
+  const reason = args.flags.reason ? String(args.flags.reason) : undefined;
+
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+
+  // 验证 state_id 存在（state 或 region）
+  const state = loaded.effective.states.find((s) => s.id === stateId);
+  const region = loaded.effective.regions.find((r) => r.id === stateId);
+  if (!state && !region) {
+    throw new Error(`state_id "${stateId}" 不存在（既不是 state.id 也不是 region.id）`);
+  }
+
+  const control = JSON.parse(controlJson);
+  const { Patch, writePatch } = await import("@vision-mcp/core");
+  const patch = Patch.parse({
+    kind: "control_add",
+    id: `add-${stateId}-${control.id ?? "unknown"}-${Date.now().toString(36)}`,
+    trust,
+    state_id: stateId,
+    control,
+    reason,
+    confidence: 1,
+    requires_review: trust === "untrusted_proposal",
+    created_at: new Date().toISOString(),
+    created_by: "vision-mcp-cli-add-control",
+  });
+  const filePath = await writePatch(loaded.baseDir, patch);
+  console.log(`✅ wrote patch ${filePath}`);
+  console.log(`   added control "${control.id}" → ${stateId} (trust=${trust})`);
+}
+
+async function cmdCommitWorkflow(args: ParsedArgs) {
+  const [appId] = args.positional;
+  if (!appId) throw new Error("commit-workflow 需要 <app_id>");
+  const workflowId = String(args.flags.id ?? "");
+  const stepsJson = String(args.flags.steps ?? "");
+  if (!workflowId) throw new Error("commit-workflow 需要 --id <workflow_id>");
+  if (!stepsJson) throw new Error("commit-workflow 需要 --steps '<json array>'");
+  const description = args.flags.description ? String(args.flags.description) : undefined;
+  const timeoutMs = Number(args.flags["timeout-ms"] ?? 120_000);
+  const overwrite = Boolean(args.flags.overwrite);
+
+  const mapPath = path.join(appsRoot(args), appId, "vision-mcp.yaml");
+  const loaded = await loadMap(mapPath);
+
+  const steps = JSON.parse(stepsJson) as Array<{
+    action_id: string;
+    params?: Record<string, unknown>;
+    approval_required?: boolean;
+    on_failure?: "abort" | "ask_user" | "repair" | "skip";
+    notes?: string;
+  }>;
+  if (!Array.isArray(steps) || steps.length === 0) {
+    throw new Error("--steps 必须是非空数组");
+  }
+
+  // 验证 step.action_id 都能找到
+  const { Workflow, parseActionId, findControl, saveMap } = await import("@vision-mcp/core");
+  const missing: string[] = [];
+  for (const s of steps) {
+    try {
+      const parsed = parseActionId(s.action_id);
+      const found = findControl(loaded.effective, parsed.ownerId, parsed.controlId);
+      if (!found) missing.push(s.action_id);
+    } catch {
+      missing.push(s.action_id);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `steps 引用了 ${missing.length} 个不存在的 action_id：${missing.slice(0, 5).join(", ")}` +
+        (missing.length > 5 ? ` (+${missing.length - 5} more)` : "") +
+        "。先用 vision-mcp add-control 加 control 或检查 step.action_id 拼写。",
+    );
+  }
+
+  const existingIdx = loaded.baseline.workflows.findIndex((w) => w.id === workflowId);
+  if (existingIdx >= 0 && !overwrite) {
+    throw new Error(`workflow "${workflowId}" 已存在；要覆盖加 --overwrite，或换 --id`);
+  }
+
+  const workflow = Workflow.parse({
+    id: workflowId,
+    description,
+    inputs: [],
+    steps: steps.map((s) => ({
+      action_id: s.action_id,
+      params: s.params,
+      approval_required: s.approval_required ?? false,
+      on_failure: s.on_failure ?? "abort",
+      notes: s.notes,
+    })),
+    timeout_ms: timeoutMs,
+  });
+
+  if (existingIdx >= 0) loaded.baseline.workflows[existingIdx] = workflow;
+  else loaded.baseline.workflows.push(workflow);
+  await saveMap(mapPath, loaded.baseline);
+  console.log(`✅ committed workflow "${workflowId}" → ${mapPath}`);
+  console.log(`   ${steps.length} steps${existingIdx >= 0 ? " (overwritten)" : ""}`);
 }
 
 async function cmdTrace(args: ParsedArgs) {
