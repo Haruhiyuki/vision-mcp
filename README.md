@@ -145,7 +145,10 @@ vision-mcp/
 
 ## 文档导览
 
-- **[AGENT-USAGE.md](AGENT-USAGE.md)** — agent 工具速查 + Apple Music 实战示例
+- **[skills/vision-mcp/SKILL.md](skills/vision-mcp/SKILL.md)** — agent 入口（plugin / host 自动加载）
+- [skills/vision-mcp/references/examples.md](skills/vision-mcp/references/examples.md) — 实战示例（Apple Music / Steam / 纯视觉 / patch）
+- [skills/vision-mcp/references/pitfalls.md](skills/vision-mcp/references/pitfalls.md) — 避坑速查（焦点 / 中文输入 / CEF / 窗口约束）
+- [AGENT-USAGE.md](AGENT-USAGE.md) — agent 文档导览（指路索引，内容已迁移）
 - **[INSTALL.md](INSTALL.md)** — 三种分发路径（Plugin / npm / 源码）+ 各 host 配置示例
 - **[skills/vision-mcp/SKILL.md](skills/vision-mcp/SKILL.md)** — agent 操作手册（精简核心，~5 分钟读完）
 - [skills/vision-mcp/references/workflow.md](skills/vision-mcp/references/workflow.md) — 工作流决策树、副产品原则、反模式

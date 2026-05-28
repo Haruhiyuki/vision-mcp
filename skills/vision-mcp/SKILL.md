@@ -77,7 +77,7 @@ discovery_flow: |
 | 触发自动修复 | `vision_map.repair_minimal --max-level 3` |
 | 浏览器查看 capsule | `vision-mcp live-view` |
 
-完整工具表 + 实战示例见 [`AGENT-USAGE.md`](../../AGENT-USAGE.md)。
+实战示例（macOS Apple Music / Windows Steam / 纯视觉）见 [`references/examples.md`](references/examples.md)。
 
 ## 4. action_id 与坐标
 
@@ -165,13 +165,19 @@ steps:
 
 ## 9. 进一步阅读
 
-- **[`references/map-design.md`](references/map-design.md)** ⭐ — 建 map 实战 patterns + 反模式 + 13 项 checklist（regions / kbd / collection / postcondition / risk_level / parent_state_id 何时用）
-- [`references/workflow.md`](references/workflow.md) — 任务驱动 vs 探索驱动决策树、副产品、反模式
-- [`references/patches.md`](references/patches.md) — 持续修正：4 种 patch 类型 / trust 升级
-- [`references/schema.md`](references/schema.md) — vision-mcp.yaml 字段速查
-- [`references/repair-policy.md`](references/repair-policy.md) — L0–L3 repair ladder
-- [`references/safety.md`](references/safety.md) — 高风险动作 / prompt injection 防护
-- [`references/platform-macos.md`](references/platform-macos.md) — macOS 适配器 / SCKit / AX-press
-- [`references/platform-windows.md`](references/platform-windows.md) — Windows 适配器 / PrintWindow / UIA + MSAA / Windows.Media.Ocr / SwitchToThisWindow
-- [`assets/vision-mcp.schema.json`](assets/vision-mcp.schema.json) — 完整 JSON Schema
-- [`assets/review-report-template.md`](assets/review-report-template.md) — 人类审阅模板
+按需读，不要一次性全拉进 context：
+
+| 触发情形 | 读哪个 |
+| ---- | ---- |
+| 建 map / 探索时不知道用哪个特性 | [`references/map-design.md`](references/map-design.md) ⭐ 13 项 checklist |
+| 跑任务时遇 unknown / 失败 | [`references/workflow.md`](references/workflow.md) 决策树 |
+| 想看跨平台 / 跨 app 的完整调用示例 | [`references/examples.md`](references/examples.md) ⭐ Apple Music + Steam + 纯视觉 |
+| 失败排查（坐标偏 / 焦点丢 / CEF / 中文输入异常） | [`references/pitfalls.md`](references/pitfalls.md) ⭐ |
+| 写 vision-mcp.yaml 查字段 | [`references/schema.md`](references/schema.md) |
+| 发现 map 偏差要 patch | [`references/patches.md`](references/patches.md) |
+| postcondition 失败 / 修复策略 | [`references/repair-policy.md`](references/repair-policy.md) |
+| 用户问能不能跑高风险动作 | [`references/safety.md`](references/safety.md) |
+| macOS 特有问题（SCKit / AX-press / Notes SwiftUI） | [`references/platform-macos.md`](references/platform-macos.md) |
+| Windows 特有问题（CEF / MSAA / OCR / UIPI elevation） | [`references/platform-windows.md`](references/platform-windows.md) |
+| JSON Schema 完整定义 | [`assets/vision-mcp.schema.json`](assets/vision-mcp.schema.json) |
+| 人类审阅 patch 模板 | [`assets/review-report-template.md`](assets/review-report-template.md) |
