@@ -73,14 +73,7 @@ args = ["-y", "@vision-mcp/cli@latest", "serve", "--apps-root", "/Users/you/.vis
 
 ### OpenClaw (`openclaw.json`)
 
-最简方式——用 [McPorter](https://openclawlaunch.com/guides/openclaw-mcporter)：
-
-```bash
-npm install -g mcporter
-mcporter install vision-mcp --target openclaw
-```
-
-或手动编辑 `openclaw.json` 加：
+vision-mcp 暂未提交到 OpenClaw 的 [McPorter](https://openclawlaunch.com/guides/openclaw-mcporter) 目录，所以直接手动编辑 `openclaw.json` 的 `mcpServers` 块：
 
 ```json
 {
@@ -93,19 +86,19 @@ mcporter install vision-mcp --target openclaw
 }
 ```
 
-OpenClaw 是 Node.js 持久化 agent 服务，配置文件在你启动 OpenClaw 时显示的 workspace 目录下。
+OpenClaw 是 Node.js 持久化 agent 服务，`openclaw.json` 在你启动 OpenClaw 时显示的 workspace 目录下。
 
 ### Hermes Agent (`~/.hermes/`)
 
-最简方式——交互式添加：
+vision-mcp 暂未进入 Hermes 内置 catalog，所以用 `hermes mcp add` 交互式自定义添加：
 
 ```bash
 hermes mcp add
 ```
 
-按提示选 stdio + 填 `npx -y @vision-mcp/cli@latest serve`。
+按提示选 **stdio transport**，命令填 `npx`，参数填 `-y @vision-mcp/cli@latest serve --apps-root /Users/you/.vision-mcp/apps`。
 
-或手动编辑 Hermes 配置（YAML 格式）：
+或直接编辑 Hermes 配置（YAML 格式，路径见 `hermes --help`）：
 
 ```yaml
 mcp_servers:
@@ -114,7 +107,7 @@ mcp_servers:
     args: ["-y", "@vision-mcp/cli@latest", "serve", "--apps-root", "${HOME}/.vision-mcp/apps"]
 ```
 
-加完后 `/reload-mcp` 在 chat 内刷新。Hermes Agent 是 NousResearch 开源的 MIT 自托管 agent。
+加完后在 chat 内 `/reload-mcp` 刷新。Hermes Agent 是 NousResearch 开源的 MIT 自托管 agent。
 
 ### 其他 stdio MCP host
 
