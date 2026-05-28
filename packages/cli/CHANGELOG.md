@@ -1,5 +1,24 @@
 # @vision-mcp/cli
 
+## 0.4.1
+
+### Patch Changes
+
+- `vision_map.snapshot` 返回里加 `ocr_tokens` —— 探索阶段 agent 一次拿到 AX 候选 + OCR 文字 token + bbox，OCR 作辅助定位（AX 树空 / CEF / 自绘 UI 时主力）。
+
+  修复链：
+
+  - snapshot inputSchema 加 `include_ocr` (default true) + `max_ocr_tokens` (default 50)
+  - 返回里加 `ocr_tokens: [{text, confidence, bbox_norm}]` (filter conf ≥ 0.5, sort desc, top N)
+  - 修 server ensureCapsule 自动注入 OCR provider（macOS DarwinOcrProvider + Windows WindowsOcrProvider），之前只注入 AX
+  - 修 snapshot handler 主动调 `recognizeRect(client_rect_px)` — DarwinOcrProvider.recognize(frame) 故意返回 []（需要 screen rect），detectState → analyze → recognize 这条路填不到 OCR token
+
+  真机验证（Notes 客户端）：candidates 5/110 + ocr_tokens 10/160 含 "设置"/"帮助" 等文字 + 精确 bbox，让 agent 不看图就能 click 文字位置。
+
+- Updated dependencies
+  - @vision-mcp/core@0.4.1
+  - @vision-mcp/server@0.4.1
+
 ## 0.4.0
 
 ### Minor Changes

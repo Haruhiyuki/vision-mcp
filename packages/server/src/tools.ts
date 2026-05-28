@@ -388,22 +388,49 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "vision_map.snapshot",
     {
-      title: "返回当前 capsule 的截图 + AX 候选 + 已知 state 匹配",
+      title: "返回当前 capsule 的截图 + AX 候选 + OCR token + 已知 state 匹配",
       description:
-        "Agent 探索的核心工具：一次拿到 PNG（base64）、可交互节点列表、与 map.states 的最佳匹配；后续 commit_state 时一并写入 vision-mcp。",
+        "Agent 探索的核心工具：一次拿到 PNG（base64）、可交互 AX 节点、OCR 文字 token + bbox、" +
+        "与 map.states 的最佳匹配；后续 commit_state 时一并写入 vision-mcp。" +
+        "AX 优先（最便宜最准），OCR 作辅助定位（AX 树空 / CEF / 自绘 UI 时主力）；" +
+        "视觉（PNG）只在 agent 真要看图时用——多数情况只看 candidates + ocr_tokens 足够。",
       inputSchema: {
         app_id: z.string(),
         include_image: z.boolean().default(true),
         include_ax: z.boolean().default(true),
+        include_ocr: z
+          .boolean()
+          .default(true)
+          .describe("是否返回 OCR token（按 confidence 排序，top N，含 bbox_norm 让 agent 直接拿到位置）"),
         max_candidates: z.number().int().min(1).max(500).default(80),
+        max_ocr_tokens: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .default(50)
+          .describe("OCR token 数量上限。confidence < 0.5 的自动过滤"),
       },
     },
-    async ({ app_id, include_image, include_ax, max_candidates }) => {
+    async ({ app_id, include_image, include_ax, include_ocr, max_candidates, max_ocr_tokens }) => {
       try {
         return await withApp(ctx, app_id, async (app) => {
           const rt = await ensureRuntime(ctx, app);
           const { state, insights } = await rt.detectState();
           const status = await (await ensureCapsule(ctx, app)).status();
+          // DarwinOcrProvider.recognize(frame) 永远返回 [] — 它需要 screen rect 才能
+          // 跑 Vision framework。真 OCR 走 recognizeRect(client_rect_px)。
+          // detectState → analyze 走的 recognize 这条路填不到 OCR；这里主动调一次。
+          if (include_ocr && ctx.providers.ocr && status.geometry?.client_rect_px) {
+            const maybeRectOcr = ctx.providers.ocr as {
+              recognizeRect?: (rect: import("@vision-mcp/core").RectPx) => Promise<import("@vision-mcp/core").OcrToken[]>;
+            };
+            if (maybeRectOcr.recognizeRect) {
+              try {
+                insights.ocr = await maybeRectOcr.recognizeRect(status.geometry.client_rect_px);
+              } catch { /* OCR best-effort */ }
+            }
+          }
           let image_base64: string | undefined;
           if (include_image) {
             const { Buffer } = await import("node:buffer");
@@ -422,6 +449,22 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
                   id: n.id,
                 }))
             : [];
+          // OCR token：辅助定位 — 让 agent 直接看到"屏幕上文字 + 精确 bbox"
+          // 比从 PNG 视觉理解便宜得多。AX 完整时通常不用看 ocr_tokens；
+          // 自绘 UI / CEF / canvas-rendering 场景 candidates 空，agent 应优先看 ocr_tokens
+          const ocr_tokens = include_ocr
+            ? insights.ocr
+                .filter((t) => t.confidence >= 0.5)
+                .sort((a, b) => b.confidence - a.confidence)
+                .slice(0, max_ocr_tokens)
+                .map((t) => ({
+                  text: t.text,
+                  confidence: Number(t.confidence.toFixed(3)),
+                  bbox_norm: t.bbox_norm
+                    ? (t.bbox_norm.map((v) => Number(v.toFixed(4))) as [number, number, number, number])
+                    : undefined,
+                }))
+            : [];
           return StructuredOk(
             {
               state_match: state,
@@ -429,11 +472,13 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               geometry: status.geometry,
               candidates,
               candidates_total: insights.accessibility.length,
+              ocr_tokens,
+              ocr_tokens_total: insights.ocr.length,
               image_base64,
               image_mime: image_base64 ? "image/png" : undefined,
               visual_hash: insights.visual_hash,
             },
-            `state=${state?.state_id ?? "none"} candidates=${candidates.length}/${insights.accessibility.length}`,
+            `state=${state?.state_id ?? "none"} ax=${candidates.length}/${insights.accessibility.length} ocr=${ocr_tokens.length}/${insights.ocr.length}`,
           );
         });
       } catch (err) {

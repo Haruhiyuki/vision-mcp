@@ -139,14 +139,32 @@ export async function ensureCapsule(
   const capsule = new Capsule(app.effective.visual_box, adapter, app.effective.input_lease_policy);
   app.adapter = adapter;
   app.capsule = capsule;
-  // 自动注入平台默认 providers（macOS：AX 树）。
-  const { DarwinOsascriptAdapter, DarwinHelperAdapter, DarwinAccessibilityProvider } =
-    await import("@vision-mcp/core");
+  // 自动注入平台默认 providers（macOS：AX + OCR；Windows：UIA + OCR）。
+  // Agent 探索时 snapshot 拿 OCR token 辅助定位、postcondition 评估 OCR-class
+  // condition、locator_priority 走 OCR 兜底，都依赖这里注入的 provider。
+  const {
+    DarwinOsascriptAdapter,
+    DarwinHelperAdapter,
+    DarwinAccessibilityProvider,
+    DarwinOcrProvider,
+    WindowsPlatformAdapter,
+    WindowsAccessibilityProvider,
+    WindowsOcrProvider,
+  } = await import("@vision-mcp/core");
   if (
     (adapter instanceof DarwinOsascriptAdapter || adapter instanceof DarwinHelperAdapter) &&
     !ctx.providers.accessibility
   ) {
     ctx.providers.accessibility = new DarwinAccessibilityProvider(adapter);
+  }
+  if (adapter instanceof DarwinHelperAdapter && !ctx.providers.ocr) {
+    ctx.providers.ocr = new DarwinOcrProvider(adapter);
+  }
+  if (adapter instanceof WindowsPlatformAdapter && !ctx.providers.accessibility) {
+    ctx.providers.accessibility = new WindowsAccessibilityProvider(adapter);
+  }
+  if (adapter instanceof WindowsPlatformAdapter && !ctx.providers.ocr) {
+    ctx.providers.ocr = new WindowsOcrProvider(adapter);
   }
   return capsule;
 }
