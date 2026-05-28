@@ -61,6 +61,45 @@ export interface ActionContext {
   approval_required: boolean;
 }
 
+/**
+ * 动作执行后给 agent 的原始信号——让 agent 不被 runtime 黑盒判定。
+ *
+ * 设计哲学：postcondition 评估是机械的二元 pass/fail；signals 是 raw 数据让
+ * agent 自己复核——比如看到 ocr_hits 命中的字其实是错的（"新建备录" 漏了"忘"），
+ * agent 可以主动 patch locator 而不是相信 evaluator 的 ok=true。
+ *
+ * 字段精简（避免 token 爆炸）：只返回 postcondition 评估时关键命中的数据，
+ * 不 dump 整个 frame insights。
+ */
+export interface ActionSignals {
+  /** capsule.status 返回的 window title 字面值。最便宜的信号。 */
+  window_title?: string;
+  /** detect_state 推断结果：状态 id + score + 命中的 anchor 类型列表。 */
+  state_after?: {
+    state_id: string;
+    score: number;
+    matched_anchors?: string[];
+  };
+  /** postcondition 评估时 OCR 命中的关键 token（如 text_should_appear 命中的那行）。 */
+  ocr_hits?: Array<{
+    text: string;
+    confidence: number;
+    bbox_norm?: [number, number, number, number];
+  }>;
+  /** postcondition 评估时 AX 命中的 node（如 control_should_exist 找到的）。 */
+  ax_matched?: Array<{
+    control_id?: string;
+    role?: string;
+    name?: string;
+  }>;
+  /** 动作前后 dHash 差异（0=没变，1=全变）；和 visual_change 同源。 */
+  visual_diff?: number;
+  /** 动作后的 dHash hex（16 char）。agent 可以下次跟基线比对。 */
+  visual_hash_after?: string;
+  /** postcondition 评估器返回的 reason 字符串（紧凑结论，agent 直接读）。 */
+  postcondition_reasons?: string[];
+}
+
 export interface ActionResult {
   action_id: string;
   succeeded: boolean;
@@ -80,6 +119,13 @@ export interface ActionResult {
    */
   visual_change?: number;
   low_visual_change?: boolean;
+  /**
+   * Raw signals — agent in-the-loop 看的原始数据。
+   * 让 agent 自己复核 OCR 命中是不是真对、AX node 名字是否符合预期、
+   * window_title 是否真切换、state_score 高不高，
+   * 不被 runtime 机械 pass/fail 黑盒。
+   */
+  signals?: ActionSignals;
 }
 
 export interface WorkflowResult {

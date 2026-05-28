@@ -1,5 +1,31 @@
 # @vision-mcp/cli
 
+## 0.4.0
+
+### Minor Changes
+
+- `perform_action` 返回里加 `signals` 字段——agent in-the-loop 看 raw 数据复核机械 pass/fail 之外的细节。
+
+  字段：
+
+  - `window_title` — 当前 window 标题（信号最便宜）
+  - `state_after` — `{state_id, score, matched_anchors}` detect_state 推断详情
+  - `ocr_hits` — postcondition 评估时 OCR 命中的 top 10 token（confidence ≥ 0.5）
+  - `ax_matched` — postcondition 评估时 AX 命中的 top 10 node（有 name/role）
+  - `visual_diff` — 动作前后 dHash 差异（0-1）
+  - `visual_hash_after` — 动作后的 hash hex
+  - `postcondition_reasons` — evaluator 返回的紧凑 reason 字符串列表
+
+  设计哲学：postcondition 评估是机械 pass/fail；signals 是 raw 让 agent 自己复核（OCR 命中的字真对吗？AX node 是预期的吗？state_score 高吗？visual_diff 异常吗？）。配 postcondition 时收集全套；没配也返回 window_title / state_after / visual_diff / ax / visual_hash_after 基础信号。
+
+  不强制 agent 看，默认不影响"沉淀-命中"零看图流程；agent 怀疑时随时能看。
+
+### Patch Changes
+
+- Updated dependencies
+  - @vision-mcp/core@0.4.0
+  - @vision-mcp/server@0.4.0
+
 ## 0.3.0
 
 ### Minor Changes

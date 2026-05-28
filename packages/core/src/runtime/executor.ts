@@ -248,6 +248,12 @@ export class RuntimeExecutor {
     let message: string | undefined;
     let visualChange: number | undefined;
     let lowVisualChange = false;
+    // Raw signals 收集：refresh callback 把最后一次评估时的数据 mutate 进来，
+    // 末尾构造 signals 返回 agent。
+    let lastWindowTitle: string | undefined;
+    let lastInsightsRef: import("../locator/types.js").FrameInsights | null = null;
+    let postconditionReasons: string[] = [];
+    let afterHashOuter: string | undefined;
 
     try {
       events.push(
@@ -330,6 +336,7 @@ export class RuntimeExecutor {
         await new Promise((r) => setTimeout(r, 250));
         const afterFrame = await this.opts.capsule.capture();
         afterHash = await this.hasher.hash(afterFrame);
+        afterHashOuter = afterHash;
         if (beforeHash && afterHash) {
           const sim = this.hasher.similarity(beforeHash, afterHash);
           visualChange = 1 - sim;
@@ -423,6 +430,9 @@ export class RuntimeExecutor {
               detected2 = this.resolver.detectState(this.opts.map, ins);
               stateAfter = detected2;
             }
+            // 保留最后一次评估时的 insights / window_title 给 signals 用
+            lastWindowTitle = windowTitle;
+            lastInsightsRef = ins;
             return {
               map: this.opts.map,
               state_match: detected2,
@@ -434,6 +444,7 @@ export class RuntimeExecutor {
           },
         );
         postOk = result.ok;
+        postconditionReasons = result.reasons;
         if (!postOk) {
           events.push(
             await this.appendTrace({
@@ -449,9 +460,16 @@ export class RuntimeExecutor {
           );
         }
       } else {
+        // 没配 postcondition：仍做一次 detect_state + status 拿基础 signals 给 agent，
+        // 让 agent 哪怕不验 postcondition 也能看到 window_title / state_after 等关键信号
         postOk = true;
         const post = await this.detectState();
         stateAfter = post.state;
+        lastInsightsRef = post.insights;
+        try {
+          const st = await this.opts.capsule.status();
+          lastWindowTitle = st.attached_window?.title;
+        } catch { /* status best-effort */ }
       }
 
       succeeded = true;
@@ -483,6 +501,43 @@ export class RuntimeExecutor {
       await lease.release();
     }
 
+    // 构造 raw signals 给 agent（in-the-loop 能复核机械 pass/fail 之外的细节）
+    const signals: import("./types.js").ActionSignals = {};
+    if (lastWindowTitle !== undefined) signals.window_title = lastWindowTitle;
+    if (stateAfter) {
+      signals.state_after = {
+        state_id: stateAfter.state_id,
+        score: stateAfter.score,
+        matched_anchors: stateAfter.matched_anchors?.map((a) => a.type),
+      };
+    }
+    // OCR token 限制 top 10（按 confidence 排序）+ 至少 0.5 置信度，避免 token 爆炸
+    if (lastInsightsRef?.ocr && lastInsightsRef.ocr.length > 0) {
+      signals.ocr_hits = lastInsightsRef.ocr
+        .filter((t) => t.confidence >= 0.5)
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, 10)
+        .map((t) => ({
+          text: t.text,
+          confidence: t.confidence,
+          bbox_norm: t.bbox_norm,
+        }));
+    }
+    // AX node 限制 top 10（有 name/role 的）
+    if (lastInsightsRef?.accessibility && lastInsightsRef.accessibility.length > 0) {
+      signals.ax_matched = lastInsightsRef.accessibility
+        .filter((n) => n.name || n.role)
+        .slice(0, 10)
+        .map((n) => ({
+          control_id: n.automation_id,
+          role: n.role,
+          name: n.name,
+        }));
+    }
+    if (visualChange !== undefined) signals.visual_diff = visualChange;
+    if (afterHashOuter) signals.visual_hash_after = afterHashOuter;
+    if (postconditionReasons.length > 0) signals.postcondition_reasons = postconditionReasons;
+
     return {
       action_id: actionId,
       succeeded,
@@ -496,6 +551,7 @@ export class RuntimeExecutor {
       message,
       visual_change: visualChange,
       low_visual_change: lowVisualChange,
+      signals: Object.keys(signals).length > 0 ? signals : undefined,
     };
   }
 
