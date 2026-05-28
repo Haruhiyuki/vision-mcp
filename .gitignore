@@ -22,6 +22,9 @@ trace.db-journal
 # vision-mcp runtime cache
 .vision-mcp/runtime-cache
 
+# 设计文档草稿（本地保留，不入库）
+vision_mcp_windows_macos_design.md
+
 # ============ vision-mcp 运行时产物（不入库） ============
 # 用户的 map data 目录（VISION_MCP_APPS_ROOT 默认指向）。参考 maps 在 examples/，
 # 用户应自己 copy 一份到 apps/（或任意位置）作为工作目录。
