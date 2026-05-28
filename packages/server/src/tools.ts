@@ -941,6 +941,16 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         return await withApp(ctx, app_id, async (app) => {
           const rt = await ensureRuntime(ctx, app);
           const result = await rt.performAction(action_id, params ?? {});
+          // 记录到 session history 供 harvest_session 一键沉淀。
+          // 只在 perform_action 这一层记，raw 工具（click_at / type_text）不记
+          // ——它们没有 action_id，无法直接 commit_workflow。
+          app.sessionHistory ??= [];
+          app.sessionHistory.push({
+            action_id,
+            params,
+            ts: Date.now(),
+            succeeded: result.succeeded,
+          });
           return StructuredOk(
             {
               ...result,
@@ -1357,6 +1367,124 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               overwritten: existingIdx >= 0,
             },
             `committed workflow ${workflow_id} (${steps.length} steps)`,
+          );
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.harvest_session",
+    {
+      title: "一键沉淀本 session 内的 perform_action 序列为新 workflow",
+      description:
+        "比 commit_workflow 更省事：server 自动用本 session 内此 app 上跑过的（默认只取 succeeded 的）" +
+        " perform_action 历史串成 steps，agent 只给 workflow_id + description 即可。" +
+        "适合 agent 跑通一段操作后直接沉淀，不必重述每步 action_id / params。" +
+        "若想只沉淀最近 N 步用 last_n；若想只沉淀某时间点之后用 since_ms。" +
+        "对 raw click_at / type_text / press_key 等无 action_id 的工具调用不记录——" +
+        "想沉淀那些请先用 add_control 把它们对应的 control 加进 map 再走 perform_action。",
+      inputSchema: {
+        app_id: z.string(),
+        workflow_id: z.string(),
+        description: z.string().optional(),
+        last_n: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("只取 history 末尾 N 步；不传则取全部"),
+        since_ms: z
+          .number()
+          .int()
+          .optional()
+          .describe("只取 ts ≥ since_ms 的步；不传则不按时间过滤"),
+        include_failed: z
+          .boolean()
+          .default(false)
+          .describe("默认 false 只串成功步；true 则连失败步也串进 workflow（一般不推荐）"),
+        overwrite: z
+          .boolean()
+          .default(false)
+          .describe("已存在同 id workflow 时是否覆盖；默认 false 报错"),
+        timeout_ms: z.number().int().positive().default(120_000),
+      },
+    },
+    async ({ app_id, workflow_id, description, last_n, since_ms, include_failed, overwrite, timeout_ms }) => {
+      try {
+        return await withApp(ctx, app_id, async (app) => {
+          const all = app.sessionHistory ?? [];
+          if (all.length === 0) {
+            throw new VisionMcpError(
+              ERROR_CODES.ACTION_NOT_FOUND,
+              "本 session 内此 app 还没有 perform_action 调用记录。先用 perform_action 跑通一段操作再 harvest_session。",
+            );
+          }
+          let filtered = include_failed ? all : all.filter((r) => r.succeeded);
+          if (since_ms !== undefined) filtered = filtered.filter((r) => r.ts >= since_ms);
+          if (last_n !== undefined) filtered = filtered.slice(-last_n);
+          if (filtered.length === 0) {
+            throw new VisionMcpError(
+              ERROR_CODES.ACTION_NOT_FOUND,
+              `按 last_n=${last_n} / since_ms=${since_ms} / include_failed=${include_failed} 过滤后无可沉淀的 action`,
+            );
+          }
+          // 验证每个 action_id 在 effective map 里仍能找到
+          const missing: string[] = [];
+          for (const r of filtered) {
+            try {
+              const parsed = parseActionId(r.action_id);
+              const found = findControl(app.effective, parsed.ownerId, parsed.controlId);
+              if (!found) missing.push(r.action_id);
+            } catch {
+              missing.push(r.action_id);
+            }
+          }
+          if (missing.length > 0) {
+            throw new VisionMcpError(
+              ERROR_CODES.ACTION_NOT_FOUND,
+              `session history 引用了 ${missing.length} 个不存在的 action_id：${missing.slice(0, 5).join(", ")}` +
+                (missing.length > 5 ? ` (+${missing.length - 5} more)` : "") +
+                "。可能 map 被人工编辑过；可手动 commit_workflow 显式列 steps，或先 add_control 把这些加回来。",
+            );
+          }
+          // 检查 workflow_id 冲突
+          const existingIdx = app.map.workflows.findIndex((w) => w.id === workflow_id);
+          if (existingIdx >= 0 && !overwrite) {
+            throw new VisionMcpError(
+              ERROR_CODES.MAP_VALIDATION_FAILED,
+              `workflow ${workflow_id} 已存在；要覆盖请传 overwrite=true，或换 workflow_id`,
+            );
+          }
+          // 构 Workflow
+          const workflow = WorkflowSchema.parse({
+            id: workflow_id,
+            description: description ?? `harvested from session at ${new Date().toISOString()} (${filtered.length} steps)`,
+            inputs: [],
+            steps: filtered.map((r) => ({
+              action_id: r.action_id,
+              params: r.params,
+              approval_required: false,
+              on_failure: "abort" as const,
+            })),
+            timeout_ms,
+          });
+          if (existingIdx >= 0) app.map.workflows[existingIdx] = workflow;
+          else app.map.workflows.push(workflow);
+          const { applyPatches } = await import("@vision-mcp/core");
+          app.effective = applyPatches(app.map, app.patches);
+          await writeEffective(app);
+          return StructuredOk(
+            {
+              workflow_id,
+              steps_count: filtered.length,
+              overwritten: existingIdx >= 0,
+              source: "session_history",
+              total_history: all.length,
+            },
+            `harvested workflow ${workflow_id} from ${filtered.length} session step(s)`,
           );
         });
       } catch (err) {

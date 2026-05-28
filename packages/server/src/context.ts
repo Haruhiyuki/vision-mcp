@@ -39,6 +39,15 @@ export interface ServerContext {
   approvalCallback?: (req: import("@vision-mcp/core").ApprovalRequest) => Promise<"granted" | "denied" | "expired">;
 }
 
+/** Session 内 perform_action 调用历史，让 harvest_session 一键沉淀。 */
+export interface SessionActionRecord {
+  action_id: string;
+  params?: Record<string, unknown>;
+  ts: number;
+  /** 失败的不算（commit_workflow 只串成功步骤）。 */
+  succeeded: boolean;
+}
+
 export interface AppHandle {
   app_id: string;
   baseDir: string;
@@ -48,6 +57,8 @@ export interface AppHandle {
   effective: VisionMap;
   capsule?: Capsule;
   adapter?: PlatformAdapter;
+  /** 本 server 进程内此 app 上的 perform_action 历史，供 harvest_session 使用。 */
+  sessionHistory?: SessionActionRecord[];
   trace?: FileTraceStore;
   runtime?: RuntimeExecutor;
   builder?: MapBuilder;

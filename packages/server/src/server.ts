@@ -41,5 +41,35 @@ export function createVisionMcpServer(
   );
   registerTools(server, ctx);
   registerResources(server, ctx);
+
+  // ===== Workaround for MCP SDK 1.29 taskSupport hardcoding =====
+  //
+  // 问题：SDK 1.29 的 registerTool 硬编码 tool.execution = { taskSupport: 'forbidden' }，
+  // 并把这个字段原样发给 client。Claude Code 把 'forbidden' 解读为"工具完全不可用"
+  // ——subagent 调不了、主 agent 也走不通——整个 vision-mcp 工具集对 agent 不可见。
+  //
+  // 不能直接改 tool.execution：SDK 的 CallTool handler 会检查 taskSupport === 'optional'
+  // 必须配套 task handler（registerToolTask 注册的），否则直接 throw McpError。
+  // 我们的工具都是 sync handler，改成 'optional' 会导致所有调用失败。
+  //
+  // 解决方案：只在 ListTools 响应里把 execution.taskSupport 换成 'optional'——
+  // client 看到的是 'optional' 不再 ban 工具，SDK 内部仍认为 forbidden 走原 sync 路径。
+  // 直接 wrap underlying Server 的 ListTools handler。
+  const sdkServer = (server as unknown as {
+    server: {
+      _requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<{ tools: Array<{ execution?: { taskSupport: string } }> }>>;
+    };
+  }).server;
+  const originalListTools = sdkServer._requestHandlers.get("tools/list");
+  if (originalListTools) {
+    sdkServer._requestHandlers.set("tools/list", async (req: unknown, extra: unknown) => {
+      const result = await originalListTools(req, extra);
+      return {
+        ...result,
+        tools: result.tools.map((t) => ({ ...t, execution: { taskSupport: "optional" } })),
+      };
+    });
+  }
+
   return server;
 }

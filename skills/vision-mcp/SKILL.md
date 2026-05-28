@@ -27,15 +27,27 @@ discovery_flow: |
   失败 / 没现成 workflow（探索 + 沉淀闭环）：
     a. list_actions app_id              → 现有 action 够用？
     b. snapshot + describe_action       → 看现状 + locator 细节；新元素 → propose_controls
-    c. perform_action 一步步试          → 跑通后两条沉淀路径：
-       · 单个新 action  → vision_map.add_control（走 patch overlay，trust 渐进）
-       · 多步组合稳定  → vision_map.commit_workflow（走 baseline，下次同任务直接 run_workflow）
-    d. 偏差 → vision_map.apply_patch 修正
+    c. perform_action 一步步试          → 跑通后沉淀（任选）：
+       · 全用现成 action 跑通 → vision_map.harvest_session ⭐ 一行命令自动串成 workflow
+       · 用到了新 control     → vision_map.add_control 加 control + vision_map.commit_workflow 显式串 steps
+       · 偏差                 → vision_map.apply_patch 修正
 ---
 
 # Skill：Vision-MCP 操作手册
 
 桌面 GUI 操作的**性能 / 长期成本优化层**——agent 看一次图、点对一次的成本沉淀进 vision-mcp.yaml map，下次同任务直接 `run_workflow` 命中，跳过视觉判断。第一次成本与 Computer Use 相当；第二次起每次都摊销。
+
+## 0. Precondition（开干之前先检查）
+
+**任何 agent（包括 subagent）开始任务前，必须先调 `vision_map.list_apps`** 验证 vision-mcp 工具在当前上下文可用。
+
+- ✅ 返回 `{ apps: [...] }`（数组可能为空）→ 工具可用，继续按本文档操作
+- ❌ 抛错 "tool not found" / "method not found" / "tool is disabled" → 工具**不可用**
+
+**工具不可用时**：立即停手，向上游汇报：
+> "vision-mcp MCP 工具在当前 agent 上下文中不可见，无法完成本任务。可能原因：(1) plugin 未正确启用 — 让用户跑 `/mcp` 看 vision-mcp 是否 Connected；(2) 当前 agent 类型不继承 plugin MCP 工具。请用户改在主对话执行，或检查 host 的 subagent MCP inheritance 配置。"
+
+**不要尝试用 osascript / AppleScript / 浏览器 / 直接键盘模拟等绕路方式完成任务**——会偏离本 skill 的设计预期，且 destructive 操作绕过 vision-mcp 的 risk_level + approval 安全网。
 
 ## 1. 核心原则
 
