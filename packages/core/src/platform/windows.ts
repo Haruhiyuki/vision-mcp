@@ -39,7 +39,13 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
 
   static async create(opts: { helperPath?: string } = {}): Promise<WindowsPlatformAdapter> {
     const helperPath = opts.helperPath ?? (await resolveDefaultHelper("windows"));
-    const bridge = await NativeBridge.tryCreate({ helperPath: helperPath ?? undefined });
+    // 15s default: PS5.1 cold start 要编 Add-Type C# 类（Win32 P/Invoke + WindowsBase +
+    // MsaaDumper），头一次能花 2-5s；CI headless / 冷盘 + 5s 默认就会 timeout。对齐 macOS
+    // swift helper（darwin-helper.ts 也是 15_000）。后续可加首次预热让冷启动一次性摊销。
+    const bridge = await NativeBridge.tryCreate({
+      helperPath: helperPath ?? undefined,
+      defaultTimeoutMs: 15_000,
+    });
     if (!bridge) {
       throw new VisionMcpError(
         "CAPSULE_PLATFORM_UNAVAILABLE",
