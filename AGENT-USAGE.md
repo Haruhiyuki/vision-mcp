@@ -15,6 +15,35 @@
 
 ## 1. 工具总览（按工作流位置分组）
 
+### 1.0 发现 — agent 启动时第一步
+
+> 像 MCP tool 的 `list_tools → call_tool` 一样：先看摘要，需要细节才钻进去。**不要一上来拉全 yaml**（Steam 500+ 行 = context bomb）。
+
+| 工具 | 用途 | 返回 |
+| ---- | ---- | ---- |
+| **`vision_map.list_apps`** | 列所有 app 含 name/platform/description + workflows 摘要（id+description） | apps[] |
+| **`vision_map.list_workflows`** | 列指定 app 的 workflows 摘要（id + description + inputs + destructive 标志 + steps_count） | workflows[] |
+| **`vision_map.describe`** | app 总览：app metadata + regions/states/workflows 摘要（不含 controls 细节） | summary |
+| **`vision_map.describe_workflow`** | 单 workflow 完整步骤 + 每步 control 描述 + risk_level + on_failure | steps[] |
+| **`vision_map.describe_action`** | 单 action_id 的 control 详情（locator/postcondition/risk_level） | control 详情 |
+| `vision_map.list_actions` | 指定 state 的所有 action_id（用于探索/调试） | actions[] |
+
+**典型 flow**：
+
+```
+list_apps                    # 发现：选 app_id
+  ↓
+list_workflows app_id        # 选 workflow_id
+  ↓
+describe_workflow app_id wid # 看 steps + risk（destructive 时必看）
+  ↓
+run_workflow app_id wid inputs   # 执行
+  ↓ 失败 ↓
+snapshot + describe_action + patch + 重试
+```
+
+资源版（用 MCP resource 而非 tool）：`vision-mcp://apps` / `apps/{id}/summary` / `apps/{id}/workflows` — 见 SKILL §7。
+
 ### 1.1 任务执行 ⭐ — 任务驱动下大部分时间用这些
 
 > 任务驱动模式下的**默认工具**。优先调这些；只在 4 个时机才 snapshot；遇 map 偏差直接 patch。

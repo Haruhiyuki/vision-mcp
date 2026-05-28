@@ -523,13 +523,144 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "vision_map.list_apps",
     {
-      title: "列出可用 app maps",
-      description: "扫描 apps 根目录下所有包含 vision-mcp.yaml 的子目录。",
+      title: "列出可用 app maps（含 metadata + workflow 摘要）",
+      description:
+        "扫描 apps 根目录下所有包含 vision-mcp.yaml 的子目录，每个 app 返回 " +
+        "name/platform/description/states 数/workflows 摘要（id+description+destructive 标志）。" +
+        "agent 启动时第一步：通过这个判断'用哪个 app + 跑哪个 workflow'，避免拉全 map yaml。",
     },
     async () => {
       try {
         const apps = await listApps(ctx);
-        return StructuredOk({ apps }, `${apps.length} app(s)`);
+        const out: unknown[] = [];
+        for (const a of apps) {
+          try {
+            const app = await loadApp(ctx, a.app_id);
+            const wfs = app.effective.workflows.map((w) => ({
+              id: w.id,
+              description: w.description,
+              inputs: w.inputs?.map((i) => i.name),
+              destructive: w.steps?.some(
+                (s) =>
+                  s.approval_required === true ||
+                  // 间接信号：步骤指向的 control 是否带 destructive risk_level
+                  (() => {
+                    const parsed = parseActionId(s.action_id);
+                    const hit = findControl(app.effective, parsed.ownerId, parsed.controlId);
+                    return hit?.control.risk_level === "destructive";
+                  })(),
+              ) ?? false,
+            }));
+            out.push({
+              app_id: a.app_id,
+              name: app.effective.app.name,
+              platform: app.effective.app.platform,
+              description: app.effective.app.description?.split("\n")[0],
+              states_count: app.effective.states.length,
+              regions_count: app.effective.regions?.length ?? 0,
+              workflows: wfs,
+            });
+          } catch (err) {
+            // 损坏的 app：不阻断 list，返回 error tag
+            out.push({ app_id: a.app_id, error: (err as Error).message.split("\n")[0] });
+          }
+        }
+        return StructuredOk({ apps: out }, `${out.length} app(s)`);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.list_workflows",
+    {
+      title: "列出指定 app 的 workflows（摘要，不含 steps 细节）",
+      description:
+        "返回每个 workflow 的 id/description/inputs/timeout_ms/steps_count/destructive。" +
+        "若要看 workflow steps 细节（什么 action 顺序），用 vision_map.describe_workflow。" +
+        "若要执行，直接 vision_map.run_workflow。",
+      inputSchema: { app_id: z.string() },
+    },
+    async ({ app_id }) => {
+      try {
+        return await withApp(ctx, app_id, (app) => {
+          const wfs = app.effective.workflows.map((w) => ({
+            id: w.id,
+            description: w.description,
+            inputs: w.inputs?.map((i) => ({ name: i.name, description: i.description })),
+            timeout_ms: w.timeout_ms,
+            steps_count: w.steps.length,
+            destructive: w.steps.some(
+              (s) =>
+                s.approval_required === true ||
+                (() => {
+                  const parsed = parseActionId(s.action_id);
+                  const hit = findControl(app.effective, parsed.ownerId, parsed.controlId);
+                  return hit?.control.risk_level === "destructive";
+                })(),
+            ),
+          }));
+          return Promise.resolve(StructuredOk({ workflows: wfs }, `${wfs.length} workflows`));
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "vision_map.describe_workflow",
+    {
+      title: "返回单个 workflow 的完整步骤与每步详情",
+      description:
+        "返回 steps 列表，每步含 action_id + control description + risk_level + " +
+        "on_failure + approval_required。agent 决定要不要 run_workflow 前的最后一步检查。",
+      inputSchema: { app_id: z.string(), workflow_id: z.string() },
+    },
+    async ({ app_id, workflow_id }) => {
+      try {
+        return await withApp(ctx, app_id, (app) => {
+          const wf = app.effective.workflows.find((w) => w.id === workflow_id);
+          if (!wf) {
+            // 没有专门的 WORKFLOW_NOT_FOUND 错误码；语义等价 ACTION_NOT_FOUND
+            throw new VisionMcpError(
+              "ACTION_NOT_FOUND",
+              `workflow "${workflow_id}" 未在 app "${app_id}" 找到`,
+            );
+          }
+          const stepsDetail = wf.steps.map((s) => {
+            const parsed = parseActionId(s.action_id);
+            const hit = findControl(app.effective, parsed.ownerId, parsed.controlId);
+            return {
+              action_id: s.action_id,
+              params: s.params,
+              approval_required: s.approval_required,
+              on_failure: s.on_failure,
+              control: hit
+                ? {
+                    label: hit.control.label,
+                    role: hit.control.role,
+                    action_types: hit.control.action_types,
+                    risk_level: hit.control.risk_level,
+                    has_postcondition: Boolean(hit.control.postcondition),
+                  }
+                : { error: "control_not_found" },
+            };
+          });
+          return Promise.resolve(
+            StructuredOk(
+              {
+                workflow_id,
+                description: wf.description,
+                inputs: wf.inputs,
+                timeout_ms: wf.timeout_ms,
+                steps: stepsDetail,
+              },
+              `${workflow_id}: ${stepsDetail.length} steps`,
+            ),
+          );
+        });
       } catch (err) {
         return errorResult(err);
       }
@@ -581,8 +712,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "vision_map.describe",
     {
-      title: "返回 map 概要",
-      description: "包含 visual_box、states、controls、workflows 数量与基本健康检查。",
+      title: "返回 map 概要（含 description + state/workflow 摘要）",
+      description:
+        "比 list_apps 更详细一层：含 app description / 每个 state 的 id+kind+description / " +
+        "每个 region 的 id+description / 每个 workflow 的 id+description+inputs。" +
+        "不含 controls 细节（用 vision_map.list_actions / describe_action）或 workflow steps（用 describe_workflow）。" +
+        "agent 选定 app 后第二步调，决定要 run_workflow 还是先 detect_state。",
       inputSchema: { app_id: z.string() },
     },
     async ({ app_id }) => {
@@ -590,10 +725,37 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         return await withApp(ctx, app_id, (app) => {
           const issues = lintMap(app.effective);
           const snapshot = snapshotApp(app);
+          const m = app.effective;
           return Promise.resolve(
             StructuredOk(
               {
                 ...snapshot,
+                app: {
+                  id: m.app.id,
+                  name: m.app.name,
+                  platform: m.app.platform,
+                  description: m.app.description,
+                },
+                // states / workflows 仍是数量（向后兼容）；详细 summary 用下面 _summary 字段
+                regions_summary: (m.regions ?? []).map((r) => ({
+                  id: r.id,
+                  description: r.description,
+                  controls_count: r.controls.length,
+                })),
+                states_summary: m.states.map((s) => ({
+                  id: s.id,
+                  kind: s.kind,
+                  description: s.description,
+                  controls_count: s.controls.length,
+                  inherit_regions: s.inherit_regions,
+                  parent_state_id: s.parent_state_id,
+                })),
+                workflows_summary: m.workflows.map((w) => ({
+                  id: w.id,
+                  description: w.description,
+                  steps_count: w.steps.length,
+                  inputs: w.inputs?.map((i) => i.name),
+                })),
                 issues,
                 has_errors: hasErrors(issues),
               },

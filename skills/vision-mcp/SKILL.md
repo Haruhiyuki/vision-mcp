@@ -76,13 +76,35 @@ Trust 渐进：`session_only`（默认，本次会话） → `trusted`（用户�
 
 详见 [`references/safety.md`](references/safety.md)。
 
-## 7. 资源族（MCP）
+## 7. 资源族（MCP）— 按需查询不要拉全 map
 
-- `vision-mcp://apps` — 所有 app 索引
-- `vision-mcp://apps/{id}/map` — 有效地图（baseline + patches）
-- `vision-mcp://apps/{id}/workflows/{wid}` / `.../states/{sid}` / `.../actions/{aid}`
-- `vision-mcp://apps/{id}/patches` — 已应用 patches
-- `vision-mcp://apps/{id}/traces/latest` — 最近 trace
+vision-mcp 像 MCP tool 一样**逐级展开**：先看摘要决定路径，需要细节才钻进去。**不要一上来拉全 yaml**（Steam 500+ 行 / ERP 400+ 行 = context bomb）。
+
+| 用途 | 资源 / 工具 | 何时用 |
+| ---- | ----------- | ------ |
+| **发现** "有哪些 app 能跑" | `vision-mcp://apps` 资源 或 `vision_map.list_apps` 工具 | agent 启动第一步；含 name/platform/description + workflows 摘要 |
+| **app 总览** | `vision-mcp://apps/{id}/summary` 资源 或 `vision_map.describe` 工具 | 选定 app 后；含 regions/states/workflows 摘要（**不**含 controls/locator 细节） |
+| **workflow 列表** | `vision-mcp://apps/{id}/workflows` 资源 或 `vision_map.list_workflows` 工具 | 决定跑哪个 workflow 之前 |
+| **workflow 步骤详情** | `vision_map.describe_workflow` 工具 | 确认要 run_workflow 前的最后一步——看每步 action_id + risk_level + has_postcondition |
+| **action 详情** | `vision-mcp://apps/{id}/actions/{aid}` 资源 或 `vision_map.describe_action` 工具 | 偏差排查 / 写 patch 前看当前 control locator |
+| **state 详情** | `vision-mcp://apps/{id}/states/{sid}` 资源 | 看单个 state 的所有 controls |
+| **patches 列表** | `vision-mcp://apps/{id}/patches` | 看已应用的 patch 历史 |
+| **trace** | `vision-mcp://apps/{id}/traces/latest` | 失败诊断 |
+| **全 map yaml** (⚠️ context bomb) | `vision-mcp://apps/{id}/map` | 仅在确实需要看全 locator 细节时；日常用 summary |
+
+**典型 agent flow**：
+
+```
+1. tools/call vision_map.list_apps                  → 选 app_id
+2. tools/call vision_map.list_workflows app_id      → 选 workflow_id
+3. tools/call vision_map.describe_workflow app_id wid → 看 steps + risk_level（仅 destructive 时）
+4. tools/call vision_map.run_workflow app_id wid inputs → 执行
+   ↓ 失败 ↓
+5. tools/call vision_map.snapshot app_id            → 看现状
+6. tools/call vision_map.describe_action ... → vision-mcp patch  → 重试
+```
+
+context 节省：拉 summary (~50 行 JSON) vs 拉全 yaml (~500 行)，~85% 节省。
 
 ## 8. 平台差异速查（macOS ↔ Windows）
 

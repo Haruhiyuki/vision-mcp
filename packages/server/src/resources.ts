@@ -14,19 +14,37 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
     "apps_index",
     "vision-mcp://apps",
     {
-      title: "可用 app maps 列表",
-      description: "扫描 apps_root 下所有 vision-mcp.yaml。",
+      title: "可用 app maps 列表（含 metadata + workflows 摘要）",
+      description:
+        "扫描 apps_root 下所有 vision-mcp.yaml。每个 app 返回 name/platform/description + " +
+        "workflows 摘要（id+description+destructive 标志）。agent 启动时第一调；" +
+        "决定 app 后调 vision-mcp://apps/{id}/summary 拿 state/region 摘要。",
       mimeType: MIME_JSON,
     },
     async (uri) => {
       const apps = await listApps(ctx);
+      const enriched: unknown[] = [];
+      for (const a of apps) {
+        try {
+          const app = await loadApp(ctx, a.app_id);
+          enriched.push({
+            app_id: a.app_id,
+            name: app.effective.app.name,
+            platform: app.effective.app.platform,
+            description: app.effective.app.description?.split("\n")[0],
+            states_count: app.effective.states.length,
+            workflows: app.effective.workflows.map((w) => ({
+              id: w.id,
+              description: w.description,
+            })),
+          });
+        } catch (err) {
+          enriched.push({ app_id: a.app_id, error: (err as Error).message.split("\n")[0] });
+        }
+      }
       return {
         contents: [
-          {
-            uri: uri.href,
-            mimeType: MIME_JSON,
-            text: JSON.stringify(apps, null, 2),
-          },
+          { uri: uri.href, mimeType: MIME_JSON, text: JSON.stringify(enriched, null, 2) },
         ],
       };
     },
@@ -47,8 +65,10 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
       },
     }),
     {
-      title: "vision-mcp.yaml 内容",
-      description: "返回 baseline + 已应用 patches 的有效 map（YAML）。",
+      title: "vision-mcp.yaml 全文（context bomb 警告：500+ 行）",
+      description:
+        "返回 baseline + 已应用 patches 的有效 map（YAML 全文）。" +
+        "**只在确实需要看全 locator 细节时拉**；日常用 .../summary 或 vision_map.describe 工具。",
       mimeType: MIME_YAML,
     },
     async (uri, vars) => {
@@ -60,6 +80,117 @@ export function registerResources(server: McpServer, ctx: ServerContext): void {
             uri: uri.href,
             mimeType: MIME_YAML,
             text: dumpMap(app.effective),
+          },
+        ],
+      };
+    },
+  );
+
+  // 紧凑 summary：app description + regions/states/workflows 摘要，
+  // 不含 controls / locator_priority / postcondition 等细节。
+  // agent 看完决定调哪个 workflow 后用 describe_workflow / describe_action 拿细节。
+  server.registerResource(
+    "app_summary",
+    new ResourceTemplate("vision-mcp://apps/{app_id}/summary", {
+      list: async () => {
+        const apps = await listApps(ctx);
+        return {
+          resources: apps.map((a) => ({
+            uri: `vision-mcp://apps/${a.app_id}/summary`,
+            name: `summary(${a.app_id})`,
+            mimeType: MIME_JSON,
+          })),
+        };
+      },
+    }),
+    {
+      title: "app 紧凑摘要（推荐 agent 入口）",
+      description:
+        "返回 app 元数据 + regions/states/workflows 摘要（每项 id+description+计数），" +
+        "不含 controls / locator 细节。比拉全 yaml 节省 ~80% context。",
+      mimeType: MIME_JSON,
+    },
+    async (uri, vars) => {
+      const app = await loadApp(ctx, String(vars.app_id));
+      const m = app.effective;
+      const summary = {
+        app: {
+          id: m.app.id,
+          name: m.app.name,
+          platform: m.app.platform,
+          description: m.app.description,
+        },
+        visual_box: { id: m.visual_box.id, mode: m.visual_box.mode, display: m.visual_box.display },
+        regions: (m.regions ?? []).map((r) => ({
+          id: r.id,
+          description: r.description,
+          controls_count: r.controls.length,
+        })),
+        states: m.states.map((s) => ({
+          id: s.id,
+          kind: s.kind,
+          description: s.description,
+          controls_count: s.controls.length,
+          inherit_regions: s.inherit_regions,
+          parent_state_id: s.parent_state_id,
+        })),
+        workflows: m.workflows.map((w) => ({
+          id: w.id,
+          description: w.description,
+          steps_count: w.steps.length,
+          inputs: w.inputs?.map((i) => i.name),
+          timeout_ms: w.timeout_ms,
+        })),
+        patches_count: app.patches.length,
+        next_steps: [
+          `调 vision_map.describe_workflow(${m.app.id}, <workflow_id>) 看具体步骤`,
+          `调 vision_map.list_actions(${m.app.id}, state_id) 看 state 的可用 actions`,
+          `调 vision_map.run_workflow(${m.app.id}, <workflow_id>, inputs) 直接执行`,
+        ],
+      };
+      return {
+        contents: [
+          { uri: uri.href, mimeType: MIME_JSON, text: JSON.stringify(summary, null, 2) },
+        ],
+      };
+    },
+  );
+
+  // workflows 索引：list 所有 workflow 概览，每个有 id + description + destructive + inputs
+  server.registerResource(
+    "app_workflows_index",
+    new ResourceTemplate("vision-mcp://apps/{app_id}/workflows", {
+      list: async () => {
+        const apps = await listApps(ctx);
+        return {
+          resources: apps.map((a) => ({
+            uri: `vision-mcp://apps/${a.app_id}/workflows`,
+            name: `workflows(${a.app_id})`,
+            mimeType: MIME_JSON,
+          })),
+        };
+      },
+    }),
+    {
+      title: "app 的 workflows 索引",
+      description: "列出 app 所有 workflow 的 id+description+inputs+destructive 标志；不含 steps 细节。",
+      mimeType: MIME_JSON,
+    },
+    async (uri, vars) => {
+      const app = await loadApp(ctx, String(vars.app_id));
+      const items = app.effective.workflows.map((w) => ({
+        id: w.id,
+        description: w.description,
+        inputs: w.inputs,
+        steps_count: w.steps.length,
+        timeout_ms: w.timeout_ms,
+      }));
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: MIME_JSON,
+            text: JSON.stringify({ count: items.length, workflows: items }, null, 2),
           },
         ],
       };
