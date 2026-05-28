@@ -189,4 +189,78 @@ describe("map io", () => {
     expect(region.controls).toHaveLength(2);
     expect(region.controls.map((c) => c.id)).toContain("new_item");
   });
+
+  it("saveMap 增量改：注释 + 字段顺序 + 自身收敛", async () => {
+    const dir = await makeTempDir();
+    const mp = path.join(dir, "vision-mcp.yaml");
+
+    // 写一份手编 yaml 含注释 + 自定义字段顺序
+    const handEdited = `# 这是顶部注释
+version: "0.1"
+app:
+  id: demo
+  name: Demo
+  platform: any  # 平台无关
+visual_box:
+  id: demo-cap
+  mode: real_window
+  platform: any
+  coordinate_space: normalized_client_rect
+  display:
+    width_px: 800
+    height_px: 600
+  contract:
+    require_client_size_px: [800, 600]
+# 中间注释
+states:
+  - id: home
+    anchors:
+      - { type: ocr_text, text: Hello }
+    controls:
+      - id: btn
+        role: button
+        action_types: [click]
+        locator_priority:
+          - { type: bbox_norm, value: [0.2, 0.2, 0.3, 0.1] }
+        visual: { bbox_norm: [0.2, 0.2, 0.3, 0.1] }
+workflows: []
+`;
+    await fs.writeFile(mp, handEdited, "utf8");
+
+    // 1. load → 立即 save → 应规范化一次
+    const r1 = await loadMap(mp);
+    const out1Path = path.join(dir, "save1.yaml");
+    await saveMap(out1Path, r1.baseline, { baselineDoc: r1.baselineDoc });
+    const out1 = await fs.readFile(out1Path, "utf8");
+
+    // 2. 注释保留（关键！）
+    expect(out1).toContain("# 这是顶部注释");
+    expect(out1).toContain("# 中间注释");
+    expect(out1).toContain("# 平台无关");
+
+    // 3. 第二次 save 应自身收敛（0 diff）
+    const r2 = await loadMap(out1Path);
+    const out2Path = path.join(dir, "save2.yaml");
+    await saveMap(out2Path, r2.baseline, { baselineDoc: r2.baselineDoc });
+    const out2 = await fs.readFile(out2Path, "utf8");
+    expect(out2).toBe(out1);
+
+    // 4. 加新 workflow 不破坏原结构
+    r2.baseline.workflows.push({
+      id: "new_wf",
+      description: "测试 harvest",
+      inputs: [],
+      steps: [{ action_id: "home.btn", approval_required: false, on_failure: "abort" as const }],
+      timeout_ms: 120_000,
+    });
+    const out3Path = path.join(dir, "save3.yaml");
+    await saveMap(out3Path, r2.baseline, { baselineDoc: r2.baselineDoc });
+    const out3 = await fs.readFile(out3Path, "utf8");
+    expect(out3).toContain("# 这是顶部注释");
+    expect(out3).toContain("# 中间注释");
+    expect(out3).toContain("id: new_wf");
+    // 原状态字段不变（btn 不被 zod default 注入污染）
+    expect(out3).not.toContain("kind: control"); // zod default 跳过
+    expect(out3).not.toContain("approval_required: false\n        notes:"); // 不该注入空 notes
+  });
 });

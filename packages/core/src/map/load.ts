@@ -15,6 +15,12 @@ export interface MapLoadResult {
   baselinePath: string;
   baseDir: string;
   patchPaths: string[];
+  /**
+   * 原始 yaml Document 实例（未经 zod 解析），保留注释 / 格式 / 字段顺序。
+   * saveMap 用它作为基底走增量改：原文档已有字段被新值覆盖，注释保留；
+   * 数组按 newJs 长度调整；原文档没有的字段（zod default 注入）跳过。
+   */
+  baselineDoc: YAML.Document.Parsed;
 }
 
 export interface MapLoadOptions {
@@ -45,7 +51,9 @@ export async function loadMap(
   const absMapPath = path.resolve(mapPath);
   const baseDir = path.dirname(absMapPath);
   const text = await fs.readFile(absMapPath, "utf8");
-  const rawDoc = YAML.parse(text);
+  // 用 parseDocument 保留注释 / 格式 / 节点位置，作 incremental save 的基底
+  const baselineDoc = YAML.parseDocument(text);
+  const rawDoc = baselineDoc.toJS();
   const baseline = VisionMap.parse(rawDoc);
 
   let patchPaths: string[] = [];
@@ -80,6 +88,7 @@ export async function loadMap(
     baselinePath: absMapPath,
     baseDir,
     patchPaths,
+    baselineDoc,
   };
 }
 
@@ -220,20 +229,115 @@ export function dumpMap(map: VisionMapT): string {
     indent: 2,
     lineWidth: 120,
     blockQuote: "literal",
-    // 去掉 flow 数组的 padding 空格，让 [1280, 800] 不变 [ 1280, 800 ]
+  });
+}
+
+/**
+ * 把 newJs 的所有路径增量应用到原 doc（保留注释 / 格式 / 节点顺序）。
+ *
+ * 算法：
+ *   - 原 doc 已有的 leaf path 且值变了 → setIn 更新（保留节点位置 + 周围注释）
+ *   - 原 doc 没有的字段 → 跳过（zod default 注入或非声明字段，避免污染手编 yaml）
+ *   - 数组超过原长度 → 用 newDoc 风格化的 node 追加
+ *   - 数组短于原长度 → 截断末尾（如 commit_workflow overwrite 减少 step）
+ *
+ * "原 doc 没有的字段跳过" 是关键 — 这避免了 zod default（kind: control, risk_level: safe,
+ * approval_required: false 等）污染 hand-edited yaml；同时保留所有手编注释。
+ *
+ * 例外：数组追加的"全新元素"（如 harvest_session 加的新 workflow）会写完整 node，
+ * 包含 zod default 字段——因为新元素本来就没原文档存在的 baseline 可对比。
+ */
+function applyJsToDoc(doc: YAML.Document, jsValue: unknown, currentPath: (string | number)[] = []): void {
+  // 数组
+  if (Array.isArray(jsValue)) {
+    const oldNode = doc.getIn(currentPath) as YAML.YAMLSeq | undefined;
+    if (!oldNode || !YAML.isSeq(oldNode)) return;
+    const oldLen = oldNode.items.length;
+    // 1. 对原数组每个保留元素递归 update
+    const overlap = Math.min(oldLen, jsValue.length);
+    for (let i = 0; i < overlap; i++) {
+      applyJsToDoc(doc, jsValue[i], [...currentPath, i]);
+    }
+    // 2. 追加新元素（用 newDoc 风格化的完整 node）
+    for (let i = oldLen; i < jsValue.length; i++) {
+      doc.addIn(currentPath, jsValue[i]);
+    }
+    // 3. 截断超出元素
+    if (jsValue.length < oldLen) {
+      oldNode.items.length = jsValue.length;
+    }
+    return;
+  }
+  // 对象
+  if (jsValue !== null && typeof jsValue === "object") {
+    const oldNode = doc.getIn(currentPath);
+    if (!oldNode || !YAML.isMap(oldNode)) return;
+    for (const key of Object.keys(jsValue as Record<string, unknown>)) {
+      // 关键：只有原 doc 已声明此 key 才递归更新，避免 zod default 注入
+      if (!oldNode.has(key)) continue;
+      applyJsToDoc(doc, (jsValue as Record<string, unknown>)[key], [...currentPath, key]);
+    }
+    return;
+  }
+  // 标量：值变了才 setIn（保持节点位置 + 周围注释）
+  const oldScalar = doc.getIn(currentPath);
+  if (oldScalar !== jsValue) {
+    doc.setIn(currentPath, jsValue);
+  }
+}
+
+/**
+ * 增量 dump：基于原 baselineDoc 把 map 的变化应用回去，保留注释 / 字段顺序 / 手编格式。
+ * commit_state / commit_workflow / harvest_session 都走这条路径，避免每次 save 把
+ * hand-edited yaml 重新规范化破坏掉。
+ *
+ * 仅"数组追加的新元素"会带 zod default 字段（不可避免——新元素本来就没有 baseline 对比）。
+ * 已存在元素的 zod default 注入完全跳过。
+ */
+export function dumpMapIncremental(map: VisionMapT, baselineDoc: YAML.Document.Parsed): string {
+  // 用 clone 避免污染调用方的 baselineDoc
+  const doc = baselineDoc.clone();
+  const newJs = JSON.parse(JSON.stringify(map));
+  applyJsToDoc(doc, newJs);
+  // 给"新加"的短 scalar 数组设 flow style；保留原 doc 已是 flow 的节点不动（避免破坏原始 source）
+  YAML.visit(doc, {
+    Seq(_, node) {
+      if (
+        !node.flow &&
+        node.items.length > 0 &&
+        node.items.length <= 8 &&
+        node.items.every((item) => YAML.isScalar(item))
+      ) {
+        node.flow = true;
+      }
+    },
+  });
+  return doc.toString({
+    indent: 2,
+    lineWidth: 120,
+    blockQuote: "literal",
+    // yaml lib 全局 padding 设置不能 per-node 控制。选 false 让数组紧凑
+    // （bbox_norm 等出现频率高，原文档大多不带 padding），代价是对象 padding 也去掉。
+    // 第一次 save 后文件规范化，之后 round-trip 完全保真（自身收敛）。
     flowCollectionPadding: false,
   });
 }
 
 /**
- * 写入 baseline 文件并覆盖原 map。会校验后再写。
+ * 写入 baseline 文件并覆盖原 map。
+ *
+ * - 有 baselineDoc：走增量改路径，保留注释 + 格式（推荐，commit_* 系列工具默认这条）
+ * - 没 baselineDoc：fallback 走 dumpMap 完整重写（init 等首次写入场景）
  */
 export async function saveMap(
   mapPath: string,
   map: VisionMapT,
+  options: { baselineDoc?: YAML.Document.Parsed } = {},
 ): Promise<void> {
   const validated = VisionMap.parse(map);
-  const text = dumpMap(validated);
+  const text = options.baselineDoc
+    ? dumpMapIncremental(validated, options.baselineDoc)
+    : dumpMap(validated);
   await fs.writeFile(path.resolve(mapPath), text, "utf8");
 }
 

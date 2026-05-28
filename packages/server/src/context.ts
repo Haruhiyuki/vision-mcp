@@ -64,6 +64,11 @@ export interface AppHandle {
   trace?: FileTraceStore;
   runtime?: RuntimeExecutor;
   builder?: MapBuilder;
+  /**
+   * 原始 yaml Document 实例（loadMap 时保留），writeEffective 用它作为基底走增量 save，
+   * 避免每次 commit 把手编 yaml 的注释 / 格式 / 字段顺序破坏。
+   */
+  baselineDoc?: MapLoadResult["baselineDoc"];
 }
 
 export async function createServerContext(opts: {
@@ -111,6 +116,7 @@ export async function loadApp(ctx: ServerContext, appId: string): Promise<AppHan
     map: result.baseline,
     patches: result.patches,
     effective: result.effective,
+    baselineDoc: result.baselineDoc,
   };
   ctx.apps.set(appId, handle);
   return handle;
@@ -220,7 +226,9 @@ export async function ensureBuilder(
 }
 
 export async function writeEffective(app: AppHandle): Promise<void> {
-  await saveMap(app.mapPath, app.map);
+  // 走增量改路径（如果有原 baselineDoc）：保留注释 + 字段顺序 + 手编 yaml 格式。
+  // 没有 baselineDoc 的 fallback（如 init 首次写）走完整 dumpMap。
+  await saveMap(app.mapPath, app.map, { baselineDoc: app.baselineDoc });
 }
 
 export function snapshotApp(app: AppHandle): Record<string, unknown> {
