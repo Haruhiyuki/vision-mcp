@@ -1,0 +1,485 @@
+version: "0.1"
+app:
+  id: notes
+  name: Notes
+  platform: macos
+  launch_hint: attach_after_launch
+visual_box:
+  id: notes-capsule
+  mode: real_window
+  platform: macos
+  display:
+    width_px: 1280
+    height_px: 800
+    scale: 1
+    dpi_x: 96
+    dpi_y: 96
+    refresh_rate_hz: 60
+  coordinate_space: normalized_client_rect
+  contract:
+    require_same_display: true
+    require_client_size_px:
+      - 1280
+      - 800
+    tolerate_client_size_delta_px: 2
+    require_unminimized: true
+    require_foreground_for_input: true
+    validate_before_each_action: true
+  fallbacks: []
+regions: []
+states:
+  - id: main
+    description: Notes 主窗口
+    kind: page
+    anchors:
+      - type: visual_hash
+        hash: "0810400060400000"
+        min_similarity: 0.82
+    match_policy: any_anchor
+    controls:
+      - kind: control
+        id: ctrl_27
+        role: tab
+        description: 我的备忘录列表视图
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.16171875
+              - 0.06375
+              - 0.22578125
+              - 1.5
+        visual:
+          bbox_norm:
+            - 0.16171875
+            - 0.06375
+            - 0.22578125
+            - 1.5
+          center_norm:
+            - 0.274609375
+            - 0.81375
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_79
+        role: button
+        description: 增页面按钮
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.3796875
+              - 0.123125
+              - 0.0046875
+              - 0.873125
+        visual:
+          bbox_norm:
+            - 0.3796875
+            - 0.123125
+            - 0.0046875
+            - 0.873125
+          center_norm:
+            - 0.38203125
+            - 0.5596875
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_86
+        role: button
+        description: 添加文件夹
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.09375
+              - 0
+              - 0.034375
+              - 0.065
+        visual:
+          bbox_norm:
+            - 0.09375
+            - 0
+            - 0.034375
+            - 0.065
+          center_norm:
+            - 0.1109375
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_87
+        role: button
+        description: 文件夹
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.128125
+              - 0
+              - 0.034375
+              - 0.065
+        visual:
+          bbox_norm:
+            - 0.128125
+            - 0
+            - 0.034375
+            - 0.065
+          center_norm:
+            - 0.14531249999999998
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_88
+        role: button
+        description: 显示选项
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.34921875
+              - 0
+              - 0.034375
+              - 0.065
+        visual:
+          bbox_norm:
+            - 0.34921875
+            - 0
+            - 0.034375
+            - 0.065
+          center_norm:
+            - 0.36640625000000004
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_89
+        role: button
+        description: 新建备忘录
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.390625
+              - 0
+              - 0.03515625
+              - 0.065
+        visual:
+          bbox_norm:
+            - 0.390625
+            - 0
+            - 0.03515625
+            - 0.065
+          center_norm:
+            - 0.408203125
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_90
+        role: button
+        description: 格式
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.476171875
+              - 0
+              - 0.03984375
+              - 0.065
+        visual:
+          bbox_norm:
+            - 0.476171875
+            - 0
+            - 0.03984375
+            - 0.065
+          center_norm:
+            - 0.49609375
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_91
+        role: button
+        description: 核对清单
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.516015625
+              - 0
+              - 0.03125
+              - 0.065
+        visual:
+          bbox_norm:
+            - 0.516015625
+            - 0
+            - 0.03125
+            - 0.065
+          center_norm:
+            - 0.531640625
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_92
+        role: button
+        description: 表格
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.547265625
+              - 0
+              - 0.03203125
+              - 0.065
+        visual:
+          bbox_norm:
+            - 0.547265625
+            - 0
+            - 0.03203125
+            - 0.065
+          center_norm:
+            - 0.56328125
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_93
+        role: button
+        description: 媒体
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.579296875
+              - 0
+              - 0.03203125
+              - 0.065
+        visual:
+          bbox_norm:
+            - 0.579296875
+            - 0
+            - 0.03203125
+            - 0.065
+          center_norm:
+            - 0.5953125
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_95
+        role: button
+        description: 共享
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.6640625
+              - 0.00875
+              - 0.0296875
+              - 0.0475
+        visual:
+          bbox_norm:
+            - 0.6640625
+            - 0.00875
+            - 0.0296875
+            - 0.0475
+          center_norm:
+            - 0.67890625
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_96
+        role: button
+        description: 更多
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.6984375
+              - 0.00875
+              - 0.0296875
+              - 0.0475
+        visual:
+          bbox_norm:
+            - 0.6984375
+            - 0.00875
+            - 0.0296875
+            - 0.0475
+          center_norm:
+            - 0.7132812500000001
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_99
+        role: button
+        description: 按钮
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.74765625
+              - 0.0275
+              - 0.01640625
+              - 0.01125
+        visual:
+          bbox_norm:
+            - 0.74765625
+            - 0.0275
+            - 0.01640625
+            - 0.01125
+          center_norm:
+            - 0.755859375
+            - 0.033125
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_100
+        role: button
+        description: 关闭按钮
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.0140625
+              - 0.0225
+              - 0.0125
+              - 0.02
+        visual:
+          bbox_norm:
+            - 0.0140625
+            - 0.0225
+            - 0.0125
+            - 0.02
+          center_norm:
+            - 0.0203125
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_101
+        role: button
+        description: 全屏幕按钮
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.05
+              - 0.0225
+              - 0.0125
+              - 0.02
+        visual:
+          bbox_norm:
+            - 0.05
+            - 0.0225
+            - 0.0125
+            - 0.02
+          center_norm:
+            - 0.05625
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+      - kind: control
+        id: ctrl_104
+        role: button
+        description: 最小化按钮
+        action_types:
+          - click
+        locator_priority:
+          - type: bbox_norm
+            value:
+              - 0.03203125
+              - 0.0225
+              - 0.0125
+              - 0.02
+        visual:
+          bbox_norm:
+            - 0.03203125
+            - 0.0225
+            - 0.0125
+            - 0.02
+          center_norm:
+            - 0.038281249999999996
+            - 0.0325
+        risk_level: safe
+        approval_required: false
+    inherit_regions: []
+    variants: []
+transitions: []
+workflows:
+  - id: write_my_note
+    description: "harvest fallback: 新建并输入一条备忘录"
+    inputs:
+      - name: content
+        type: string
+        required: true
+        description: 备忘录内容
+    steps:
+      - action_id: main.new_note_kbd:key
+        params:
+          combo: cmd+n
+        approval_required: false
+        on_failure: abort
+      - action_id: main.note_body:type
+        params:
+          text: "{{content}}"
+        approval_required: false
+        on_failure: abort
+    timeout_ms: 120000
+repair_policy:
+  max_auto_repair_level: 3
+  geometry:
+    tolerate_client_size_delta_px: 2
+    tolerate_origin_change: true
+    require_same_dpi: true
+  state:
+    min_anchor_score: 0.86
+    min_ocr_similarity: 0.88
+    min_visual_similarity: 0.82
+  control_relocation:
+    confidence_threshold: 0.92
+    max_bbox_shift_norm: 0.08
+  destructive_actions:
+    auto_repair_before_action: false
+    require_user_confirmation: true
+safety_policy:
+  forbidden_action_categories:
+    - payment
+    - destructive
+    - external_communication
+    - permission_change
+    - captcha
+  require_approval_for_risk_levels:
+    - requires_confirmation
+    - destructive
+  redaction_patterns: []
+  allow_cloud_vlm: false
+  audit_log_retention_days: 30
+input_lease_policy:
+  default_lease_ms: 5000
+  break_on_user_input: true
+  break_hotkey: Esc Esc
+  require_revalidate_after_break: true
+metadata:
+  created_at: 2026-05-28T15:42:15.799Z
+  created_by: vision-mcp-builder
+  tags: []
+  builder_version: "0.1"

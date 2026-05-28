@@ -355,9 +355,32 @@ async function main() {
 }
 
 function appsRoot(args: ParsedArgs): string {
-  return String(
+  const raw = String(
     args.flags["apps-root"] ?? process.env.VISION_MCP_APPS_ROOT ?? path.join(process.cwd(), "apps"),
   );
+  // 替换已定义的 ${VAR}；未定义的保留字面（下一步再处理）
+  const expanded = raw.replace(/\$\{(\w+)\}/g, (m, name) => process.env[name] ?? m);
+  // 若仍含 ${...} 字面，说明 host 没在该变量的 context 下 spawn 我们（典型：
+  // .mcp.json 用 ${CLAUDE_PLUGIN_ROOT}/examples，但当前 cwd 触发 project-context
+  // 加载，plugin env 不存在；或 dev 期间 user shell 没 export 对应变量）。
+  // 直接用字面路径会让 file system 操作全数报"目录不存在"，连锁导致 list_apps
+  // 返空、init 写到错误路径、list_actions / perform_action 双源不一致等怪问题。
+  // fallback 到 ~/.vision-mcp/apps（与 init-apps 默认目标一致），同时 warn 提醒。
+  if (expanded.includes("${")) {
+    const fallback = path.join(
+      process.env.HOME ?? process.env.USERPROFILE ?? ".",
+      ".vision-mcp",
+      "apps",
+    );
+    // 仅 stderr，不污染 stdio MCP 通道
+    process.stderr.write(
+      `[vision-mcp] 警告：--apps-root="${raw}" 含未展开变量。已 fallback 到 ${fallback}。\n` +
+        `  原因：host 未在该 env var 的 context 下 spawn 我们（${expanded.match(/\$\{(\w+)\}/)?.[0]} 未定义）。\n` +
+        `  如果是 plugin install，让 host 在 plugin context 下重启 server；如果是 dev，给 .mcp.json 用绝对路径或在 shell export 对应变量。\n`,
+    );
+    return fallback;
+  }
+  return expanded;
 }
 
 /**

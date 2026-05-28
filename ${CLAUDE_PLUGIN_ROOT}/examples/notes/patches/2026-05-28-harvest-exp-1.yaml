@@ -1,0 +1,23 @@
+id: harvest-exp-1
+trust: trusted
+reason: harvest exp
+confidence: 1
+requires_review: false
+kind: control_add
+state_id: main
+control:
+  kind: control
+  id: new_note_kbd
+  role: shortcut
+  description: cmd+n new note
+  action_types:
+    - key
+  locator_priority:
+    - type: bbox_norm
+      value:
+        - 0.5
+        - 0.5
+        - 0.01
+        - 0.01
+  risk_level: safe
+  approval_required: false

@@ -1,6 +1,6 @@
 {
   "name": "vision-mcp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Vision-MCP: 视觉为主的桌面 GUI 操作 MCP server + Skill。Agent 可像人一样使用真实桌面应用（截图 → 视觉/AX 双轨识别 → click/type/key），支持持续修正 + 安全审批。",
   "author": {
     "name": "Vision-MCP Authors",
