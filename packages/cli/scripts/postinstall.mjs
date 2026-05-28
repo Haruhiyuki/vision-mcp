@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 // 跨平台 postinstall wrapper：
 // - 不能让任何错误把 `npm install` 染红（用户体验差）
 // - silent 模式跑 install-helper；不论成功 / 失败 / 异常都 exit 0

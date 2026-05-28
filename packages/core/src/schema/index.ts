@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 export * from "./primitives.js";
 export * from "./locator.js";
 export * from "./condition.js";

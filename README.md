@@ -223,4 +223,14 @@ A：试过。PS2EXE 默认 PSHost 拦截 `[Console]::In`，`-noConsole` 又编�
 
 ## 协议
 
-Apache-2.0（见 [`LICENSE`](LICENSE)）。
+Apache-2.0（见 [`LICENSE`](LICENSE) + 第三方 attribution [`NOTICE`](NOTICE)）。每个源文件含 SPDX-License-Identifier header。
+
+## 免责声明
+
+`examples/` 下的 map（`apple-music` / `notes` / `activity-monitor` / `example-erp` / `steam-windows`）描述对应应用的公开 UI 布局，目的是演示 vision-mcp 的 map 格式与覆盖能力。这些 map **不被对应应用的厂商背书或授权**，所有商标和应用本体的版权归各厂商所有。
+
+特别提示：
+
+- **destructive workflow demo**（如 `steam-windows` 中的 `uninstall_first_installed_game`）仅用于**展示风险动作的 map 设计模式**（`risk_level: destructive` + `approval_required: true` + `on_failure: abort` 的组合），并不构成对实际卸载操作的鼓励或指引。任何 destructive workflow 在实际运行时**必须**经审批通道（runtime 默认 `auto_repair_before_action: false` 且 `require_user_confirmation: true`）。
+- 用户使用 vision-mcp 操作第三方桌面应用应**自行确认**是否符合该应用的 ToS、相关地区法律及当事人的合理预期；vision-mcp 项目不为用户的具体使用行为承担责任。
+- 涉及反作弊保护 / DRM 受保护内容 / 系统安全屏障的桌面应用（DirectX 全屏游戏、企业 EDR、UAC 高完整度 app 等），平台层会主动拒绝输入注入和截屏，请尊重这些边界。

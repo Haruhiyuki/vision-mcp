@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 import { VisionMcpError } from "../errors.js";
 import type { PlatformAdapter } from "../capsule/manager.js";
 import { MockPlatformAdapter } from "./mock.js";

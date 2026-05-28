@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 import { ChildProcess, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { EventEmitter } from "node:events";

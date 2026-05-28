@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 import { z } from "zod";
 import { BBoxNorm } from "./primitives.js";
 

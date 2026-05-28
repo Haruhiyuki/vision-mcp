@@ -1,0 +1,35 @@
+Vision-MCP
+Copyright (C) 2026 Vision-MCP Authors
+
+This product includes software developed by:
+
+  * Anthropic, PBC — @modelcontextprotocol/sdk (MIT License)
+    https://github.com/modelcontextprotocol/typescript-sdk
+
+  * Colin McDonnell — zod (MIT License)
+    https://github.com/colinhacks/zod
+
+  * Eemeli Aro — yaml (ISC License)
+    https://github.com/eemeli/yaml
+
+The following dependencies are required only for development and are not
+distributed in the published packages:
+
+  * Microsoft Corporation — TypeScript (Apache-2.0)
+  * Vitest team — vitest (MIT)
+  * Isaac Z. Schlueter — rimraf (ISC)
+
+Platform helpers integrate with the following first-party OS APIs (no
+third-party code redistributed):
+
+  * Apple — ScreenCaptureKit, AppKit, ApplicationServices, CoreGraphics,
+    IOKit, Vision, CoreImage (Apple Public Source License / SDK terms)
+  * Microsoft — Windows UI Automation, Windows.Media.Ocr (WinRT),
+    Active Accessibility (oleacc.dll), GDI+, SendInput / mouse_event
+    (Windows SDK terms)
+
+Examples in `examples/` describe public user interfaces of third-party
+applications (Apple Music, Steam, Apple Notes, Activity Monitor) solely for
+the purpose of demonstrating the vision-mcp map format. The maps are not
+endorsed by or affiliated with the respective applications' vendors.
+Trademarks remain with their owners.

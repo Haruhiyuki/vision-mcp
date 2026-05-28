@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import YAML from "yaml";

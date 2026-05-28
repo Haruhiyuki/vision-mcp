@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 import { z } from "zod";
 import { Platform } from "./primitives.js";
 import { VisualBox } from "./capsule.js";

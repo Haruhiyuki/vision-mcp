@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 export * from "./mock.js";
 export * from "./windows.js";
 export * from "./windows-accessibility.js";

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 // 跨平台 prepublishOnly：clean + build + 删冗余 + 复制 native/
 // 不用 find / cp -R / rm 等 Unix 命令，确保 Windows 维护者也能跑 npm publish。
 

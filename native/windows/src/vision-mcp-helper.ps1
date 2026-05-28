@@ -1,4 +1,6 @@
-﻿# vision-mcp-helper (Windows)
+﻿# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Vision-MCP Authors
+# vision-mcp-helper (Windows)
 #
 # 长寿命 JSON-RPC sidecar：从 stdin 按行读 JSON 命令，到 stdout 写响应。
 #

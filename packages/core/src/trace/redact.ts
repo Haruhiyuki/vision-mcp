@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 /**
  * 字符串脱敏：按 safety_policy.redaction_patterns 把命中片段替换为 ***。
  * 用于在 trace、approval 请求和日志中保护敏感字段。

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 import { describe, expect, it } from "vitest";
 import { clusterCollections } from "@vision-mcp/core";
 import type { NodeRef } from "@vision-mcp/core";

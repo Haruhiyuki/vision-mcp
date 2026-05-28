@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 /**
  * 设计文档 §19.2 错误码。所有 runtime/MCP 工具抛错都应使用 VisionMcpError，
  * 以便统一序列化、统一对接 MCP error 对象。

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Vision-MCP Authors
 import type { Frame, RectPx } from "../capsule/types.js";
 import type { OcrProvider, OcrToken } from "../locator/types.js";
 import type { DarwinHelperAdapter } from "./darwin-helper.js";
