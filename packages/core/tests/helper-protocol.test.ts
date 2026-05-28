@@ -85,7 +85,7 @@ describe("helper protocol contract", () => {
     for (const c of CONTRACTS) {
       if (c.macosOnly) continue;
       // 在 switch 块里以 "method-name" 形式出现
-      if (!new RegExp(`"${c.method.replace(".", "\\.")}"`).test(src)) {
+      if (!new RegExp(`"${c.method.replace(/\./g, "\\.")}"`).test(src)) {
         missing.push(c.method);
       }
     }
@@ -99,7 +99,7 @@ describe("helper protocol contract", () => {
     const missing: string[] = [];
     for (const c of CONTRACTS) {
       if (c.windowsOnly) continue;
-      if (!new RegExp(`"${c.method.replace(".", "\\.")}"`).test(src)) {
+      if (!new RegExp(`"${c.method.replace(/\./g, "\\.")}"`).test(src)) {
         missing.push(c.method);
       }
     }

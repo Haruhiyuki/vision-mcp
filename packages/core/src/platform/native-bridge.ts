@@ -34,14 +34,21 @@ export class NativeBridge extends EventEmitter {
   private buffer = "";
   private pending = new Map<string, PendingRequest>();
   private disposed = false;
+  private readonly opts: NativeBridgeOptions;
+  /**
+   * helper 在 exit 前用 {id:null, error, code} 发出的致命诊断（如 PWSH_INCOMPATIBLE）。
+   * onStdout 缓存到这里；exit handler 用作 reject reason，让用户拿到根因而不是
+   * 笼统的 "exited code=2 signal=null"。
+   */
+  private fatalDiagnostic: string | null = null;
 
-  constructor(private readonly opts: NativeBridgeOptions) {
+  constructor(opts: NativeBridgeOptions) {
     super();
     // 允许全局 env 强开 debug，方便用户排查 helper 通讯问题
     if (process.env.VISION_MCP_NATIVE_DEBUG === "1" && !opts.debug) {
       opts = { ...opts, debug: true };
-      (this.opts as NativeBridgeOptions) = opts;
     }
+    this.opts = opts;
     const helperPath = opts.helperPath;
     if (!helperPath) {
       throw new Error("NativeBridge 需要 helperPath");
@@ -71,12 +78,16 @@ export class NativeBridge extends EventEmitter {
     });
     this.proc.on("exit", (code, signal) => {
       this.disposed = true;
+      // 优先 fatal diagnostic（如 PWSH_INCOMPATIBLE），否则用退出码
+      const reason = this.fatalDiagnostic
+        ? `native helper 启动失败：${this.fatalDiagnostic}`
+        : `native helper exited code=${code} signal=${signal}`;
       for (const [, p] of this.pending) {
         clearTimeout(p.timer);
-        p.reject(new Error(`native helper exited code=${code} signal=${signal}`));
+        p.reject(new Error(reason));
       }
       this.pending.clear();
-      this.emit("exit", { code, signal });
+      this.emit("exit", { code, signal, fatal: this.fatalDiagnostic });
     });
   }
 
@@ -148,6 +159,11 @@ export class NativeBridge extends EventEmitter {
           else p.resolve(msg.result);
         } else if (msg.event) {
           this.emit(msg.event, msg.data);
+        } else if (msg.error && msg.id === null) {
+          // Helper 启动期致命诊断（如 PWSH_INCOMPATIBLE）：没有 id 对应 pending，但
+          // 紧接着会 exit。缓存到 fatalDiagnostic，让 exit handler 用作 reject reason，
+          // 避免用户只看到 "exited code=2 signal=null"。
+          this.fatalDiagnostic = msg.code ? `[${msg.code}] ${msg.error}` : String(msg.error);
         }
       } catch (err) {
         if (this.opts.debug) {
@@ -172,8 +188,9 @@ export async function resolveDefaultHelper(
   const env = process.env.VISION_MCP_NATIVE_HELPER;
   if (env) return env;
   if (hint) return hint;
-  // Windows 优先 .exe（ps2exe 编译产物，启动 ~10ms），缺失时 fallback .ps1（启动 ~400ms）。
+  // Windows 优先 .exe（prebuilt 启动 ~10ms），所有 root 都找不到再 fallback .ps1（~400ms）。
   // macOS 只看编译产物 vision-mcp-helper。
+  // 外层 name、内层 root：避免 "dev cwd 的 .ps1 抢在 cli 包的 .exe 之前命中"。
   const candidateNames =
     platform === "windows"
       ? ["vision-mcp-helper.exe", path.join("src", "vision-mcp-helper.ps1")]
@@ -184,8 +201,8 @@ export async function resolveDefaultHelper(
     path.resolve(process.cwd(), "packages/core/native", platform),
     path.resolve(process.cwd(), "packages/cli/native", platform),
   ];
-  for (const root of roots) {
-    for (const name of candidateNames) {
+  for (const name of candidateNames) {
+    for (const root of roots) {
       const c = path.join(root, name);
       try {
         const stat = await fs.stat(c);

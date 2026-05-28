@@ -60,3 +60,21 @@ jobs:
           $out = node packages/cli/dist/index.js displays --json
           Write-Host $out
           if (-not ($out -match '"displays"')) { throw "displays RPC failed" }
+
+      # macOS 镜像 Windows 三步：验证 swiftc 编译 + doctor + helper RPC
+      # macos-latest runner 默认装 Xcode Command Line Tools（含 swiftc）
+      - name: macos / install-helper 编译 swift helper
+        if: matrix.os == 'macos-latest'
+        run: node packages/cli/dist/index.js install-helper
+
+      - name: macos / doctor 自检
+        if: matrix.os == 'macos-latest'
+        run: node packages/cli/dist/index.js doctor
+
+      - name: macos / helper RPC 端到端（version + list_displays）
+        if: matrix.os == 'macos-latest'
+        run: |
+          export VISION_MCP_NATIVE_HELPER="$PWD/native/macos/vision-mcp-helper"
+          out=$(node packages/cli/dist/index.js displays --json)
+          echo "$out"
+          echo "$out" | grep -q '"displays"' || (echo "displays RPC failed" && exit 1)

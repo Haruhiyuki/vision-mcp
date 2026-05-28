@@ -362,6 +362,9 @@ async function resolveBundledHelper(): Promise<string | undefined> {
   const cliDir = path.dirname(fileURLToPath(import.meta.url));
   const plat = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : null;
   if (!plat) return undefined;
+  // Windows 优先 .exe（如果用户手动放了 prebuilt），所有 root 都没找到再 fallback .ps1。
+  // 外层 name、内层 root：避免 dev 期 repo 根的 .ps1 抢先 cli 包的 .exe。
+  // 注：当前 install-helper 不自动编 .exe（PS2EXE 拦 stdio），.exe 只在用户手动放置时存在。
   const names = plat === "windows"
     ? ["vision-mcp-helper.exe", path.join("src", "vision-mcp-helper.ps1")]
     : ["vision-mcp-helper"];
@@ -369,8 +372,8 @@ async function resolveBundledHelper(): Promise<string | undefined> {
     path.resolve(cliDir, "..", "native", plat),                    // npm install: cli/native
     path.resolve(cliDir, "..", "..", "..", "native", plat),        // dev: repo/native
   ];
-  for (const root of roots) {
-    for (const name of names) {
+  for (const name of names) {
+    for (const root of roots) {
       const c = path.join(root, name);
       try {
         await fs.access(c);
@@ -2722,7 +2725,13 @@ async function cmdInstallHelper(args: ParsedArgs) {
         );
       }
     } catch (err) {
-      if (!silent) log(`⚠️ powershell.exe 调用失败：${(err as Error).message}`);
+      // powershell.exe 调不通 → runtime 也 100% 失败（NativeBridge 用同一条路径包 .ps1）。
+      // doctor 命令对此 fail，install-helper 也应 fail 保持一致；不能继续报"就绪"。
+      return fail(
+        `powershell.exe 调用失败：${(err as Error).message.split("\n")[0]}\n` +
+        `vision-mcp 需要 Windows PowerShell 5.1 (${powershellExe})。\n` +
+        `若你的环境只装了 pwsh 7，请安装 Windows PowerShell 5.1（Win10+ 默认自带）。`,
+      );
     }
 
     // 既然 .ps1 + 自动 wrap 已能用，install-helper 主要变成"自检 + 写说明"。

@@ -46,11 +46,11 @@ $env:VISION_MCP_NATIVE_HELPER = "C:\path\to\src\vision-mcp-helper.ps1"
 | **`capture.rect_annotated`** | `Graphics.DrawLine + DrawRectangle + DrawString` 画网格 / bbox / 标签 | ~250ms |
 | **`capture.window`** | `PrintWindow(hwnd, hdcBlt, PW_RENDERFULLCONTENT=2)` 抓窗口（含被遮挡 / 部分屏外） | ~150ms |
 | `capture.display` | `Capture-Rect(display.bounds)` | ~200ms |
-| `input.click` | `SetCursorPos + mouse_event` | < 10ms |
-| `input.type` | 剪贴板粘贴（`Clipboard.SetText + SendKeys ^v`）— 支持中文/Unicode | ~100ms |
-| `input.key` | `SendKeys.SendWait` + cmd/ctrl/shift/alt 标准映射 | < 50ms |
-| `input.scroll` | `mouse_event(MOUSEEVENTF_WHEEL)` | < 10ms |
-| **`input.drag`** | `SetCursorPos` 逐步 + `mouse_event(LEFT_DOWN/MOVE/UP)` | 200ms（默认 duration） |
+| `input.click` | `SendInput` MOUSEINPUT（含 modifier-down/up 包裹，支持 cmd/ctrl/shift/alt-click） | < 10ms |
+| `input.type` | `SendInput` + `KEYEVENTF_UNICODE` (VK_PACKET) — 中文/Emoji 直接注入，不污染剪贴板、绕过 IME 候选框；支持 `clear_first` | ~30ms |
+| `input.key` | `SendInput` VK 码（Resolve-Vk 把 cmd/ctrl/shift/alt + return/escape/tab/F1-F12 等名称解析为 VK），未识别键 fallback `SendKeys.SendWait` | < 20ms |
+| `input.scroll` | `SendInput` MOUSEWHEEL，32-bit 位级强转避免 uint OverflowException，支持正负 dy + 水平 dx | < 10ms |
+| **`input.drag`** | `SendInput` MOUSE_DOWN → MOVE 逐步 → MOUSE_UP（mouse_event 在 Win10+ 已 deprecated，SendInput 是唯一受 UIPI 完整管的路径） | 200ms（默认 duration） |
 | **`input.ax_press`** | `AutomationElement.FromPoint(x,y)` + `InvokePattern → SelectionItem → Toggle → ExpandCollapse` 依次尝试 | < 30ms |
 | **`ax.dump_msaa`** | `AccessibleObjectFromWindow + AccessibleChildren` MSAA fallback；`ax.dump` 在 UIA 节点 < 3 时也会自动走这条 | < 30ms |
 | **`ocr.recognize_rect`** | `Windows.Media.Ocr` WinRT（懒加载）+ GDI `CopyFromScreen` + `BitmapDecoder` → `SoftwareBitmap` → `OcrEngine.RecognizeAsync` | 120-180ms（1200x600 含约 160 词） |
@@ -75,12 +75,14 @@ $env:VISION_MCP_NATIVE_HELPER = "C:\path\to\src\vision-mcp-helper.ps1"
 | 优化 | macOS | Windows |
 | ---- | ----- | ------- |
 | 现代窗口截图 API | SCKit `SCScreenshotManager.captureImage` | `PrintWindow PW_RENDERFULLCONTENT` |
-| 零鼠标操作 | AXUIElement `AXPress` | UIAutomation `InvokePattern` |
+| 零鼠标操作 | AXUIElement `AXPress` | UIAutomation `InvokePattern`；老 Win32 自绘 app 走 MSAA `AccessibleObjectFromWindow` fallback |
 | 强力 raise window | AXRaise | `AttachThreadInput` hack |
-| 中文输入 | NSPasteboard 粘贴 | Clipboard + `SendKeys ^v` |
-| Per-monitor DPI | NSScreen.backingScaleFactor | `SetProcessDpiAwareness(2)` + `GetDpiForWindow` |
-| AX tree dump | `AXUIElementCreateApplication + AXChildren` | `AutomationElement.FromHandle + TreeWalker` |
-| Annotated 截图 | NSBitmap + NSBezierPath | `Graphics.DrawLine + DrawRectangle` |
+| 中文 / Unicode 输入 | NSPasteboard 粘贴 | `SendInput` + `KEYEVENTF_UNICODE` (VK_PACKET)；不污染剪贴板、绕过 IME 候选框 |
+| 鼠标 / 键盘注入 | CGEventPost | `SendInput` INPUT 数组（受 UIPI 完整管） |
+| Per-monitor DPI | NSScreen.backingScaleFactor | `SetProcessDpiAwareness(2)` + `MonitorFromPoint` + `GetDpiForMonitor`（控制台进程 ActiveForm 永远 null，必须按显示器拿） |
+| AX tree dump | `AXUIElementCreateApplication + AXChildren` | `AutomationElement.FromHandle + TreeWalker`；UIA 节点 < 3 时自动 fallback MSAA |
+| OCR | Vision framework `VNRecognizeTextRequest` | `Windows.Media.Ocr` WinRT（懒加载 + AsTask 转 IAsyncOperation） |
+| Annotated 截图 | NSBitmap + NSBezierPath | `Graphics.DrawLine + DrawRectangle + DrawString`，#N 前缀让 agent 说 "click #7" |
 
 ## 6. 已知限制 / 未实现
 
@@ -97,7 +99,7 @@ $env:VISION_MCP_NATIVE_HELPER = "C:\path\to\src\vision-mcp-helper.ps1"
 | ---- | ---- |
 | `version` | < 5ms |
 | `window.list`（~50 个窗口） | 40–60ms |
-| `ax.dump`（VSCode，maxNodes=500） | 200–400ms |
+| `ax.dump`（VSCode，maxNodes=300） | 120–300ms |
 | `capture.rect`（1920x1080） | 150–250ms |
 | `capture.window`（1280x800 PrintWindow） | 100–200ms |
 | `input.click` | < 10ms |
