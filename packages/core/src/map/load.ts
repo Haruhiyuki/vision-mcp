@@ -189,13 +189,39 @@ function findControlInDraft(
 
 /**
  * 把 VisionMap 序列化回 YAML，使用稳定 key 顺序。
+ *
+ * 关键：用 Document API 给"短标量数组"显式设 flow style（inline `[a, b, c]`），
+ * 避免 yaml lib 把 bbox_norm / action_types / matched_anchors 这种短数组也展成多行 block。
+ * 否则 commit_state / commit_workflow / harvest_session 任何写 baseline 的工具
+ * 都会把 hand-edited yaml 的紧凑可读格式毁掉（实例：bbox_norm: [0, 0, 0.085, 1] → 4 行）。
+ *
+ * 已知限制：注释（# ...）在 zod parse → re-stringify 这条路径会丢失，因为我们用对象重建
+ * 而不是基于原 YAML doc 增量改。保留注释需要 loadMap/saveMap 改成 doc-level diff，
+ * 目前没做。
  */
 export function dumpMap(map: VisionMapT): string {
-  return YAML.stringify(map, {
+  const doc = new YAML.Document(map);
+  YAML.visit(doc, {
+    Seq(_, node) {
+      // 短数组（≤ 8 元素）且全部是标量 → 用 flow style 保 inline
+      // 典型场景：bbox_norm[4] / center_norm[2] / action_types[2-3] / tags[N]
+      // / require_client_size_px[2] / matched_anchors[N]
+      // 含 object/map 的数组（如 states / locator_priority / patches / steps）不变，保持 block
+      if (
+        node.items.length > 0 &&
+        node.items.length <= 8 &&
+        node.items.every((item) => YAML.isScalar(item))
+      ) {
+        node.flow = true;
+      }
+    },
+  });
+  return doc.toString({
     indent: 2,
-    lineWidth: 100,
-    sortMapEntries: false,
+    lineWidth: 120,
     blockQuote: "literal",
+    // 去掉 flow 数组的 padding 空格，让 [1280, 800] 不变 [ 1280, 800 ]
+    flowCollectionPadding: false,
   });
 }
 
