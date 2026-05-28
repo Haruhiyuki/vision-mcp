@@ -1,13 +1,16 @@
 # Vision-MCP
 
-> 让 LLM agent 像人一样操作真实桌面应用——看截图、估坐标、点击、验证。**但把每次实测的路径沉淀为可复用的 vision-mcp（地图）**，下次直接 `run_workflow` 命中，操作成本随次数递减。
+> **桌面 GUI 操作的性能 / 长期成本优化层** — 把 agent 视觉操作的路径（截图、坐标、AX/OCR、点击序列）沉淀进 vision-mcp.yaml map，下次同任务直接 `run_workflow` 命中，跳过视觉判断。**第一次跑成本与 Computer Use 相当；第二次起每次都摊销**。
 
 ## 它解决什么问题
 
-传统 "computer use" 方案（Anthropic Computer Use / OpenAI Operator / 截图脚本）每次任务都从零看图、估坐标、试错。Vision-MCP **额外**做两件事：
+agent 用 "computer use" 方案（Anthropic Computer Use / OpenAI Operator / 截图脚本）已经能视觉操作桌面，但**每次重复任务都从零看图、估坐标、试错** — 一周后第十次跑同样的"在 Steam 里卸载 X"，仍然是分钟级 + 大量截图进 context。
 
-1. **路径沉淀为 map**：探索时把发现的 state / region / control / workflow 写入 `vision-mcp.yaml`；后续任务用 action_id 直接命中，不再视觉判断
+Vision-MCP **不替代** Computer Use，是 amortize 那笔成本的复用层：
+
+1. **路径沉淀为 map**：第一次跑通时把发现的 state / region / control / workflow 写入 `vision-mcp.yaml`；后续任务用 action_id 直接命中，不再视觉判断
 2. **持续修正**：实战中遇 map 偏差时 `vision-mcp patch` 一行命令固化修正；map 越用越准
+3. **ROI 适用前提**：任务**重复或可能重复**才有沉淀价值；纯一次性任务直接 Computer Use 即可
 
 | 维度 | Anthropic Computer Use | Vision-MCP |
 |------|------------------------|------------|

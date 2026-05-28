@@ -1,26 +1,35 @@
 ---
 name: vision-mcp
 description: |
-  让 agent 像人一样用桌面软件（macOS / Windows）—— 截图、估坐标、点击、输入、验证 ——
-  并把每次实测的路径沉淀成可复用的 vision-mcp.yaml map，下次直接 run_workflow 命中。
+  让 agent 用桌面软件（macOS / Windows）时**性能更高、长期成本更低**的 skill。
+  核心机制：把每次视觉操作的路径（截图、估坐标、AX/OCR、点击序列）沉淀成可复用的
+  vision-mcp.yaml map；下次同任务直接 `run_workflow` 命中，跳过看图估坐标，
+  ~5 步操作从分钟级降到秒级、context 消耗降几个量级。
+
+  适用前提：agent 已能用 Computer Use 类视觉操作桌面 — vision-mcp 是 amortize
+  那笔成本的复用层，不是替代品。任务第一次跑会沉淀，第二次起命中递减。
 when_to_use: |
-  用户要求操作桌面 GUI 软件（不是 web / API），尤其：
-  - 在某 app 里跑流程：「在 Steam 卸载 Portal 2」「Apple Music 播张学友」「Notes 写新备忘」
-  - 跨 app 自动化：「打开 X，复制结果到 Y」
-  - 探索建图：「帮我建立 X 的 vision-mcp」/「学一下这个 app」
-  - 视觉验证：「截图给我看看现在 X 的状态」
-  不适用：纯 web 任务（用浏览器工具）、纯 CLI 任务（直接 shell）。
+  - **重复或可能重复的桌面 GUI 任务**：用户做过一次 / 可能再做的桌面操作流程
+    （「在 Steam 卸载 X」「Apple Music 播 X」「Notes 写新备忘」）—— 首次跑通时
+    沉淀成 workflow，后续命中近零成本
+  - **要看的桌面 app 已建好 map**：先查 `vision_map.list_apps` 看有没有现成 map；
+    有就走 `run_workflow` 跳过视觉判断
+  - **跨 app 自动化的可复用片段**：每个 app 各自有 map，组合调用
+  - **明确要求建图**：「帮我建立 X 的 vision-mcp」/「学一下这个 app」（探索驱动）
+  不适用：
+  - 一次性桌面任务（沉淀 ROI 不划算 → 直接 Computer Use）
+  - 纯 web 任务（用浏览器工具）/ 纯 CLI 任务（直接 shell）
 discovery_flow: |
-  1. vision_map.list_apps               → 看可用 app + workflows 摘要
-  2. vision_map.list_workflows app_id   → 选 workflow
-  3. vision_map.describe_workflow ...   → 看 steps 含 risk_level（destructive 时必看）
-  4. vision_map.run_workflow ...        → 执行
-  失败 → snapshot + describe_action + vision-mcp patch + 重试
+  1. vision_map.list_apps               → 现有 map 命中？没有 → 走 vision_map.init 起新 map
+  2. vision_map.list_workflows app_id   → 现成 workflow 覆盖任务？有 → 跳到 4
+  3. vision_map.describe_workflow ...   → 看 steps + risk_level（destructive 必看）
+  4. vision_map.run_workflow ...        → 执行；命中即免看图
+  失败 / 没现成 workflow → snapshot 看图 → 操作 + 当场 commit_state / patch 沉淀 → 下次命中
 ---
 
 # Skill：Vision-MCP 操作手册
 
-让 agent 像人一样用桌面软件——看截图、估坐标、点击、验证——但把每次实测的路径沉淀为可复用的"地图"，下次直接调用而不再视觉判断。
+桌面 GUI 操作的**性能 / 长期成本优化层**——agent 看一次图、点对一次的成本沉淀进 vision-mcp.yaml map，下次同任务直接 `run_workflow` 命中，跳过视觉判断。第一次成本与 Computer Use 相当；第二次起每次都摊销。
 
 ## 1. 核心原则
 

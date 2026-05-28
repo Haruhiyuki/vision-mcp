@@ -1,10 +1,12 @@
 # Vision-MCP — Agent 使用指南
 
-> 面向 MCP host 中的 agent。让 agent 像人一样用桌面软件——看截图、估坐标、点击、验证——但把每次实测的路径沉淀为可复用的 map，下次直接调用。
+> 面向 MCP host 中的 agent。**桌面 GUI 操作的性能 / 长期成本优化层**——把视觉操作的路径沉淀进 vision-mcp.yaml map，下次同任务跳过看图估坐标，~5 步操作从分钟级降到秒级。
 >
-> **核心**：**视觉为主 + 路径上沉淀 map + 稳定窗口 + 高风险必审批**。
+> **不是替代 Computer Use** — 第一次跑成本相当（仍要看图），第二次起每次都摊销。**只对重复或可能重复的任务有 ROI**；一次性桌面操作直接 Computer Use 即可。
 >
-> - 用户给任务 → **任务驱动 ⭐**：`detect_state` → `run_workflow` → 失败时 `snapshot` 诊断 → `patch` / `commit_state` 继续；任务结束时 vision-mcp 比开始时更完整
+> **核心机制**：**视觉为主 + 路径上沉淀 map + 稳定窗口 + 高风险必审批**。
+>
+> - 用户给任务 → **任务驱动 ⭐**：先 `list_apps` 看现有 map → `run_workflow` 命中 → 失败时 `snapshot` 诊断 → `patch` / `commit_state` 继续；任务结束时 map 比开始时更完整 → 下次更便宜
 > - 用户说"探索 X" / "建立 X 的 vision-mcp" → **探索驱动**：BFS 走遍 → commit 完整 anchors/controls/workflows 写入 vision-mcp
 > - `snapshot` 仅 4 时机：任务起点 / 关键决策 / 失败诊断 / 任务结束
 > - **副产品原则**：snapshot 已截了，candidates 已在 context，顺带把几个明显 control 一起 commit 入 baseline
