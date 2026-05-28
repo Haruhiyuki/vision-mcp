@@ -1,5 +1,22 @@
 # @vision-mcp/core
 
+## 0.5.0
+
+### Minor Changes
+
+- `saveMap` 增量改：基于原 yaml Document 写回，保留**注释 / 字段顺序 / 手编格式**。
+
+  之前 `commit_state` / `commit_workflow` / `harvest_session` 每次 save 都把手编 yaml 整文件重写，注释丢失、字段顺序乱、zod default 字段（`kind: control` / `risk_level: safe` 等）到处注入污染。
+
+  新方案：
+
+  - `loadMap` 用 `YAML.parseDocument` 保留原 doc source，随 `MapLoadResult.baselineDoc` 返回
+  - `AppHandle` 携带 baselineDoc；`writeEffective` 走增量路径
+  - `applyJsToDoc` 递归算法：原 doc 已有的 leaf path → `setIn` 更新；原 doc 没有的字段 → **跳过**（zod default 注入不会污染）；数组 → 重叠部分递归 update，超出追加，缩短截断
+  - 短标量数组（≤ 8 元素）保 inline flow style
+
+  实测保真：round-trip 自身收敛、注释 / 字段顺序 / 其他字段完全保留、harvest 加 workflow 仅 14 行 diff 全是新增内容。已知限制：首次 save 从 hand-edited 状态一次性规范化（之后稳定）。
+
 ## 0.4.1
 
 ### Patch Changes
