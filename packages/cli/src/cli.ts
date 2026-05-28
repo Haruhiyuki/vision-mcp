@@ -114,6 +114,8 @@ function usage(): string {
     "命令：",
     "  init <app_id> --name <human-name> [--platform windows|macos|any] [--width 1280] [--height 800]",
     "       在当前目录的 apps/<app_id>/vision-mcp.yaml 创建骨架",
+    "  init-apps [--out <dir>] [--force]",
+    "       把内置 examples（apple-music / notes / steam-windows 等）拷到 <dir>（默认 ~/.vision-mcp/apps），首次上手用",
     "  validate <app_id>",
     "       lint vision-mcp.yaml + 已应用 patches",
     "  describe <app_id>",
@@ -216,6 +218,9 @@ async function main() {
         return;
       case "init":
         await cmdInit(args);
+        return;
+      case "init-apps":
+        await cmdInitApps(args);
         return;
       case "validate":
         await cmdValidate(args);
@@ -418,6 +423,68 @@ async function cmdInit(args: ParsedArgs) {
   });
   await saveMap(mapPath, map);
   console.log(`wrote ${mapPath}`);
+}
+
+/**
+ * `vision-mcp init-apps`：把 npm 包内置的 examples/ 拷到用户的 apps 目录。
+ *
+ * cli 包 prepublishOnly 把仓库根 examples/ 复制到 cli 包里（与 native/ 同套路），
+ * 安装 @vision-mcp/cli 后用户跑此命令就能拿到一组参考 maps 起手。
+ *
+ * 解析 examples 源位置（与 install-helper 的 prefix 解析对称）：
+ *   1) --src 显式
+ *   2) cli 包内 examples/（npm 安装：node_modules/@vision-mcp/cli/examples）
+ *   3) 仓库根 examples/（源码 dev：repo/examples）
+ */
+async function cmdInitApps(args: ParsedArgs) {
+  const { fileURLToPath } = await import("node:url");
+  const os = await import("node:os");
+  const cliDir = path.dirname(fileURLToPath(import.meta.url));
+  const force = Boolean(args.flags.force);
+  const out = String(
+    args.flags.out ?? path.join(os.homedir(), ".vision-mcp", "apps"),
+  );
+  const srcCandidates = args.flags.src
+    ? [String(args.flags.src)]
+    : [
+        path.resolve(cliDir, "..", "examples"),         // npm 安装
+        path.resolve(cliDir, "..", "..", "..", "examples"), // 源码 dev
+      ];
+  let src: string | undefined;
+  for (const c of srcCandidates) {
+    try {
+      const st = await fs.stat(c);
+      if (st.isDirectory()) { src = c; break; }
+    } catch { /* try next */ }
+  }
+  if (!src) {
+    throw new Error(
+      `找不到 examples 目录。请确保 @vision-mcp/cli 完整安装，或显式 --src <path>`,
+    );
+  }
+  await fs.mkdir(out, { recursive: true });
+  const entries = await fs.readdir(src, { withFileTypes: true });
+  const copied: string[] = [];
+  const skipped: string[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const dstDir = path.join(out, e.name);
+    try {
+      await fs.access(dstDir);
+      if (!force) { skipped.push(e.name); continue; }
+      // force 时先清掉旧的
+      await fs.rm(dstDir, { recursive: true, force: true });
+    } catch { /* 不存在，直接复制 */ }
+    await fs.cp(path.join(src, e.name), dstDir, { recursive: true });
+    copied.push(e.name);
+  }
+  console.log(`✅ copied ${copied.length} apps → ${out}`);
+  for (const n of copied) console.log(`   + ${n}`);
+  if (skipped.length > 0) {
+    console.log(`⏭️  skipped ${skipped.length} 已存在（加 --force 覆盖）：${skipped.join(", ")}`);
+  }
+  console.log(`\n用：vision-mcp describe <app_id> --apps-root "${out}"`);
+  console.log(`或在 host config 里设：--apps-root "${out}"`);
 }
 
 async function cmdValidate(args: ParsedArgs) {

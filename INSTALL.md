@@ -129,6 +129,17 @@ npx -y @vision-mcp/cli@latest doctor
 
 会一行行打印 OS / Node / helper / displays 检查结果。全 ✅ 即可用。
 
+## 拿到内置示例 map（npm 用户起手）
+
+cli 包自带 5 个参考 vision-mcp.yaml（apple-music / notes / activity-monitor / example-erp / steam-windows）。一行拷到默认 apps 目录：
+
+```bash
+npx -y @vision-mcp/cli@latest init-apps
+# 默认拷到 ~/.vision-mcp/apps；--out <dir> 改路径；--force 覆盖已存在
+```
+
+之后 `vision-mcp describe steam-windows` 等命令直接可用。Plugin 用户已通过 plugin 自带 examples/，不需要这一步。
+
 试跑一个 workflow：
 
 ```bash

@@ -28,6 +28,8 @@
   "files": [
     "dist",
     "native",
+    "skills",
+    "examples",
     "README.md"
   ],
   "scripts": {
