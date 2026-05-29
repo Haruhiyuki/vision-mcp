@@ -1,16 +1,30 @@
 # Vision-MCP
 
-Vision-MCP 是一个能够让 Agent 在通过视觉操作软件时沉淀指令化操作方法的框架（包含 skill + MCP server + helper），从而改善 Agent 进行桌面 GUI 操作的性能与长期成本。
+为 Agent 提供的高性能桌面软件交互框架，在通过 Agent 使用桌面软件时，该框架可以在长期尺度上节约 ~93% 的 token 成本，并带来数十倍的性能提升。
 
-这类操作的低性能与高额成本是阻碍通用 Agent 具备更强实用性的关键。
+Vision-MCP 使用 AX/UIA+OCR+视觉模型混合架构，智能抉择适用工具；并通过“探索-操作-沉淀-复用”的流程闭环，在 Agent 操作软件时封装日后可复用的指令列表。
 
-Vision-MCP 能够让这类操作就像使用 MCP 一样高效、廉价。第一次要求 Agent 完成某项 GUI 操作任务时，Agent 会在开展这项工作的同时探索其操作路径上的界面结构、可点击元素、状态切换，并沉淀为 `vision-mcp.yaml`，包括每个可独立执行的 action，以及用多个 action 封装的 workflow。每个 action 和 workflow 都可以用指令触发，Agent 通过 list_workflows → describe_workflow 渐进发现。
+包含一套开箱即用的 skill + MCP server + helper。
 
-第二次让 Agent 执行相同软件上的操作时，Agent 便会读取 action 和 workflow 并尝试在尽可能多的操作环节复用。如果无法完全复用，Agent 会在使用视觉能力时继续对 `vision-mcp.yaml` 进行补充。因此安装此项目后，Agent 的长期成本和任务耗时将会是一个下降曲线。
+## 工作原理
+
+Vision-MCP 主要做了两件事，其一是让 Agent 在流程中沉淀指令化操作方法，其二是在 Agent 理解软件操作的过程中引入混合探索架构。
+
+### 流程沉淀
+
+第一次要求 Agent 完成某项 GUI 操作任务时，Agent 会在开展这项工作的同时探索其操作路径上的界面结构、可点击元素、状态切换，并沉淀为 `vision-mcp.yaml`，包括每个可独立执行的 action，以及用多个 action 封装的 workflow。每个 action 和 workflow 都可以用指令触发。
+
+Agent 通过调用工具渐进式地发现可用指令，就如同通过 MCP 使用软件一样方便。
+
+第N次让 Agent 执行相同软件上的操作时，Agent 便会读取 action 和 workflow 并尽可能多复用。Agent 会按照优先级尝试利用现有 workflow、通过现有 action 组建新的 workflow、利用现有 action 推进至需进一步探索的状态。Agent 会在使用和探索中持续对 `vision-mcp.yaml` 进行补充优化。
+
+### 混合探索架构
+
+在 Agent 需要探索一款软件时，Vision-MCP 向 Agent 提供预先封装好的混合架构能力，优先使用更加高效、准确的方案对软件进行探索。对于良好支持 UIA、AX 的应用，读取其结构树。对于非原生应用，视觉模型作为永远可用的兜底方案。OCR作为介于两者之间的方案，既能够混合使用以增加准确率，也可以用于独立完成一些任务的验证。
 
 ## 快速开始
 
-**Claude Code** — 一条命令装齐 skill + MCP server + helper：
+**Claude Code**：
 
 ```bash
 # 在 Claude Code 内
