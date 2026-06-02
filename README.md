@@ -1,116 +1,220 @@
 # Vision-MCP
 
-为 Agent 提供的高性能桌面软件交互框架，在通过 Agent 使用桌面软件时，该框架可以在长期尺度上节约 ~93% 的 token 成本，并带来数十倍的性能提升。
+**English** | [中文](README.zh-CN.md)
 
-Vision-MCP 使用 AX/UIA+OCR+视觉模型混合架构，智能抉择适用工具；并通过“探索-操作-沉淀-复用”的流程闭环，在 Agent 操作软件时封装日后可复用的指令列表。
+Vision-MCP is a desktop software interaction framework for agents. It combines
+an MCP server, a reusable agent skill, and native desktop helpers so agents can
+operate GUI applications with lower token cost, faster execution, and less
+repeated visual exploration.
 
-包含一套开箱即用的 skill + MCP server + helper。
+The framework uses a hybrid AX/UIA + OCR + vision-model architecture. It lets
+agents inspect software through the cheapest reliable signal first, then turn
+successful interaction paths into reusable `vision-mcp.yaml` maps made of
+actions and workflows.
 
-## 工作原理
+## Why It Exists
 
-Vision-MCP 主要做了两件事，其一是让 Agent 在流程中沉淀指令化操作方法，其二是在 Agent 理解软件操作的过程中引入混合探索架构。
+Agents can use screenshots and vision models to operate desktop software, but
+pure visual exploration is expensive and slow. Vision-MCP gives an agent a
+structured workflow:
 
-### 流程沉淀
+1. Explore a GUI task once with accessibility trees, OCR, screenshots, and
+   visual fallback.
+2. Record stable states, locators, actions, postconditions, and workflows in a
+   `vision-mcp.yaml` map.
+3. Reuse those actions and workflows on later runs.
+4. Patch the map when the UI shifts instead of rediscovering the whole task.
 
-第一次要求 Agent 完成某项 GUI 操作任务时，Agent 会在开展这项工作的同时探索其操作路径上的界面结构、可点击元素、状态切换，并沉淀为 `vision-mcp.yaml`，包括每个可独立执行的 action，以及用多个 action 封装的 workflow。每个 action 和 workflow 都可以用指令触发。
+For repeated desktop workflows, this turns software use from one-off visual
+search into an increasingly reusable instruction layer.
 
-Agent 通过调用工具渐进式地发现可用指令，就如同通过 MCP 使用软件一样方便。
+## How It Works
 
-第N次让 Agent 执行相同软件上的操作时，Agent 便会读取 action 和 workflow 并尽可能多复用。Agent 会按照优先级尝试利用现有 workflow、通过现有 action 组建新的 workflow、利用现有 action 推进至需进一步探索的状态。Agent 会在使用和探索中持续对 `vision-mcp.yaml` 进行补充优化。
+### Reusable GUI Maps
 
-### 混合探索架构
+On the first run, the agent explores the application state, clickable controls,
+state transitions, and expected results. Vision-MCP stores that knowledge in
+`vision-mcp.yaml` as:
 
-在 Agent 需要探索一款软件时，Vision-MCP 向 Agent 提供预先封装好的混合架构能力，优先使用更加高效、准确的方案对软件进行探索。对于良好支持 UIA、AX 的应用，读取其结构树。对于非原生应用，视觉模型作为永远可用的兜底方案。OCR作为介于两者之间的方案，既能够混合使用以增加准确率，也可以用于独立完成一些任务的验证。
+- reusable **actions**, such as clicking a specific control or entering text
+- higher-level **workflows**, composed from multiple actions
+- state anchors and postconditions used to verify progress
+- patch overlays that keep runtime fixes separate from trusted baseline maps
 
-## 快速开始
+On later runs, the agent discovers available actions through MCP tools, reuses
+existing workflows when possible, and only falls back to exploration when the
+map does not yet cover the requested task.
 
-**Claude Code**：
+### Hybrid Exploration
+
+Vision-MCP gives the agent multiple ways to understand a GUI:
+
+- native accessibility trees through macOS AX or Windows UIA
+- OCR for text regions and verification
+- screenshots and visual-model fallback for non-native or visually dense apps
+- window capsules for display, geometry, foregrounding, and live view support
+
+Native structure is preferred when it is reliable. OCR and vision are used as
+fallbacks or verification layers.
+
+## Quick Start
+
+### Claude Code
+
+Inside Claude Code:
 
 ```bash
-# 在 Claude Code 内
 /plugin marketplace add Haruhiyuki/vision-mcp
 /plugin install vision-mcp@vision-mcp
 ```
 
-**其他 MCP host**（Codex / Cursor / Cline / OpenClaw / Hermes Agent / 自建 stdio host）— 在 MCP 配置里加：
+The plugin installs the skill, MCP server configuration, examples, and helper
+bootstrap path.
+
+### Other MCP Hosts
+
+For Codex, Cursor, Cline, OpenClaw, Hermes Agent, or any stdio MCP host, add a
+server like this:
 
 ```jsonc
 {
   "mcpServers": {
     "vision-mcp": {
       "command": "npx",
-      "args": ["-y", "@vision-mcp/cli@latest", "serve", "--apps-root", "${HOME}/.vision-mcp/apps"]
+      "args": [
+        "-y",
+        "@vision-mcp/cli@latest",
+        "serve",
+        "--apps-root",
+        "${HOME}/.vision-mcp/apps"
+      ]
     }
   }
 }
 ```
 
+Then run:
 
-各 host 具体配置文件位置 / macOS Windows 权限 / 故障排查见 [INSTALL.md](INSTALL.md)。
+```bash
+npx -y @vision-mcp/cli@latest doctor
+npx -y @vision-mcp/cli@latest init-apps
+```
 
-## 核心能力
+For host-specific configuration paths, macOS and Windows permissions, upgrade
+steps, and troubleshooting, see the Chinese install guide:
+[INSTALL.md](INSTALL.md).
 
-### 平台支持
+## Core Capabilities
 
-| 能力 | macOS | Windows |
-| ---- | ----- | ------- |
-| Helper | Swift + ScreenCaptureKit + AX + Vision + IOKit（1134 行） | PowerShell 5.1 + Win32 + UIA + System.Drawing + WinRT（1466 行） |
-| 现代截图 | SCKit `SCScreenshotManager`（macOS 14+） | `PrintWindow PW_RENDERFULLCONTENT`（Win 8.1+） |
-| AX 树 | AXUIElement + osascript fallback | UIA TreeWalker + **MSAA fallback** + interactive_only / skip_empty / viewport 剪枝 |
-| OCR | Vision framework | **Windows.Media.Ocr** (WinRT) + `recognize_window`（PrintWindow path，屏外可用） |
-| 输入 | NSPasteboard 粘贴 + CGEvent | SendInput VK_PACKET（绕过 IME 不污染剪贴板）+ modifier 支持 |
-| 强制前台 | `NSWorkspace.activate` | `SwitchToThisWindow`（Alt+Tab API）+ AttachThreadInput + Alt-key 抖动 4 招兜底 |
-| 健康监控 | `health.snapshot` (mach_task_basic_info) | `health.snapshot` (GetGuiResources GDI/USER) + `doctor --watch` |
-| 自检 | `vision-mcp doctor` | `vision-mcp doctor` |
-| 兼容性测试 | swift compile + tests | PS 5.1 / pwsh 7 检测 + OCR 语言包检测 + UIPI elevation 检测 |
+### Platform Support
 
-详 [`platform-macos.md`](skills/vision-mcp/references/platform-macos.md) / [`platform-windows.md`](skills/vision-mcp/references/platform-windows.md)。
+| Capability | macOS | Windows |
+| --- | --- | --- |
+| Native helper | Swift + ScreenCaptureKit + AX + Vision + IOKit | PowerShell 5.1 + Win32 + UIA + System.Drawing + WinRT |
+| Modern screenshots | `SCScreenshotManager` on macOS 14+ | `PrintWindow PW_RENDERFULLCONTENT` on Windows 8.1+ |
+| Accessibility tree | AXUIElement + osascript fallback | UIA TreeWalker + MSAA fallback |
+| OCR | Vision framework | Windows.Media.Ocr |
+| Input | NSPasteboard paste + CGEvent | SendInput VK_PACKET with modifier support |
+| Foregrounding | `NSWorkspace.activate` | `SwitchToThisWindow`, AttachThreadInput, and fallbacks |
+| Health checks | `health.snapshot` | `health.snapshot` with GDI/USER resource checks |
+| Self-check | `vision-mcp doctor` | `vision-mcp doctor` |
 
-### MCP 工具
+Platform notes:
 
-| 类别 | 工具 |
-|------|------|
-| **发现**  | `list_apps` / `list_workflows` / `describe` / `describe_workflow` / `describe_action` / `list_actions` |
-| **执行**  | `run_workflow` / `perform_action` |
-| **底层动作** | `click_at` / `type_text` / `press_key` / `scroll` |
-| **探索 / 视觉** | `snapshot` / `annotated`（网格 + #N 候选）/ `click-text`（OCR） |
-| **AX/UIA** | `ax-press`（macOS AXPress / Windows UIA InvokePattern，跨平台） |
-| **持续修正** | `vision-mcp patch` 一行命令固化偏差；`patches` 列出已应用 |
-| **窗口管理** | `displays` / `capsule` / `restore` / `live-view`（浏览器实时看 + 接管） |
-| **诊断** | `doctor [--watch sec]`（OS / Helper / DPI / OCR 语言 / elevation / GDI leak 检测） |
-| **修复** | `repair_minimal --max-level 3`（runtime L0-L3 自动 ladder） |
+- [macOS adapter reference](skills/vision-mcp/references/platform-macos.md)
+- [Windows adapter reference](skills/vision-mcp/references/platform-windows.md)
 
-### vision-mcp.yaml map 抽象
+### MCP Tool Surface
 
-- **state** — UI 页面节点；`kind: page/menu/dialog/modal/tooltip/system_modal`；多 anchor 类型（OCR/AX/visual_hash/window_title）+ `match_policy: any_anchor/all_anchors/score`
-- **region** + `inherit_regions` — 跨 state 共享 UI 区域（sidebar / toolbar / **kbd 虚拟快捷键集**）
-- **collection** + `enumeration` — 同质 N 元素（4×2 卡片网格 / 17 行游戏列表 / 双按钮对话框）单条声明，`<state>.<id>[N]:<action_type>` 寻址
-- **multi-locator** — `accessibility → ocr_text → nearby_text → image_patch → bbox_norm → vlm` 优先级链；按 app 类型选档数（原生 4 档 / CEF 3 档纯视觉）
-- **workflow** — 多步组合 + `inputs`（{{template}}）+ `timeout_ms` + step 级 `approval_required` / `on_failure: abort/ask_user/repair/skip`
-- **patch overlay** — runtime 修复 / agent 主动 patch 都不破坏 baseline；trust 三级（`session_only` / `trusted` / `untrusted_proposal`）
-- **parent_state_id** — modal/menu/dialog 套嵌（context_menu → submenu → confirm_dialog 链）
+| Category | Tools |
+| --- | --- |
+| Discovery | `list_apps`, `list_workflows`, `describe`, `describe_workflow`, `describe_action`, `list_actions` |
+| Execution | `run_workflow`, `perform_action` |
+| Low-level actions | `click_at`, `type_text`, `press_key`, `scroll` |
+| Exploration and vision | `snapshot`, `annotated`, OCR text click helpers |
+| AX/UIA | `ax-press` for macOS AXPress and Windows UIA InvokePattern |
+| Continuous correction | `vision-mcp patch`, `patches` |
+| Window management | `displays`, `capsule`, `restore`, `live-view` |
+| Diagnostics | `doctor [--watch sec]` |
+| Repair | `repair_minimal --max-level 3` |
 
-建 map 时按 [`map-design.md`](skills/vision-mcp/references/map-design.md) 的 **13 项 checklist** 走（漏一项 map 复用价值就少一截）。完整字段见 [`schema.md`](skills/vision-mcp/references/schema.md)。
+## `vision-mcp.yaml` Map Model
 
-### 安全策略
+Vision-MCP maps are designed to make GUI knowledge durable:
 
-- `safety_policy.forbidden_action_categories`（payment / destructive / external_communication / permission_change / captcha）默认拒绝
-- `risk_level: requires_confirmation` / `destructive` 必经审批通道
-- workflow step 级 `approval_required: true` + `on_failure: abort`（destructive 失败绝不重试）
-- `redaction_patterns` 自动脱敏（密码 / 信用卡 / Steam Guard / Bearer token）写入 trace 时
-- 每个 action trace 含前后截图 + locator 命中 + postcondition 结果，可审计
+- **state**: UI pages, menus, dialogs, modals, tooltips, and system modals
+- **anchors**: OCR, AX/UIA, visual hash, and window-title anchors with match policies
+- **regions**: shared sidebar, toolbar, keyboard, or app-specific UI zones
+- **collections**: repeated controls such as card grids, rows, or dialog buttons
+- **multi-locators**: priority chains such as accessibility, OCR text, nearby text,
+  image patch, normalized bounding box, and vision fallback
+- **workflows**: multi-step procedures with inputs, timeouts, approval flags, and
+  failure policy
+- **patch overlays**: runtime or agent-authored corrections with trust levels
+- **parent state links**: nested menus, dialogs, and modal chains
 
+When authoring a map, follow the checklist in
+[map-design.md](skills/vision-mcp/references/map-design.md). Full field details
+are in [schema.md](skills/vision-mcp/references/schema.md).
 
-## 协议
+## Agent Documentation
 
-Apache-2.0（见 [`LICENSE`](LICENSE) + 第三方 attribution [`NOTICE`](NOTICE)）。每个源文件含 SPDX-License-Identifier header。
+The agent-facing source of truth is the bundled skill:
 
-## 免责声明
+- [skills/vision-mcp/SKILL.md](skills/vision-mcp/SKILL.md)
+- [workflow guide](skills/vision-mcp/references/workflow.md)
+- [map design](skills/vision-mcp/references/map-design.md)
+- [examples](skills/vision-mcp/references/examples.md)
+- [pitfalls](skills/vision-mcp/references/pitfalls.md)
+- [patch policy](skills/vision-mcp/references/patches.md)
+- [repair policy](skills/vision-mcp/references/repair-policy.md)
+- [safety policy](skills/vision-mcp/references/safety.md)
 
-`examples/` 下的 map（`apple-music` / `notes` / `activity-monitor` / `example-erp` / `steam-windows`）描述对应应用的公开 UI 布局，目的是演示 vision-mcp 的 map 格式与覆盖能力。这些 map **不被对应应用的厂商背书或授权**，所有商标和应用本体的版权归各厂商所有。
+Additional Chinese-language documentation:
 
-特别提示：
+- [Chinese README](README.zh-CN.md)
+- [Installation guide](INSTALL.md)
+- [Agent documentation index](AGENT-USAGE.md)
+- [Deployment guide](docs/deployment.md)
+- [Permissions guide](docs/permissions.md)
+- [Error codes](docs/errors.md)
+- [Acceptance notes](docs/acceptance.md)
 
-- **destructive workflow demo**（如 `steam-windows` 中的 `uninstall_first_installed_game`）仅用于**展示风险动作的 map 设计模式**（`risk_level: destructive` + `approval_required: true` + `on_failure: abort` 的组合），并不构成对实际卸载操作的鼓励或指引。任何 destructive workflow 在实际运行时**必须**经审批通道（runtime 默认 `auto_repair_before_action: false` 且 `require_user_confirmation: true`）。
-- 用户使用 vision-mcp 操作第三方桌面应用应**自行确认**是否符合该应用的 ToS、相关地区法律及当事人的合理预期；vision-mcp 项目不为用户的具体使用行为承担责任。
-- 涉及反作弊保护 / DRM 受保护内容 / 系统安全屏障的桌面应用（DirectX 全屏游戏、企业 EDR、UAC 高完整度 app 等），平台层会主动拒绝输入注入和截屏，请尊重这些边界。
+## Safety
+
+Vision-MCP maps and workflows support explicit safety controls:
+
+- forbidden action categories such as payment, destructive actions, external
+  communication, permission changes, and captcha handling
+- `risk_level: requires_confirmation` or `destructive` for actions that must go
+  through approval
+- workflow-step `approval_required: true`
+- destructive workflow steps should use `on_failure: abort`
+- redaction patterns for passwords, credit cards, Steam Guard codes, bearer
+  tokens, and similar secrets
+- action traces with before/after screenshots, locator hits, and postcondition
+  results
+
+Desktop-control tools inherit the permissions of the MCP host and native
+helper. Always respect application terms, user expectations, operating-system
+security prompts, DRM, anti-cheat systems, and elevation boundaries.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and third-party attribution in
+[NOTICE](NOTICE).
+
+Each source file includes an SPDX license header.
+
+## Disclaimer
+
+Maps under `examples/` describe public UI layouts of applications such as Apple
+Music, Notes, Activity Monitor, example ERP screens, and Steam on Windows. They
+exist to demonstrate Vision-MCP map structure and coverage patterns. They are
+not endorsed or authorized by the vendors of those applications. Trademarks and
+application copyrights belong to their respective owners.
+
+Destructive workflow examples are included only to demonstrate safe map design
+patterns such as `risk_level: destructive`, `approval_required: true`, and
+`on_failure: abort`. They are not recommendations to perform destructive
+actions.

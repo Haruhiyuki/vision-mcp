@@ -42,7 +42,7 @@ vision_mcp_windows_macos_design.md
 /tmp/vmcp-*
 *.tmp.png
 *.tmp.json
-
+packages/bench
 # session_only patches（按定义不该入库；trusted/untrusted_proposal 可 commit）
 # 注：当前没有自动按 trust 过滤的 hook；如果手动入库 session_only patch
 # 要先把 trust 升级为 trusted，否则在干净 clone 上行为不一致。

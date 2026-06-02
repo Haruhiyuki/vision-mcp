@@ -17,6 +17,7 @@ agent 入口 / 唯一权威是 [`skills/vision-mcp/SKILL.md`](skills/vision-mcp/
 | **持续修正（patch）** + Trust 渐进 | [`references/patches.md`](skills/vision-mcp/references/patches.md) |
 | **L0-L3 repair ladder** | [`references/repair-policy.md`](skills/vision-mcp/references/repair-policy.md) |
 | **safety_policy / 高风险审批 / prompt injection 防护** | [`references/safety.md`](skills/vision-mcp/references/safety.md) |
-| 人类视角：项目介绍 + FAQ | [`README.md`](README.md) |
+| 人类视角：英文默认入口 | [`README.md`](README.md) |
+| 人类视角：中文项目介绍 + FAQ | [`README.zh-CN.md`](README.zh-CN.md) |
 | 人类视角：plugin / npm / 源码安装 + MCP host 配置 | [`INSTALL.md`](INSTALL.md) |
 | 设计文档（架构 + 平台决策） | [`vision_mcp_windows_macos_design.md`](vision_mcp_windows_macos_design.md) |
