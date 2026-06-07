@@ -196,12 +196,29 @@ function usage(): string {
     "  schema export [--out ./schema]",
     "       导出 vision-mcp.schema.json / vision-mcp-patch.schema.json",
     "",
+    "选项：",
+    "  -v, --version        显示版本号",
+    "  -h, --help           显示帮助信息",
+    "",
     "环境变量：VISION_MCP_APPS_ROOT, VISION_MCP_TRACE_DIR, VISION_MCP_NATIVE_HELPER, VISION_MCP_PLATFORM, VISION_MCP_FALLBACK_MOCK=1",
   ].join("\n");
 }
 
+async function getVersion(): Promise<string> {
+  const cliDir = path.dirname(fileURLToPath(import.meta.url));
+  const pkgPath = path.resolve(cliDir, "..", "package.json");
+  const content = await fs.readFile(pkgPath, "utf8");
+  return JSON.parse(content).version;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+
+  if (args.command === "version" || args.command === "--version" || args.command === "-v") {
+    console.log(await getVersion());
+    return;
+  }
+
   // 在 dispatch 前把 bundled helper 路径设进 env，让所有 createPlatformAdapter
   // 调用都能默认拿到。用户显式设的 VISION_MCP_NATIVE_HELPER 优先（resolveBundledHelper 会先读 env）。
   // install-helper 命令自己有特殊逻辑，跳过；其他命令受益。
