@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import packageJson from "../package.json" with { type: "json" };
 import {
   VisionMap,
   applyPatches,
@@ -107,7 +108,11 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command: command ?? "help", positional, flags };
 }
 
-function usage(): string {
+export function cliVersion(): string {
+  return packageJson.version;
+}
+
+export function usage(): string {
   return [
     "vision-mcp <command> [...args] [--flags]",
     "",
@@ -200,12 +205,13 @@ function usage(): string {
   ].join("\n");
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   // 在 dispatch 前把 bundled helper 路径设进 env，让所有 createPlatformAdapter
   // 调用都能默认拿到。用户显式设的 VISION_MCP_NATIVE_HELPER 优先（resolveBundledHelper 会先读 env）。
   // install-helper 命令自己有特殊逻辑，跳过；其他命令受益。
-  if (args.command !== "install-helper" && !process.env.VISION_MCP_NATIVE_HELPER) {
+  const isMetadataCommand = ["help", "-h", "--help", "-v", "--version"].includes(args.command);
+  if (!isMetadataCommand && args.command !== "install-helper" && !process.env.VISION_MCP_NATIVE_HELPER) {
     const bundled = await resolveBundledHelper();
     if (bundled) process.env.VISION_MCP_NATIVE_HELPER = bundled;
   }
@@ -215,6 +221,10 @@ async function main() {
       case "-h":
       case "--help":
         console.log(usage());
+        return;
+      case "-v":
+      case "--version":
+        console.log(cliVersion());
         return;
       case "init":
         await cmdInit(args);
@@ -2975,8 +2985,3 @@ async function cmdInstallHelper(args: ParsedArgs) {
   }
   fail(`install-helper 只支持 macOS / Windows，当前 platform=${platform}`);
 }
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
