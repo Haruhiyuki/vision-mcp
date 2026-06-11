@@ -3,6 +3,11 @@ node_modules
 dist
 *.tsbuildinfo
 
+# Generated during packages/cli prepublish packaging
+/packages/cli/native/
+/packages/cli/skills/
+/packages/cli/examples/
+
 # Editor / OS
 .DS_Store
 .vscode/settings.json

@@ -1,6 +1,6 @@
 {
   "name": "vision-mcp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Vision-MCP plugins — 桌面 GUI 操作的性能 / 长期成本优化层",
   "owner": {
     "name": "Haruhiyuki",
@@ -11,7 +11,7 @@
       "name": "vision-mcp",
       "description": "Vision-MCP: 让 Agent 在使用桌面软件时沉淀指令化操作方法的框架（macOS + Windows）",
       "source": "./",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "keywords": [
         "mcp",
         "vision",

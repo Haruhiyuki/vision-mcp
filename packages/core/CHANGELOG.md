@@ -1,5 +1,11 @@
 # @vision-mcp/core
 
+## 0.6.0
+
+### Minor Changes
+
+- 新增截图默认落盘与 downsample 元数据，透传 capture `via` 细节，降低 geometry violations 噪声，支持 quick-look 临时会话，并把 macOS per-window OCR 接入统一捕获管线。
+
 ## 0.5.0
 
 ### Minor Changes
