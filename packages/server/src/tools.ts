@@ -19,6 +19,7 @@ import {
   hasErrors,
 } from "@vision-mcp/core";
 import type { AccessibilityNode, Frame } from "@vision-mcp/core";
+import { downscaleRgba, encodeRgbaToPng } from "@vision-mcp/core";
 
 function isInteractiveCandidate(n: AccessibilityNode): boolean {
   const r = n.role ?? "";
@@ -35,64 +36,36 @@ function isInteractiveCandidate(n: AccessibilityNode): boolean {
 }
 
 /**
- * 极简 PNG 编码：8-bit RGBA，无压缩 fallback。
- * Frame 是从 capsule.capture 来的 RGBA buffer。
+ * 把 Frame 编成 PNG bytes；maxWidth > 0 且帧更宽时先等比降采样。
  */
-async function encodeFramePng(frame: Frame): Promise<Uint8Array> {
-  const zlib = await import("node:zlib");
-  const { width_px: width, height_px: height, pixels } = frame;
-  const sig = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const ihdrData = Buffer.alloc(13);
-  ihdrData.writeUInt32BE(width, 0);
-  ihdrData.writeUInt32BE(height, 4);
-  ihdrData[8] = 8; // bit depth
-  ihdrData[9] = 6; // color type RGBA
-  ihdrData[10] = 0;
-  ihdrData[11] = 0;
-  ihdrData[12] = 0;
-  const ihdr = chunk("IHDR", ihdrData);
-  // 加上每行 filter 字节（0 = None）
-  const stride = width * 4;
-  const filtered = Buffer.alloc(height * (stride + 1));
-  for (let y = 0; y < height; y++) {
-    filtered[y * (stride + 1)] = 0;
-    Buffer.from(pixels.buffer, pixels.byteOffset + y * stride, stride).copy(
-      filtered,
-      y * (stride + 1) + 1,
-    );
-  }
-  const idatData = zlib.deflateSync(filtered);
-  const idat = chunk("IDAT", idatData);
-  const iend = chunk("IEND", Buffer.alloc(0));
-  return Buffer.concat([sig, ihdr, idat, iend]);
+function encodeFramePng(frame: Frame, maxWidth = 0): { png: Buffer; width: number; height: number } {
+  const scaled = downscaleRgba(frame.width_px, frame.height_px, frame.pixels, maxWidth);
+  return {
+    png: encodeRgbaToPng(scaled.width, scaled.height, scaled.pixels),
+    width: scaled.width,
+    height: scaled.height,
+  };
 }
 
-function chunk(type: string, data: Buffer): Buffer {
-  const len = Buffer.alloc(4);
-  len.writeUInt32BE(data.length, 0);
-  const typeBuf = Buffer.from(type, "ascii");
-  const body = Buffer.concat([typeBuf, data]);
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(body) >>> 0, 0);
-  return Buffer.concat([len, body, crc]);
-}
-
-const CRC_TABLE: number[] = (() => {
-  const t: number[] = [];
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t.push(c >>> 0);
-  }
-  return t;
-})();
-
-function crc32(buf: Buffer): number {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) {
-    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  }
-  return (c ^ 0xffffffff) >>> 0;
+/**
+ * 截图落盘：写进 traceDir/<app_id>/captures/，返回绝对路径。
+ * 截图动辄 300KB–数 MB，内联 base64 会把 host 的 token 上限打爆——默认全部走文件。
+ */
+async function writeFramePng(
+  ctx: ServerContext,
+  appId: string,
+  frame: Frame,
+  maxWidth = 0,
+): Promise<{ path: string; width: number; height: number; bytes: number }> {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const { png, width, height } = encodeFramePng(frame, maxWidth);
+  const dir = path.join(ctx.traceDir, appId, "captures");
+  await fs.mkdir(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const file = path.join(dir, `${stamp}-${frame.source}.png`);
+  await fs.writeFile(file, png);
+  return { path: file, width, height, bytes: png.length };
 }
 import type { ServerContext } from "./context.js";
 import {
@@ -303,36 +276,38 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "capsule.capture",
     {
-      title: "截图当前 capsule 内容",
+      title: "截图当前 capsule 内容（PNG 落盘，返回文件路径）",
       description:
-        "默认捕获目标窗口；source=display 则捕获整个 capsule 显示器。返回 base64 PNG。",
+        "默认捕获目标窗口；source=display 则捕获整个 capsule 显示器。" +
+        "PNG 写入磁盘并返回 image_path——不内联 base64，避免大图打爆 host 的 token 上限。" +
+        "max_image_width > 0 时等比降采样到该宽度（0 = 保留原始分辨率）。",
       inputSchema: {
         app_id: z.string(),
         source: z.enum(["window", "display"]).optional(),
+        max_image_width: z.number().int().min(0).max(8192).default(0),
       },
     },
-    async ({ app_id, source }) => {
+    async ({ app_id, source, max_image_width }) => {
       try {
         return await withApp(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const frame = await capsule.capture({ source });
-          const summary = `${frame.source} ${frame.width_px}x${frame.height_px} @ ${frame.captured_at}`;
-          return {
-            content: [
-              { type: "text" as const, text: summary },
-            ],
-            structuredContent: {
-              width_px: frame.width_px,
-              height_px: frame.height_px,
+          const file = await writeFramePng(ctx, app_id, frame, max_image_width);
+          return StructuredOk(
+            {
+              image_path: file.path,
+              image_mime: "image/png",
+              image_width_px: file.width,
+              image_height_px: file.height,
+              image_bytes: file.bytes,
+              capture_width_px: frame.width_px,
+              capture_height_px: frame.height_px,
               captured_at: frame.captured_at,
               source: frame.source,
               client_rect: frame.client_rect_in_frame,
-              pixels_base64_truncated: Buffer.from(
-                frame.pixels.slice(0, Math.min(frame.pixels.length, 64)),
-              ).toString("base64"),
-              pixels_length: frame.pixels.length,
             },
-          };
+            `${frame.source} ${frame.width_px}x${frame.height_px} → ${file.path} (${file.width}x${file.height}, ${Math.round(file.bytes / 1024)}KB)`,
+          );
         });
       } catch (err) {
         return errorResult(err);
@@ -390,13 +365,27 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "返回当前 capsule 的截图 + AX 候选 + OCR token + 已知 state 匹配",
       description:
-        "Agent 探索的核心工具：一次拿到 PNG（base64）、可交互 AX 节点、OCR 文字 token + bbox、" +
+        "Agent 探索的核心工具：一次拿到 PNG（默认落盘返回 image_path）、可交互 AX 节点、OCR 文字 token + bbox、" +
         "与 map.states 的最佳匹配；后续 commit_state 时一并写入 vision-mcp。" +
         "AX 优先（最便宜最准），OCR 作辅助定位（AX 树空 / CEF / 自绘 UI 时主力）；" +
         "视觉（PNG）只在 agent 真要看图时用——多数情况只看 candidates + ocr_tokens 足够。",
       inputSchema: {
         app_id: z.string(),
         include_image: z.boolean().default(true),
+        image_output: z
+          .enum(["file", "inline"])
+          .default("file")
+          .describe(
+            "file（默认）：PNG 写盘返回 image_path，host 直接读文件，不占 token；" +
+              "inline：返回 image_base64（仅小图/特殊场景用，大图会超 host token 上限）",
+          ),
+        max_image_width: z
+          .number()
+          .int()
+          .min(0)
+          .max(8192)
+          .default(1280)
+          .describe("等比降采样到该宽度（Retina 原始帧常 >2500px 宽）；0 = 保留原始分辨率"),
         include_ax: z.boolean().default(true),
         include_ocr: z
           .boolean()
@@ -412,7 +401,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           .describe("OCR token 数量上限。confidence < 0.5 的自动过滤"),
       },
     },
-    async ({ app_id, include_image, include_ax, include_ocr, max_candidates, max_ocr_tokens }) => {
+    async ({ app_id, include_image, image_output, max_image_width, include_ax, include_ocr, max_candidates, max_ocr_tokens }) => {
       try {
         return await withApp(ctx, app_id, async (app) => {
           const rt = await ensureRuntime(ctx, app);
@@ -432,10 +421,21 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             }
           }
           let image_base64: string | undefined;
+          let image_path: string | undefined;
+          let image_width_px: number | undefined;
+          let image_height_px: number | undefined;
           if (include_image) {
-            const { Buffer } = await import("node:buffer");
-            const png = await encodeFramePng(insights.frame);
-            image_base64 = Buffer.from(png).toString("base64");
+            if (image_output === "inline") {
+              const encoded = encodeFramePng(insights.frame, max_image_width);
+              image_base64 = encoded.png.toString("base64");
+              image_width_px = encoded.width;
+              image_height_px = encoded.height;
+            } else {
+              const file = await writeFramePng(ctx, app_id, insights.frame, max_image_width);
+              image_path = file.path;
+              image_width_px = file.width;
+              image_height_px = file.height;
+            }
           }
           const candidates = include_ax
             ? insights.accessibility
@@ -474,11 +474,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               candidates_total: insights.accessibility.length,
               ocr_tokens,
               ocr_tokens_total: insights.ocr.length,
+              image_path,
               image_base64,
-              image_mime: image_base64 ? "image/png" : undefined,
+              image_mime: image_path || image_base64 ? "image/png" : undefined,
+              image_width_px,
+              image_height_px,
               visual_hash: insights.visual_hash,
             },
-            `state=${state?.state_id ?? "none"} ax=${candidates.length}/${insights.accessibility.length} ocr=${ocr_tokens.length}/${insights.ocr.length}`,
+            `state=${state?.state_id ?? "none"} ax=${candidates.length}/${insights.accessibility.length} ocr=${ocr_tokens.length}/${insights.ocr.length}${image_path ? ` image=${image_path}` : ""}`,
           );
         });
       } catch (err) {

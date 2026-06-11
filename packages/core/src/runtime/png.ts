@@ -39,6 +39,52 @@ export function encodeRgbaToPng(
   return Buffer.concat([sig, ihdr, idat, iend]);
 }
 
+/**
+ * 把 RGBA 帧按目标宽度等比降采样（box average，纯 JS）。
+ * targetWidth >= 原宽时原样返回。给截图落盘/内联前减体积用。
+ */
+export function downscaleRgba(
+  width: number,
+  height: number,
+  pixels: Uint8Array,
+  targetWidth: number,
+): { width: number; height: number; pixels: Uint8Array } {
+  if (targetWidth <= 0 || targetWidth >= width) return { width, height, pixels };
+  const outW = targetWidth;
+  const outH = Math.max(1, Math.round((height * targetWidth) / width));
+  const out = new Uint8Array(outW * outH * 4);
+  const xRatio = width / outW;
+  const yRatio = height / outH;
+  for (let oy = 0; oy < outH; oy++) {
+    const y0 = Math.floor(oy * yRatio);
+    const y1 = Math.min(height, Math.max(y0 + 1, Math.floor((oy + 1) * yRatio)));
+    for (let ox = 0; ox < outW; ox++) {
+      const x0 = Math.floor(ox * xRatio);
+      const x1 = Math.min(width, Math.max(x0 + 1, Math.floor((ox + 1) * xRatio)));
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      const count = (x1 - x0) * (y1 - y0);
+      for (let sy = y0; sy < y1; sy++) {
+        for (let sx = x0; sx < x1; sx++) {
+          const si = (sy * width + sx) * 4;
+          r += pixels[si];
+          g += pixels[si + 1];
+          b += pixels[si + 2];
+          a += pixels[si + 3];
+        }
+      }
+      const di = (oy * outW + ox) * 4;
+      out[di] = Math.round(r / count);
+      out[di + 1] = Math.round(g / count);
+      out[di + 2] = Math.round(b / count);
+      out[di + 3] = Math.round(a / count);
+    }
+  }
+  return { width: outW, height: outH, pixels: out };
+}
+
 function chunk(type: string, data: Buffer): Buffer {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);

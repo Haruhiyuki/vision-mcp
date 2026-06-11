@@ -28,7 +28,7 @@ vision-mcp snapshot apple-music --out /tmp/final.png
 > **一次性深度投入**。建好后日常用 §1 任务驱动 ~5 秒命中。
 
 ```bash
-# snapshot 看主页：返回 image_base64 + AX 候选
+# snapshot 看主页：PNG 落盘（返回 image_path）+ AX 候选
 vision-mcp snapshot apple-music --out /tmp/home.png
 # Agent 视觉看 home.png + AX：sidebar 有"搜索/主页/新发现/广播"
 # AX 候选给精确 bbox：name="搜索" bbox=[0.014, 0.065, 0.141, 0.04]
