@@ -13,10 +13,13 @@ import {
 } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-async function setupServerAndClient(appsRoot: string) {
+async function setupServerAndClient(
+  appsRoot: string,
+  mockInit?: { windows?: Array<{ title: string; process_name: string; bounds: { x: number; y: number; width: number; height: number } }> },
+) {
   const ctx = await createServerContext({
     appsRoot,
-    platformOptions: { platform: "mock", fallbackToMock: true },
+    platformOptions: { platform: "mock", fallbackToMock: true, mockInit },
   });
   const server = createVisionMcpServer(ctx);
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
@@ -110,6 +113,52 @@ describe("MCP server end-to-end (mock platform)", () => {
     expect(rich!.name).toBe("Rich App");
     expect(rich!.platform).toBe("windows");
     expect(Array.isArray(rich!.workflows)).toBe(true);
+  });
+
+  it("quick-look：未 init 的 app_id 直接 attach → snapshot → restore → 再 attach", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vmcp-srv-"));
+    const { client } = await setupServerAndClient(dir, {
+      windows: [
+        {
+          title: "Quick Window",
+          process_name: "quick.exe",
+          bounds: { x: 50, y: 50, width: 800, height: 600 },
+        },
+      ],
+    });
+
+    // 没跑过 vision_map.init —— attach_window 应自动建临时会话并顺手 ensure display
+    const attach = await client.callTool({
+      name: "capsule.attach_window",
+      arguments: { app_id: "quick", target_override: { process_name: "quick.exe" } },
+    });
+    expect(attach.isError).toBeFalsy();
+    expect((attach.structuredContent as { ephemeral?: boolean }).ephemeral).toBe(true);
+
+    const snap = await client.callTool({
+      name: "vision_map.snapshot",
+      arguments: { app_id: "quick", include_image: false, include_ocr: false },
+    });
+    expect(snap.isError).toBeFalsy();
+
+    // restore 后缓存失效，重新 attach 一步到位（不必再 ensure_display）
+    const restore = await client.callTool({
+      name: "capsule.restore_window",
+      arguments: { app_id: "quick" },
+    });
+    expect(restore.isError).toBeFalsy();
+    const again = await client.callTool({
+      name: "capsule.attach_window",
+      arguments: { app_id: "quick", target_override: { process_name: "quick.exe" } },
+    });
+    expect(again.isError).toBeFalsy();
+
+    // map 语义工具仍要求真实 map：ephemeral 会话上 perform_action 报 ACTION_NOT_FOUND
+    const act = await client.callTool({
+      name: "vision_map.perform_action",
+      arguments: { app_id: "quick", action_id: "no.such" },
+    });
+    expect(act.isError).toBeTruthy();
   });
 
   it("perform_action 在没有可匹配 state 时返回 LOCATOR_FAILED 或 STATE_UNKNOWN", async () => {

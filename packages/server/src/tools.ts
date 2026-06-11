@@ -97,7 +97,7 @@ const ERROR_HINTS: Partial<Record<string, string>> = {
   ACTION_NOT_FOUND:
     "用 vision_map.list_actions(app_id, state_id?) 看可用 action_id；或 vision_map.list_workflows(app_id) 看 workflows",
   MAP_VALIDATION_FAILED:
-    "用 vision_map.list_apps 看可用 app_id；新建 map 用 vision_map.init",
+    "用 vision_map.list_apps 看可用 app_id。只是想吸附窗口看一眼：capsule.attach_window / vision_map.snapshot 等探索工具对未知 app_id 自动建临时会话，不用先 init；要沉淀 map 才用 vision_map.init",
   STATE_UNKNOWN:
     "用 vision_map.snapshot(app_id) 拿 PNG + candidates；可能是新页面 → vision_map.commit_state 写入；或现有 state 偏差 → vision-mcp patch",
   LOCATOR_FAILED:
@@ -144,9 +144,23 @@ async function withApp<T>(
   ctx: ServerContext,
   appId: string,
   fn: (handle: Awaited<ReturnType<typeof loadApp>>) => Promise<T>,
+  opts?: { allowEphemeral?: boolean },
 ): Promise<T> {
-  const app = await loadApp(ctx, appId);
+  const app = await loadApp(ctx, appId, opts);
   return fn(app);
+}
+
+/**
+ * capsule.* 与 raw 探索工具（snapshot/click_at/type/key/scroll）走这个：
+ * app_id 没有 map 时自动建 quick-look 临时会话，免 vision_map.init 仪式。
+ * map 语义工具（perform_action/list_actions/commit_* 等）仍要求真实 map。
+ */
+async function withAppQuickLook<T>(
+  ctx: ServerContext,
+  appId: string,
+  fn: (handle: Awaited<ReturnType<typeof loadApp>>) => Promise<T>,
+): Promise<T> {
+  return withApp(ctx, appId, fn, { allowEphemeral: true });
 }
 
 export function registerTools(server: McpServer, ctx: ServerContext): void {
@@ -164,7 +178,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const display = await capsule.ensureDisplay({
             geometry: app.effective.visual_box.display,
@@ -184,7 +198,9 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "绑定目标窗口",
       description:
-        "按 visual_box.target_window 寻找窗口；可指定 pick 策略。",
+        "按 visual_box.target_window 寻找窗口；可指定 pick 策略。" +
+        "display 未就绪时自动 ensure_display（无需单独调用）；" +
+        "app_id 没有 map 时自动建 quick-look 临时会话——吸附看一眼不用先 init。",
       inputSchema: {
         app_id: z.string(),
         pick: z.enum(["first", "most_recent", "largest"]).optional(),
@@ -200,7 +216,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id, pick, target_override }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const target = target_override ?? app.effective.visual_box.target_window;
           if (!target) {
@@ -209,8 +225,21 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               `visual_box.target_window 未配置且未传 target_override`,
             );
           }
+          // display 未就绪时顺手 ensure（幂等、只是挑稳定 display）——
+          // restore 后重新吸附不必再走一遍 capsule.ensure_display
+          const status = await capsule.status();
+          if (!status.display) {
+            await capsule.ensureDisplay({
+              geometry: app.effective.visual_box.display,
+              mode: app.effective.visual_box.mode,
+              fallbacks: app.effective.visual_box.fallbacks,
+            });
+          }
           const win = await capsule.attach({ target, pick });
-          return StructuredOk({ window: win }, `attached window ${win.title}`);
+          return StructuredOk(
+            { window: win, ephemeral: app.ephemeral || undefined },
+            `attached window ${win.title}${app.ephemeral ? "（quick-look 临时会话，沉淀用 vision_map.init）" : ""}`,
+          );
         });
       } catch (err) {
         return errorResult(err);
@@ -230,7 +259,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id, display_id }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const status = await capsule.status();
           const targetId = display_id ?? status.display?.id;
@@ -262,10 +291,15 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           await capsule.restore();
-          return StructuredOk({ ok: true }, "restored");
+          // capsule 内部 window/display 已清零，缓存对象不再与实际状态一致；
+          // 丢掉 capsule/runtime/builder，adapter（helper 进程）保留复用。
+          app.capsule = undefined;
+          app.runtime = undefined;
+          app.builder = undefined;
+          return StructuredOk({ ok: true }, "restored（重新吸附直接 attach_window 即可）");
         });
       } catch (err) {
         return errorResult(err);
@@ -289,7 +323,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id, source, max_image_width }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const frame = await capsule.capture({ source });
           const file = await writeFramePng(ctx, app_id, frame, max_image_width);
@@ -325,7 +359,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const geom = await capsule.validateGeometry();
           return StructuredOk(
@@ -348,7 +382,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           await capsule.raise();
           return StructuredOk({ ok: true }, "raised");
@@ -404,7 +438,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id, include_image, image_output, max_image_width, include_ax, include_ocr, max_candidates, max_ocr_tokens }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const rt = await ensureRuntime(ctx, app);
           const { state, insights } = await rt.detectState();
           const status = await (await ensureCapsule(ctx, app)).status();
@@ -507,7 +541,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id, point_norm, button, click_count }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const geom = await capsule.validateGeometry();
           const cr = geom.client_rect_px;
@@ -543,7 +577,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id, text, clear_first }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           await capsule.raise().catch(() => {});
           await capsule.adapter.typeText({ text, clear_first });
@@ -568,7 +602,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id, combo }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           await capsule.raise().catch(() => {});
           await capsule.adapter.pressKey({ combo });
@@ -596,7 +630,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ app_id, point_norm, dx_px, dy_px }) => {
       try {
-        return await withApp(ctx, app_id, async (app) => {
+        return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const geom = await capsule.validateGeometry();
           const cr = geom.client_rect_px;

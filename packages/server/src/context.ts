@@ -57,6 +57,11 @@ export interface AppHandle {
   map: VisionMap;
   patches: MapLoadResult["patches"];
   effective: VisionMap;
+  /**
+   * quick-look 临时会话：磁盘上没有 vision-mcp.yaml，map 是内存骨架。
+   * patches 不落盘；vision_map.init 同 app_id 后自动升级为持久 map。
+   */
+  ephemeral?: boolean;
   capsule?: Capsule;
   adapter?: PlatformAdapter;
   /** 本 server 进程内此 app 上的 perform_action 历史，供 harvest_session 使用。 */
@@ -87,7 +92,11 @@ export async function createServerContext(opts: {
   };
 }
 
-export async function loadApp(ctx: ServerContext, appId: string): Promise<AppHandle> {
+export async function loadApp(
+  ctx: ServerContext,
+  appId: string,
+  opts: { allowEphemeral?: boolean } = {},
+): Promise<AppHandle> {
   const existing = ctx.apps.get(appId);
   if (existing) return existing;
   const candidates = [
@@ -103,6 +112,7 @@ export async function loadApp(ctx: ServerContext, appId: string): Promise<AppHan
     } catch {}
   }
   if (!mapPath) {
+    if (opts.allowEphemeral) return createEphemeralApp(ctx, appId);
     throw new VisionMcpError(
       "MAP_VALIDATION_FAILED",
       `未找到 app "${appId}" 的 vision-mcp.yaml（搜索：${candidates.join(", ")}）`,
@@ -117,6 +127,41 @@ export async function loadApp(ctx: ServerContext, appId: string): Promise<AppHan
     patches: result.patches,
     effective: result.effective,
     baselineDoc: result.baselineDoc,
+  };
+  ctx.apps.set(appId, handle);
+  return handle;
+}
+
+/**
+ * quick-look 临时会话：不要求磁盘上有 vision-mcp.yaml。
+ * 「吸附窗口看一眼」不该先走 init 建骨架的仪式——contract 不约束尺寸，
+ * 探索完想沉淀再 vision_map.init 升级为持久 map。
+ */
+function createEphemeralApp(ctx: ServerContext, appId: string): AppHandle {
+  const platform =
+    process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "any";
+  const map = VisionMap.parse({
+    version: "0.1",
+    app: { id: appId, name: appId, platform },
+    visual_box: {
+      id: `${appId}-capsule`,
+      mode: platform === "macos" ? "real_window" : "same_session_virtual_display",
+      platform,
+      coordinate_space: "normalized_client_rect",
+      display: { width_px: 1280, height_px: 800 },
+      // 不写 require_client_size_px：quick-look 不约束窗口尺寸
+      contract: {},
+    },
+  });
+  const baseDir = path.join(ctx.appsRoot, appId);
+  const handle: AppHandle = {
+    app_id: appId,
+    baseDir,
+    mapPath: path.join(baseDir, "vision-mcp.yaml"),
+    map,
+    patches: [],
+    effective: map,
+    ephemeral: true,
   };
   ctx.apps.set(appId, handle);
   return handle;
@@ -141,7 +186,8 @@ export async function ensureCapsule(
   app: AppHandle,
 ): Promise<Capsule> {
   if (app.capsule && app.adapter) return app.capsule;
-  const adapter = await createPlatformAdapter(ctx.platformOptions);
+  // restore_window 后 capsule 会被清掉重建，但 adapter（native helper 进程）复用
+  const adapter = app.adapter ?? (await createPlatformAdapter(ctx.platformOptions));
   const capsule = new Capsule(app.effective.visual_box, adapter, app.effective.input_lease_policy);
   app.adapter = adapter;
   app.capsule = capsule;
@@ -200,7 +246,8 @@ export async function ensureRuntime(
       ? new CallbackApprovalResolver(ctx.approvalCallback)
       : undefined,
     onPatch: async (patch) => {
-      await writePatch(app.baseDir, patch);
+      // ephemeral 会话没有磁盘 map 目录，patch 只在内存生效
+      if (!app.ephemeral) await writePatch(app.baseDir, patch);
       app.patches.push(patch);
       app.effective = applyPatches(app.map, app.patches);
     },
@@ -226,6 +273,11 @@ export async function ensureBuilder(
 }
 
 export async function writeEffective(app: AppHandle): Promise<void> {
+  // ephemeral 会话首次沉淀（commit_state 等）= 隐式 init：建目录后转持久 map
+  if (app.ephemeral) {
+    await fs.mkdir(app.baseDir, { recursive: true });
+    app.ephemeral = false;
+  }
   // 走增量改路径（如果有原 baselineDoc）：保留注释 + 字段顺序 + 手编 yaml 格式。
   // 没有 baselineDoc 的 fallback（如 init 首次写）走完整 dumpMap。
   await saveMap(app.mapPath, app.map, { baselineDoc: app.baselineDoc });
