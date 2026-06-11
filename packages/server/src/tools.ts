@@ -304,9 +304,10 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               capture_height_px: frame.height_px,
               captured_at: frame.captured_at,
               source: frame.source,
+              capture_via: frame.via,
               client_rect: frame.client_rect_in_frame,
             },
-            `${frame.source} ${frame.width_px}x${frame.height_px} → ${file.path} (${file.width}x${file.height}, ${Math.round(file.bytes / 1024)}KB)`,
+            `${frame.source} ${frame.width_px}x${frame.height_px}${frame.via ? ` via=${frame.via}` : ""} → ${file.path} (${file.width}x${file.height}, ${Math.round(file.bytes / 1024)}KB)`,
           );
         });
       } catch (err) {
@@ -479,9 +480,10 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               image_mime: image_path || image_base64 ? "image/png" : undefined,
               image_width_px,
               image_height_px,
+              capture_via: insights.frame.via,
               visual_hash: insights.visual_hash,
             },
-            `state=${state?.state_id ?? "none"} ax=${candidates.length}/${insights.accessibility.length} ocr=${ocr_tokens.length}/${insights.ocr.length}${image_path ? ` image=${image_path}` : ""}`,
+            `state=${state?.state_id ?? "none"} ax=${candidates.length}/${insights.accessibility.length} ocr=${ocr_tokens.length}/${insights.ocr.length}${insights.frame.via ? ` via=${insights.frame.via}` : ""}${image_path ? ` image=${image_path}` : ""}`,
           );
         });
       } catch (err) {

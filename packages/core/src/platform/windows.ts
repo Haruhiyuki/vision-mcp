@@ -119,6 +119,7 @@ export class WindowsPlatformAdapter implements PlatformAdapter {
       captured_at: new Date().toISOString(),
       source: "window",
       client_rect_in_frame: { x: 0, y: 0, width, height },
+      via: r.via,
     };
   }
 

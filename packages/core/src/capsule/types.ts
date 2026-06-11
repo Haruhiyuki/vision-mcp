@@ -71,6 +71,12 @@ export interface Frame {
   source: "display" | "window";
   /** 缩放后的客户区在该帧中的偏移与尺寸。 */
   client_rect_in_frame: RectPx;
+  /**
+   * 捕获走的实际路径（macOS: sckit / screencapture；Windows: print_window /
+   * screen_bitblt）。区域截屏类路径拍不到被遮挡/屏外的窗口——透传给调用方，
+   * 拿到黑图时能立刻判断是不是静默降级了。
+   */
+  via?: string;
 }
 
 export interface InputClickOptions {

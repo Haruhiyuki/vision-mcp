@@ -126,22 +126,27 @@ export class DarwinHelperAdapter implements PlatformAdapter {
         captured_at: new Date().toISOString(),
         source: "window",
         client_rect_in_frame: { x: 0, y: 0, width, height },
+        via: r.via,
       };
     } catch {
       // fallback
     }
     const w = await this.getWindow(handle);
-    return this.captureRect(w.client_bounds, "window");
+    return this.captureRect(w.client_bounds, "window", "screencapture-rect-fallback");
   }
 
   async captureDisplay(displayId: string): Promise<Frame> {
     const displays = await this.listDisplays();
     const d = displays.find((x) => x.id === displayId);
     if (!d) throw new VisionMcpError("CAPSULE_DISPLAY_MISSING", `display ${displayId} 不存在`);
-    return this.captureRect(d.bounds, "display");
+    return this.captureRect(d.bounds, "display", "screencapture-rect");
   }
 
-  private async captureRect(rect: RectPx, source: "window" | "display"): Promise<Frame> {
+  private async captureRect(
+    rect: RectPx,
+    source: "window" | "display",
+    via = "screencapture-rect",
+  ): Promise<Frame> {
     const r = await this.bridge.request<{ png_base64: string; width: number; height: number }>(
       "capture.rect",
       { rect },
@@ -156,6 +161,7 @@ export class DarwinHelperAdapter implements PlatformAdapter {
       captured_at: new Date().toISOString(),
       source,
       client_rect_in_frame: { x: 0, y: 0, width, height },
+      via,
     };
   }
 
