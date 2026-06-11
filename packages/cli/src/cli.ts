@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Vision-MCP Authors
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import packageJson from "../package.json" with { type: "json" };
 import {
   VisionMap,
   applyPatches,
@@ -109,7 +108,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 export function cliVersion(): string {
-  return packageJson.version;
+  // 用 readFileSync 而不是 `import ... with { type: "json" }`：后者要 Node 18.20+/20.10+
+  // 才稳定，而 package.json `engines: ">=18.0.0"` 允许更老的 Node 跑——避免 syntax error。
+  const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+  return JSON.parse(readFileSync(pkgPath, "utf8")).version as string;
 }
 
 export function usage(): string {
@@ -200,6 +202,10 @@ export function usage(): string {
     "       启动 MCP server (stdio)",
     "  schema export [--out ./schema]",
     "       导出 vision-mcp.schema.json / vision-mcp-patch.schema.json",
+    "",
+    "选项：",
+    "  -v, --version        显示 CLI 版本号",
+    "  -h, --help           显示本帮助",
     "",
     "环境变量：VISION_MCP_APPS_ROOT, VISION_MCP_TRACE_DIR, VISION_MCP_NATIVE_HELPER, VISION_MCP_PLATFORM, VISION_MCP_FALLBACK_MOCK=1",
   ].join("\n");
