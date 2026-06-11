@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Vision-MCP Authors
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -107,7 +107,14 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command: command ?? "help", positional, flags };
 }
 
-function usage(): string {
+export function cliVersion(): string {
+  // 用 readFileSync 而不是 `import ... with { type: "json" }`：后者要 Node 18.20+/20.10+
+  // 才稳定，而 package.json `engines: ">=18.0.0"` 允许更老的 Node 跑——避免 syntax error。
+  const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+  return JSON.parse(readFileSync(pkgPath, "utf8")).version as string;
+}
+
+export function usage(): string {
   return [
     "vision-mcp <command> [...args] [--flags]",
     "",
@@ -196,16 +203,21 @@ function usage(): string {
     "  schema export [--out ./schema]",
     "       导出 vision-mcp.schema.json / vision-mcp-patch.schema.json",
     "",
+    "选项：",
+    "  -v, --version        显示 CLI 版本号",
+    "  -h, --help           显示本帮助",
+    "",
     "环境变量：VISION_MCP_APPS_ROOT, VISION_MCP_TRACE_DIR, VISION_MCP_NATIVE_HELPER, VISION_MCP_PLATFORM, VISION_MCP_FALLBACK_MOCK=1",
   ].join("\n");
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   // 在 dispatch 前把 bundled helper 路径设进 env，让所有 createPlatformAdapter
   // 调用都能默认拿到。用户显式设的 VISION_MCP_NATIVE_HELPER 优先（resolveBundledHelper 会先读 env）。
   // install-helper 命令自己有特殊逻辑，跳过；其他命令受益。
-  if (args.command !== "install-helper" && !process.env.VISION_MCP_NATIVE_HELPER) {
+  const isMetadataCommand = ["help", "-h", "--help", "-v", "--version"].includes(args.command);
+  if (!isMetadataCommand && args.command !== "install-helper" && !process.env.VISION_MCP_NATIVE_HELPER) {
     const bundled = await resolveBundledHelper();
     if (bundled) process.env.VISION_MCP_NATIVE_HELPER = bundled;
   }
@@ -215,6 +227,10 @@ async function main() {
       case "-h":
       case "--help":
         console.log(usage());
+        return;
+      case "-v":
+      case "--version":
+        console.log(cliVersion());
         return;
       case "init":
         await cmdInit(args);
@@ -2975,8 +2991,3 @@ async function cmdInstallHelper(args: ParsedArgs) {
   }
   fail(`install-helper 只支持 macOS / Windows，当前 platform=${platform}`);
 }
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
