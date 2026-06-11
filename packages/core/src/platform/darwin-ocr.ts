@@ -43,6 +43,47 @@ export class DarwinOcrProvider implements OcrProvider {
   }
 
   /**
+   * OCR 整个窗口（SCKit 抓窗口帧 → Vision），与 WindowsOcrProvider.recognizeWindow 对齐。
+   * 不依赖屏幕可见性：被遮挡 / 不在前台的窗口也能 OCR，且不必 raise 抢焦点。
+   * regionNorm 可选 [nx, ny, nw, nh] 在窗口帧内裁剪（如只裁客户区），
+   * bbox 归一化到 regionNorm（若提供）或整个窗口帧。
+   * 老 helper 无 ocr.recognize_window 方法时此调用会抛错——调用方 fallback recognizeRect。
+   */
+  async recognizeWindow(
+    windowHandle: string,
+    options: {
+      regionNorm?: [number, number, number, number];
+      languages?: string[];
+      nocache?: boolean;
+    } = {},
+  ): Promise<OcrToken[]> {
+    const region = options.regionNorm ? options.regionNorm.join(",") : "full";
+    const key = `window:${windowHandle}:${region}:${(options.languages ?? []).join("+")}`;
+    if (!options.nocache) {
+      const hit = this.cache.get(key);
+      if (hit && Date.now() - hit.ts < this.ttlMs) return hit.tokens;
+    }
+    const r = await this.adapter.helperRequest<{ tokens: RawToken[]; via?: string }>(
+      "ocr.recognize_window",
+      {
+        handle: windowHandle,
+        region_norm: options.regionNorm,
+        languages: options.languages ?? [],
+      },
+      20_000,
+    );
+    const tokens: OcrToken[] = (r.tokens ?? []).map((t) => ({
+      text: t.text,
+      confidence: t.confidence,
+      bbox_norm: t.bbox_norm,
+    }));
+    if (!options.nocache) {
+      this.cache.set(key, { ts: Date.now(), tokens });
+    }
+    return tokens;
+  }
+
+  /**
    * 对指定屏幕矩形 OCR，bbox 归一化到该矩形内部。
    * 适合 click_text / nearby_text / OCR-grounded postcondition。
    */

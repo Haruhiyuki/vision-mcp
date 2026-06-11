@@ -56,9 +56,8 @@ const CONTRACTS: RpcContract[] = [
   { method: "input.ax_press", responseFields: ["ok", "via"] },
   { method: "input.subscribe", responseFields: ["ok"] },
   { method: "ocr.recognize_rect", responseFields: ["tokens"] },
-  // Windows-only：PrintWindow OCR、MSAA fallback、health.snapshot；
-  // macOS swift helper 现在也有 health.snapshot
-  { method: "ocr.recognize_window", responseFields: ["tokens"], windowsOnly: true },
+  // per-window OCR：Windows PrintWindow / macOS SCKit，两平台都有
+  { method: "ocr.recognize_window", responseFields: ["tokens"] },
   { method: "ax.dump_msaa", responseFields: ["role"], windowsOnly: true },
   { method: "health.snapshot", responseFields: ["uptime_sec", "rpc_count", "pid"] },
 ];

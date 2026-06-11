@@ -737,6 +737,42 @@ func ocrRect(_ rect: CGRect, languages: [String]) -> [[String: Any]] {
           let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
         return []
     }
+    return ocrCgImage(cgImage, languages: languages)
+}
+
+/// 对窗口本体 OCR（与图像捕获同一条 per-window 管线）：优先 SCKit 抓窗口帧，
+/// 被遮挡/不在前台也能识别——不再对屏幕矩形截图，终结"OCR 读到遮挡窗口内容"。
+/// regionNorm = [nx, ny, nw, nh] 在窗口帧内裁剪（如只裁客户区），bbox 归一化到裁剪区域。
+func ocrWindow(handle: String, regionNorm: [Double]?, languages: [String]) -> (tokens: [[String: Any]], via: String)? {
+    guard let (_, _, desc) = findWindow(handle: handle) else { return nil }
+    let pid = pid_t(handle.split(separator: ":").first.map(String.init) ?? "") ?? 0
+    var pngData: Data?
+    var via = "screencapture-rect"
+    if let wid = findWindowID(pid: pid, title: desc.title),
+       let png = captureWindowByID(wid) {
+        pngData = png
+        via = "sckit"
+    } else {
+        // SCKit 不可用/超时：降级屏幕矩形（遮挡时拍不准，via 透传让上层知情）
+        pngData = capture(rect: desc.bounds)
+    }
+    guard let data = pngData,
+          let image = NSImage(data: data),
+          var cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        return nil
+    }
+    if let rn = regionNorm, rn.count == 4 {
+        let w = CGFloat(cgImage.width)
+        let h = CGFloat(cgImage.height)
+        let crop = CGRect(x: rn[0] * w, y: rn[1] * h, width: rn[2] * w, height: rn[3] * h).integral
+        if crop.width >= 1, crop.height >= 1, let cropped = cgImage.cropping(to: crop) {
+            cgImage = cropped
+        }
+    }
+    return (ocrCgImage(cgImage, languages: languages), via)
+}
+
+func ocrCgImage(_ cgImage: CGImage, languages: [String]) -> [[String: Any]] {
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = true
@@ -1033,6 +1069,15 @@ func handle(method: String, params: [String: Any]) -> Any {
         let langs = (params["languages"] as? [String]) ?? []
         let tokens = ocrRect(CGRect(x: x, y: y, width: w, height: h), languages: langs)
         return ["tokens": tokens]
+    case "ocr.recognize_window":
+        // per-window OCR：与 capture.window 同管线（SCKit 优先），遮挡/屏外不受影响
+        guard let handle = params["handle"] as? String else { return ["error": "handle required"] }
+        let langs = (params["languages"] as? [String]) ?? []
+        let regionNorm = (params["region_norm"] as? [Any])?.compactMap { ($0 as? NSNumber)?.doubleValue }
+        guard let r = ocrWindow(handle: handle, regionNorm: regionNorm, languages: langs) else {
+            return ["error": "window capture failed"]
+        }
+        return ["tokens": r.tokens, "via": r.via]
     case "input.click":
         guard let p = params["point"] as? [String: Any],
               let x = (p["x"] as? NSNumber)?.doubleValue,

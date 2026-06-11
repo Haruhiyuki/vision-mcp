@@ -84,14 +84,17 @@ CLI 默认：`autoAttach=true autoMigrate=false`——snapshot / click 等命令
 
 ## 8. OCR：Vision framework
 
-`ocr.recognize_rect rect` — `VNRecognizeTextRequest` (accurate path)。
+`ocr.recognize_window handle [region_norm]` — SCKit 抓窗口帧 → `VNRecognizeTextRequest`（accurate path）。
+`ocr.recognize_rect rect` — `screencapture` 抓屏幕矩形 → 同一识别路径（fallback / 跨窗口场景）。
 
 - 1280×800 区域 ~150-300ms（CPU），首次冷启动多 ~200ms
 - 自动识别中英文（无需额外语言包）
 - 返回 per-word `confidence`（Windows.Media.Ocr 没有）
-- 走 `screencapture` 抓 rect → Vision OCR；目标窗口需可见前台
+- `recognize_window` 走 per-window 捕获：被遮挡 / 不在前台也能 OCR，不必 raise 抢焦点
+  （与 Windows PrintWindow + WinRT 的 `ocr.recognize_window` 对齐）；
+  macOS 13 及更早 SCKit 不可用时自动降级 `recognize_rect`（需窗口可见）
 
-CLI `click-text` 在 macOS 上走这条；屏外窗口 OCR 尚不直接支持（Windows 走 PrintWindow + WinRT 实现了；macOS roadmap）。
+snapshot 优先 `recognize_window`；CLI `click-text` 在 macOS 上走 `recognize_rect`。
 
 ## 9. 已知限制
 
@@ -115,7 +118,7 @@ CLI `click-text` 在 macOS 上走这条；屏外窗口 OCR 尚不直接支持（
 | 强制窗口前台 | `NSWorkspace.activate` | `SwitchToThisWindow` (Alt+Tab API) |
 | 现代截图 API | ScreenCaptureKit (macOS 14+) | PrintWindow PW_RENDERFULLCONTENT (Win 8.1+) |
 | 中文输入 | NSPasteboard 粘贴 | SendInput VK_PACKET（绕过 IME） |
-| 屏外 / 被遮挡 OCR | screencapture window mode | PrintWindow → OcrEngine（专用 `ocr.recognize_window`） |
+| 屏外 / 被遮挡 OCR | SCKit → Vision（`ocr.recognize_window`） | PrintWindow → OcrEngine（`ocr.recognize_window`） |
 | 健康检查 | `health.snapshot` (mach_task_basic_info) | `health.snapshot` (GetGuiResources GDI/USER) |
 
 写 cross-platform workflow 时把 modifier 写进 step.params 由 agent 按平台传，或 `app.platform: any` 时为两平台分别给一份 workflow。详 SKILL §8。

@@ -442,18 +442,42 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           const rt = await ensureRuntime(ctx, app);
           const { state, insights } = await rt.detectState();
           const status = await (await ensureCapsule(ctx, app)).status();
-          // DarwinOcrProvider.recognize(frame) 永远返回 [] — 它需要 screen rect 才能
-          // 跑 Vision framework。真 OCR 走 recognizeRect(client_rect_px)。
-          // detectState → analyze 走的 recognize 这条路填不到 OCR；这里主动调一次。
+          // detectState → analyze 的 recognize(frame) 填不到 OCR（provider 需要窗口/屏幕
+          // 上下文）；这里主动调一次。优先 recognizeWindow（per-window 管线：macOS SCKit /
+          // Windows PrintWindow，被遮挡也能识别、不必 raise）；老 helper 不支持时
+          // fallback recognizeRect（屏幕矩形截取，遮挡时会读到遮挡窗口的内容）。
           if (include_ocr && ctx.providers.ocr && status.geometry?.client_rect_px) {
-            const maybeRectOcr = ctx.providers.ocr as {
-              recognizeRect?: (rect: import("@vision-mcp/core").RectPx) => Promise<import("@vision-mcp/core").OcrToken[]>;
+            type OcrTokens = import("@vision-mcp/core").OcrToken[];
+            const ocrp = ctx.providers.ocr as {
+              recognizeWindow?: (
+                handle: string,
+                options?: { regionNorm?: [number, number, number, number] },
+              ) => Promise<OcrTokens>;
+              recognizeRect?: (rect: import("@vision-mcp/core").RectPx) => Promise<OcrTokens>;
             };
-            if (maybeRectOcr.recognizeRect) {
+            let tokens: OcrTokens | undefined;
+            const win = status.attached_window;
+            if (ocrp.recognizeWindow && win) {
+              // 窗口帧含标题栏；用 region_norm 裁出客户区，让 bbox 与
+              // click_at 用的 client_rect_px 坐标系对齐
+              const cr = status.geometry.client_rect_px;
+              const wb = win.bounds;
+              const regionNorm: [number, number, number, number] = [
+                (cr.x - wb.x) / wb.width,
+                (cr.y - wb.y) / wb.height,
+                cr.width / wb.width,
+                cr.height / wb.height,
+              ];
               try {
-                insights.ocr = await maybeRectOcr.recognizeRect(status.geometry.client_rect_px);
+                tokens = await ocrp.recognizeWindow(win.native_handle, { regionNorm });
+              } catch { /* 老 helper 不支持 → fallback */ }
+            }
+            if (!tokens && ocrp.recognizeRect) {
+              try {
+                tokens = await ocrp.recognizeRect(status.geometry.client_rect_px);
               } catch { /* OCR best-effort */ }
             }
+            if (tokens) insights.ocr = tokens;
           }
           let image_base64: string | undefined;
           let image_path: string | undefined;
