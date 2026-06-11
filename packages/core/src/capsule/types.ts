@@ -122,10 +122,15 @@ export interface GeometryState {
   size_match: boolean;
   dpi_match: boolean;
   foreground_match: boolean;
-  /** 综合判定：geometry contract 是否满足。 */
+  /** 综合判定：geometry contract 是否满足（warnings 不影响 ok）。 */
   ok: boolean;
   /** 若 !ok，记录所有违反项，供 repair engine 使用。 */
   violations: string[];
+  /**
+   * 无害偏差（Retina scale、DPI、菜单栏量级的尺寸差等）：仅供诊断，
+   * 不置 !ok、不触发 repair、不进 summary 文本。
+   */
+  warnings: string[];
 }
 
 export interface CapsuleStatus {

@@ -30,6 +30,12 @@ export const ContractRules = z
       .tuple([z.number().int().positive(), z.number().int().positive()])
       .optional(),
     tolerate_client_size_delta_px: z.number().int().nonnegative().default(2),
+    /**
+     * 尺寸差在 (tolerate, warn] 区间记 warning 不记 violation——
+     * macOS 菜单栏/标题栏挤压会造成 ~23px 的无害差异，不该每次都报错。
+     * 超过 warn 阈值才视为真 drift（violation，触发 repair）。
+     */
+    warn_client_size_delta_px: z.number().int().nonnegative().default(40),
     require_unminimized: z.boolean().default(true),
     require_foreground_for_input: z.boolean().default(true),
     validate_before_each_action: z.boolean().default(true),

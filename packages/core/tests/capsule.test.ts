@@ -84,6 +84,79 @@ describe("Capsule with mock adapter", () => {
     expect(status.attached_window).toBeUndefined();
   });
 
+  it("Retina scale/DPI 差异与菜单栏量级尺寸差是 warning，不阻塞 ok", () => {
+    const map = baseMap();
+    const state = buildGeometryState({
+      visualBox: map.visual_box,
+      contract: map.visual_box.contract,
+      display: {
+        id: "d",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        work_area: { x: 0, y: 28, width: 1920, height: 1052 },
+        scale: 2, // Retina
+        dpi_x: 144,
+        dpi_y: 144,
+        refresh_rate_hz: 60,
+        is_primary: true,
+        is_virtual: false,
+      },
+      window: {
+        id: "w",
+        title: "x",
+        process_name: "demo.exe",
+        process_id: 1,
+        bounds: { x: 0, y: 28, width: 1280, height: 777 },
+        // 高度被菜单栏挤掉 23px：warning 而非 violation
+        client_bounds: { x: 0, y: 28, width: 1280, height: 777 },
+        is_minimized: false,
+        is_maximized: false,
+        is_fullscreen: false,
+        is_foreground: true,
+        native_handle: "w",
+        display_id: "d",
+      },
+    });
+    expect(state.ok).toBe(true);
+    expect(state.violations).toEqual([]);
+    expect(state.warnings.length).toBe(3); // size + scale + dpi
+  });
+
+  it("contract 未配置 require_client_size_px 时不检查尺寸", () => {
+    const map = baseMap();
+    const contract = { ...map.visual_box.contract, require_client_size_px: undefined };
+    const state = buildGeometryState({
+      visualBox: map.visual_box,
+      contract,
+      display: {
+        id: "d",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        work_area: { x: 0, y: 28, width: 1920, height: 1052 },
+        scale: 1,
+        dpi_x: 96,
+        dpi_y: 96,
+        refresh_rate_hz: 60,
+        is_primary: true,
+        is_virtual: false,
+      },
+      window: {
+        id: "w",
+        title: "x",
+        process_name: "demo.exe",
+        process_id: 1,
+        bounds: { x: 0, y: 0, width: 600, height: 400 },
+        client_bounds: { x: 0, y: 0, width: 600, height: 400 },
+        is_minimized: false,
+        is_maximized: false,
+        is_fullscreen: false,
+        is_foreground: true,
+        native_handle: "w",
+        display_id: "d",
+      },
+    });
+    expect(state.ok).toBe(true);
+    expect(state.size_match).toBe(true);
+  });
+
   it("buildGeometryState 标记 size mismatch", () => {
     const map = baseMap();
     const state = buildGeometryState({

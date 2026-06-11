@@ -784,7 +784,29 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         const dir = path.join(ctx.appsRoot, app_id);
         await fs.mkdir(dir, { recursive: true });
         const mapPath = path.join(dir, "vision-mcp.yaml");
-        const { VisionMap, saveMap } = await import("@vision-mcp/core");
+        const { VisionMap, saveMap, createPlatformAdapter } = await import("@vision-mcp/core");
+        // 期望 scale/dpi 写实际主显示器的值（Retina scale=2/dpi=144），
+        // 否则 schema 默认 1.0/96 会让每次几何校验都报 warning。
+        let displayProfile: Record<string, number> = {};
+        try {
+          const adapter = await createPlatformAdapter(ctx.platformOptions);
+          try {
+            const displays = await adapter.listDisplays();
+            const primary = displays.find((d) => d.is_primary) ?? displays[0];
+            if (primary) {
+              displayProfile = {
+                scale: primary.scale,
+                dpi_x: primary.dpi_x,
+                dpi_y: primary.dpi_y,
+                refresh_rate_hz: primary.refresh_rate_hz,
+              };
+            }
+          } finally {
+            await adapter.dispose?.();
+          }
+        } catch {
+          // helper 不可用（CI / 未安装）：落 schema 默认值
+        }
         const map = VisionMap.parse({
           version: "0.1",
           app: { id: app_id, name, platform },
@@ -793,7 +815,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             mode: platform === "macos" ? "real_window" : "same_session_virtual_display",
             platform,
             coordinate_space: "normalized_client_rect",
-            display: { width_px, height_px },
+            display: { width_px, height_px, ...displayProfile },
             contract: { require_client_size_px: [width_px, height_px] },
           },
         });

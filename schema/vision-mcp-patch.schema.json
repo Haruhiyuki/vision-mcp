@@ -731,7 +731,7 @@
                               "type": "number",
                               "minimum": 0,
                               "maximum": 1,
-                              "default": 0.95
+                              "default": 0.85
                             },
                             "timeout_ms": {
                               "type": "integer",
@@ -1196,6 +1196,53 @@
             "id",
             "kind",
             "state"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/Patch/anyOf/0/properties/id"
+            },
+            "trust": {
+              "$ref": "#/definitions/Patch/anyOf/0/properties/trust"
+            },
+            "created_at": {
+              "$ref": "#/definitions/Patch/anyOf/0/properties/created_at"
+            },
+            "created_by": {
+              "$ref": "#/definitions/Patch/anyOf/0/properties/created_by"
+            },
+            "reason": {
+              "$ref": "#/definitions/Patch/anyOf/0/properties/reason"
+            },
+            "confidence": {
+              "$ref": "#/definitions/Patch/anyOf/0/properties/confidence"
+            },
+            "requires_review": {
+              "$ref": "#/definitions/Patch/anyOf/0/properties/requires_review"
+            },
+            "expires_at": {
+              "$ref": "#/definitions/Patch/anyOf/0/properties/expires_at"
+            },
+            "kind": {
+              "type": "string",
+              "const": "control_add"
+            },
+            "state_id": {
+              "type": "string",
+              "description": "state.id 或 region.id；后者支持往共享 region 加 control"
+            },
+            "control": {
+              "$ref": "#/definitions/Patch/anyOf/3/properties/state/properties/controls/items"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "state_id",
+            "control"
           ],
           "additionalProperties": false
         }

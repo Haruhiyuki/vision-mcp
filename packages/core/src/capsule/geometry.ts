@@ -59,37 +59,39 @@ export function buildGeometryState(args: {
 }): GeometryState {
   const { visualBox, contract, display, window: win } = args;
   const violations: string[] = [];
+  const warnings: string[] = [];
 
   const expected = visualBox.display;
+  // 仅当 contract 显式要求尺寸时才检查——没写 require_client_size_px 就是"不关心尺寸"
+  //（quick-look / 骨架 map 场景），不再拿 display 期望尺寸兜底误报。
   const sizeMatch = (() => {
-    const req = contract.require_client_size_px ?? [
-      expected.width_px,
-      expected.height_px,
-    ];
+    const req = contract.require_client_size_px;
+    if (!req) return true;
     const dw = Math.abs(win.client_bounds.width - req[0]);
     const dh = Math.abs(win.client_bounds.height - req[1]);
-    return (
-      dw <= contract.tolerate_client_size_delta_px &&
-      dh <= contract.tolerate_client_size_delta_px
-    );
+    const delta = Math.max(dw, dh);
+    if (delta <= contract.tolerate_client_size_delta_px) return true;
+    const msg = `client size 不匹配：实际 ${win.client_bounds.width}x${win.client_bounds.height} ≠ 期望 ${req[0]}x${req[1]}`;
+    // 菜单栏/标题栏挤压量级的差异：warning，不阻塞 ok
+    if (delta <= contract.warn_client_size_delta_px) {
+      warnings.push(msg);
+      return true;
+    }
+    violations.push(msg);
+    return false;
   })();
-  if (!sizeMatch) {
-    violations.push(
-      `client size 不匹配：实际 ${win.client_bounds.width}x${win.client_bounds.height} ≠ 期望 ${
-        contract.require_client_size_px?.[0] ?? expected.width_px
-      }x${contract.require_client_size_px?.[1] ?? expected.height_px}`,
-    );
-  }
 
+  // scale / DPI 是显示器固有属性（Retina 恒为 2 / 144），和 map 期望不一致
+  // 不代表操作会失败——降为 warning，避免每次 migrate/snapshot 刷屏。
   const scaleMatch = Math.abs(display.scale - expected.scale) < 0.01;
   if (!scaleMatch) {
-    violations.push(`scale 不匹配：实际 ${display.scale} ≠ 期望 ${expected.scale}`);
+    warnings.push(`scale 不匹配：实际 ${display.scale} ≠ 期望 ${expected.scale}`);
   }
 
   const dpiMatch =
     display.dpi_x === expected.dpi_x && display.dpi_y === expected.dpi_y;
   if (!dpiMatch) {
-    violations.push(
+    warnings.push(
       `DPI 不匹配：实际 ${display.dpi_x}x${display.dpi_y} ≠ 期望 ${expected.dpi_x}x${expected.dpi_y}`,
     );
   }
@@ -122,6 +124,7 @@ export function buildGeometryState(args: {
     foreground_match: foregroundMatch,
     ok: violations.length === 0,
     violations,
+    warnings,
   };
 }
 
