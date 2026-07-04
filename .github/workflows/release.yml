@@ -60,5 +60,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # setup-node 的 registry-url 会写 ~temp/.npmrc（_authToken=${NODE_AUTH_TOKEN}）
+          # 并置 NPM_CONFIG_USERCONFIG 指向它——npm publish 实际读的是这份，而非
+          # changesets/action 用 NPM_TOKEN 写的 ~/.npmrc。若不把真 token 喂给
+          # NODE_AUTH_TOKEN，占位符就成了空 auth，对已存在 scoped 包 PUT 得 E404。
+          # （node20→node24 强制升级后这段接线暴露；显式赋值彻底堵死。）
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # npm provenance：让发布的 tarball 带 GitHub Actions build attestation
           NPM_CONFIG_PROVENANCE: "true"
