@@ -1205,18 +1205,24 @@ while true {
         let line = buffer.subdata(in: 0..<nl)
         buffer.removeSubrange(0..<(nl + 1))
         if line.isEmpty { continue }
-        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              let method = obj["method"] as? String else {
-            emitError(id: nil, message: "bad request", code: "BAD_REQUEST")
-            continue
-        }
-        let id = obj["id"]
-        let params = toDict(obj["params"])
-        let result = handle(method: method, params: params)
-        if let dict = result as? [String: Any], let err = dict["error"] as? String {
-            emitError(id: id, message: err, code: (dict["code"] as? String) ?? "UNKNOWN")
-        } else {
-            emitResult(id: id, result: result)
+        // 每次 RPC 独立 autoreleasepool：本 helper 是长驻 sidecar，handle() 里
+        // 大量 autoreleased 的 Foundation/CF/AX/OCR/截图临时对象若不逐次 drain，
+        // 会永久堆在顶层 pool（进程从不退出、无 RunLoop 触发排空），
+        // 表现为 MALLOC_SMALL 随 RPC 次数无界增长（22h 涨到 ~9.5GB）。
+        autoreleasepool {
+            guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let method = obj["method"] as? String else {
+                emitError(id: nil, message: "bad request", code: "BAD_REQUEST")
+                return
+            }
+            let id = obj["id"]
+            let params = toDict(obj["params"])
+            let result = handle(method: method, params: params)
+            if let dict = result as? [String: Any], let err = dict["error"] as? String {
+                emitError(id: id, message: err, code: (dict["code"] as? String) ?? "UNKNOWN")
+            } else {
+                emitResult(id: id, result: result)
+            }
         }
     }
 }
