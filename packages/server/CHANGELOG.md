@@ -1,5 +1,45 @@
 # @vision-mcp/server
 
+## 0.7.0
+
+### Minor Changes
+
+- 33d203a: 修复 macOS native helper 长驻运行时的无界内存泄漏。
+
+  `vision-mcp-helper` 是长寿命 JSON-RPC sidecar，主循环 `while true { handle() }`
+  逐行处理 RPC 却从未包 `autoreleasepool`。handle() 内大量 autoreleased 的
+  Foundation/CF/AX/OCR/截图临时对象（`JSONSerialization`、AX 属性查询返回值、
+  `SCShareableContent`、`NSBitmapImageRep`、`VNRecognizeTextRequest` 结果、`Data`
+  缓冲等）会永久堆在顶层 autorelease pool——进程从不退出、也没有 RunLoop 触发排空，
+  于是 `MALLOC_SMALL` 堆随 RPC 次数无界增长（实测两个 helper 各涨到 ~9.5GB /
+  phys_footprint，运行约 22h 与 5.5h）。
+
+  修复：每次 RPC 处理包一层 `autoreleasepool` 逐次 drain。压测 5 万次分配型 RPC
+  后 footprint 稳定在 ~12MB（此前同等负载会持续攀升）。
+
+  升级后需重跑 `vision-mcp install-helper` 重编 helper 生效；旧进程建议手动结束。
+
+### Patch Changes
+
+- c29e8fa: 修复 quick-look 吸附失败后被永久卡死的问题，并让 WINDOW_NOT_FOUND 可诊断：
+
+  - **server**: `capsule.attach_window` 失败时丢弃缓存的 app 句柄（连同平台适配器）。
+    此前首次调用若创建出坏适配器（helper 冷启动失败静默降级、权限未就绪等），
+    会随 quick-look 句柄永久缓存，后续无论怎么改 `target_override` 重试都复用同一个
+    坏适配器；而 `vision_map.init` 末尾恰好清缓存，造成"必须先 init 才能 attach"的假象
+    （与文档承诺的"吸附看一眼不用先 init"矛盾）。
+  - **core/capsule**: `attach` 匹配不到窗口时，错误信息附带"当前可枚举到窗口的进程"
+    列表，或在完全枚举不到窗口时提示权限/无 GUI 的可能原因。
+  - **core/darwin-osascript**: System Events 枚举到进程但全部拿不到窗口时，
+    显式抛 `PERMISSION_DENIED`（此前静默返回空列表，上层只能看到误导性的
+    WINDOW_NOT_FOUND）。
+  - **native/macos helper**: `window.list` 在 `AXIsProcessTrusted() == false` 时返回
+    `PERMISSION_DENIED` 错误而非空数组；helper 主循环透传结构化错误的 `code` 字段。
+
+- Updated dependencies [c29e8fa]
+- Updated dependencies [33d203a]
+  - @vision-mcp/core@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

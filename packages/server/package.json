@@ -1,6 +1,6 @@
 {
   "name": "@vision-mcp/server",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Vision-MCP MCP Server：暴露 capsule.* / vision_map.* tools 与 vision-mcp:// resources（stdio transport）",
   "keywords": [
     "mcp",
@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "@vision-mcp/core": "^0.6.0",
+    "@vision-mcp/core": "^0.7.0",
     "zod": "^3.24.1"
   },
   "repository": {

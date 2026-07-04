@@ -1,6 +1,6 @@
 {
   "name": "@vision-mcp/cli",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Vision-MCP CLI：视觉为主的桌面 GUI 操作 MCP server + 工具集（init / serve / capsule / snapshot / patch / install-helper 等）",
   "keywords": [
     "mcp",
@@ -41,8 +41,8 @@
     "prepublishOnly": "node ./scripts/prepublish.mjs"
   },
   "dependencies": {
-    "@vision-mcp/core": "^0.6.0",
-    "@vision-mcp/server": "^0.6.0",
+    "@vision-mcp/core": "^0.7.0",
+    "@vision-mcp/server": "^0.7.0",
     "yaml": "^2.7.0"
   },
   "repository": {
