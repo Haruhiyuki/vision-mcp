@@ -176,4 +176,42 @@ describe("MCP server end-to-end (mock platform)", () => {
     });
     expect(r.isError).toBeTruthy();
   });
+
+  it("attach_window 失败不缓存坏句柄：quick-look 直接重试即可，无需 init", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vmcp-srv-"));
+    const { client, ctx } = await setupServerAndClient(dir, {
+      windows: [
+        {
+          title: "iPhone 17 Pro – iOS 26.1",
+          process_name: "Simulator",
+          bounds: { x: 0, y: 0, width: 442, height: 943 },
+        },
+      ],
+    });
+
+    // 无 map 的 app_id + 不匹配的 target → WINDOW_NOT_FOUND，
+    // 且错误信息带「可枚举到窗口的进程」提示
+    const fail = await client.callTool({
+      name: "capsule.attach_window",
+      arguments: { app_id: "ios-sim", target_override: { process_name: "NoSuchApp" } },
+    });
+    expect(fail.isError).toBeTruthy();
+    expect(JSON.stringify(fail.content)).toContain("Simulator");
+
+    // 失败后 quick-look 句柄（连同平台适配器）应被丢弃，而不是永久缓存坏适配器
+    expect(ctx.apps.get("ios-sim")).toBeUndefined();
+
+    // 不走 vision_map.init，直接改 target 重试就能吸附成功
+    const ok = await client.callTool({
+      name: "capsule.attach_window",
+      arguments: { app_id: "ios-sim", target_override: { process_name: "Simulator" } },
+    });
+    expect(ok.isError).toBeFalsy();
+    const structured = ok.structuredContent as {
+      window: { process_name: string };
+      ephemeral?: boolean;
+    };
+    expect(structured.window.process_name).toBe("Simulator");
+    expect(structured.ephemeral).toBe(true);
+  });
 });

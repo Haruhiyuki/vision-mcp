@@ -242,6 +242,22 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           );
         });
       } catch (err) {
+        // 吸附失败即丢弃缓存的 app 句柄（连同其平台适配器）：
+        // 首次调用若创建出坏适配器（helper 冷启动失败静默降级、权限未就绪等），
+        // 旧行为会把它随 quick-look 句柄永久缓存，之后无论怎么改 target_override
+        // 重试都在复用同一个坏适配器；而 vision_map.init 末尾恰好 ctx.apps.delete，
+        // 便造成"必须先 init 才能 attach"的假象。失败即弃、重试即新建，
+        // quick-look 才真正做到文档承诺的"吸附看一眼不用先 init"。
+        // （attach 前的句柄除已加载的 map 外无状态，丢弃是安全的。）
+        const cached = ctx.apps.get(app_id);
+        if (cached) {
+          try {
+            await cached.adapter?.dispose?.();
+          } catch {
+            // 适配器清理失败不掩盖原始错误
+          }
+          ctx.apps.delete(app_id);
+        }
         return errorResult(err);
       }
     },

@@ -109,19 +109,39 @@ export class DarwinOsascriptAdapter implements PlatformAdapter {
   }
 
   async listWindows(filter?: TargetWindow): Promise<WindowInfo[]> {
-    const wins = await runJxa<JxaWindow[]>(JXA_SCRIPTS.listWindows);
-    this.windowCache.clear();
-    for (const w of wins) this.windowCache.set(w.handle, w);
+    const wins = await this.listWindowsRaw();
     return wins
       .filter((w) => matchWindow(w, filter))
       .map((w) => toWindowInfo(w));
   }
 
+  /**
+   * 枚举全部窗口并刷新 handle 缓存。
+   * System Events 在没有辅助功能/自动化权限时不报错，而是每个进程的
+   * windows() 都抛异常——旧实现逐进程 catch 后返回空数组，上层只能看到
+   * 误导性的 WINDOW_NOT_FOUND。这里把「全部进程枚举失败」显式升级为
+   * PERMISSION_DENIED，别再让权限问题伪装成"窗口不存在"。
+   */
+  private async listWindowsRaw(): Promise<JxaWindow[]> {
+    const r = await runJxa<{ windows: JxaWindow[]; proc_count: number; win_errors: number }>(
+      JXA_SCRIPTS.listWindows,
+    );
+    if (r.windows.length === 0 && r.win_errors > 0 && r.win_errors >= r.proc_count) {
+      throw new VisionMcpError(
+        "PERMISSION_DENIED",
+        `System Events 枚举了 ${r.proc_count} 个进程但全部拿不到窗口（${r.win_errors} 个报错）——` +
+          "多半是宿主进程缺少「辅助功能」或「自动化 → System Events」权限，" +
+          "到系统设置 → 隐私与安全性授予后重试",
+      );
+    }
+    this.windowCache.clear();
+    for (const w of r.windows) this.windowCache.set(w.handle, w);
+    return r.windows;
+  }
+
   async getWindow(handle: string): Promise<WindowInfo> {
     // 重新枚举以拿到最新位置/尺寸
-    const wins = await runJxa<JxaWindow[]>(JXA_SCRIPTS.listWindows);
-    this.windowCache.clear();
-    for (const w of wins) this.windowCache.set(w.handle, w);
+    const wins = await this.listWindowsRaw();
     const [pidStr] = handle.split(":");
     const pid = Number(pidStr);
     const inProc = wins.filter((w) => w.pid === pid);
@@ -530,6 +550,7 @@ JSON.stringify(out);
 const se = Application("System Events");
 const procs = se.processes.whose({ visible: true })();
 const out = [];
+let winErrors = 0;
 for (let i = 0; i < procs.length; i++) {
   const p = procs[i];
   let pid = -1;
@@ -541,7 +562,7 @@ for (let i = 0; i < procs.length; i++) {
   let frontmost = false;
   try { frontmost = !!p.frontmost(); } catch (e) {}
   let wins = [];
-  try { wins = p.windows(); } catch (e) { continue; }
+  try { wins = p.windows(); } catch (e) { winErrors++; continue; }
   for (let j = 0; j < wins.length; j++) {
     const w = wins[j];
     let title = "";
@@ -567,7 +588,7 @@ for (let i = 0; i < procs.length; i++) {
     });
   }
 }
-JSON.stringify(out);
+JSON.stringify({ windows: out, proc_count: procs.length, win_errors: winErrors });
 `,
   moveWindow: `
 const se = Application("System Events");

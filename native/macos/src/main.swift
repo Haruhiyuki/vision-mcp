@@ -950,6 +950,14 @@ func handle(method: String, params: [String: Any]) -> Any {
     case "capsule.ensure_virtual_display":
         return listDisplays().first ?? [:]
     case "window.list":
+        // 无辅助功能权限时 AX 对每个 app 的窗口枚举都失败，旧行为静默返回空数组，
+        // 上层只能看到误导性的 WINDOW_NOT_FOUND；显式升级为权限错误。
+        if !AXIsProcessTrusted() {
+            return [
+                "error": "辅助功能权限未授予 helper（AXIsProcessTrusted=false），无法枚举窗口——到 系统设置 → 隐私与安全性 → 辅助功能 为宿主进程授权后重试",
+                "code": "PERMISSION_DENIED",
+            ]
+        }
         let filter = params["filter"] as? [String: Any]
         return listWindowsCore(filter: filter).map(toWindowInfo)
     case "window.get":
@@ -1206,7 +1214,7 @@ while true {
         let params = toDict(obj["params"])
         let result = handle(method: method, params: params)
         if let dict = result as? [String: Any], let err = dict["error"] as? String {
-            emitError(id: id, message: err)
+            emitError(id: id, message: err, code: (dict["code"] as? String) ?? "UNKNOWN")
         } else {
             emitResult(id: id, result: result)
         }

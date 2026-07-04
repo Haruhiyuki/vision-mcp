@@ -84,6 +84,26 @@ describe("Capsule with mock adapter", () => {
     expect(status.attached_window).toBeUndefined();
   });
 
+  it("attach 未匹配时错误信息列出可枚举的窗口进程（可诊断的 WINDOW_NOT_FOUND）", async () => {
+    const adapter = new MockPlatformAdapter();
+    adapter.addWindow({
+      title: "Other Window",
+      process_name: "other.exe",
+      bounds: { x: 0, y: 0, width: 640, height: 480 },
+    });
+    const map = baseMap();
+    const cap = new Capsule(map.visual_box, adapter, map.input_lease_policy);
+    await cap.ensureDisplay({
+      geometry: map.visual_box.display,
+      mode: map.visual_box.mode,
+    });
+    // 过滤不匹配 → 错误里应带上「当前可枚举到窗口的进程」提示，
+    // 而不是一句无从下手的 NOT_FOUND
+    await expect(
+      cap.attach({ target: { process_name: "demo.exe" } }),
+    ).rejects.toThrow(/other\.exe/);
+  });
+
   it("Retina scale/DPI 差异与菜单栏量级尺寸差是 warning，不阻塞 ok", () => {
     const map = baseMap();
     const state = buildGeometryState({

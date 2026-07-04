@@ -147,9 +147,25 @@ export class Capsule implements ICapsule {
   async attach(opts: AttachOptions): Promise<WindowInfo> {
     const windows = await this.platform.listWindows(opts.target);
     if (windows.length === 0) {
+      // 只报一句 WINDOW_NOT_FOUND 无从下手：再拉一次不带过滤的列表，
+      // 区分「过滤条件不匹配」和「根本枚举不到窗口（权限/无 GUI）」，
+      // 并把可见进程名带进错误信息，调用方一眼就知道该改什么。
+      let hint = "";
+      try {
+        const all = opts.target ? await this.platform.listWindows() : windows;
+        if (all.length === 0) {
+          hint =
+            "；平台适配器枚举不到任何窗口——常见原因：辅助功能/自动化权限未授予 helper 进程，或目标应用没有打开 GUI 窗口";
+        } else {
+          const procs = [...new Set(all.map((w) => w.process_name))].slice(0, 12);
+          hint = `；当前可枚举到窗口的进程：${procs.join("、")}`;
+        }
+      } catch {
+        // 提示尽力而为，拿不到就保持原错误
+      }
       throw new VisionMcpError(
         "WINDOW_NOT_FOUND",
-        `未找到匹配目标窗口：${JSON.stringify(opts.target)}`,
+        `未找到匹配目标窗口：${JSON.stringify(opts.target)}${hint}`,
       );
     }
     const picked = pickWindow(windows, opts.pick ?? "most_recent");
