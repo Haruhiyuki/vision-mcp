@@ -235,6 +235,65 @@ describe("MCP server end-to-end (mock platform)", () => {
     expect((scaled.structuredContent as { image_width_px: number }).image_width_px).toBe(200);
   });
 
+  it("raw 动作反馈：click/scroll 返回 content_changed；feedback=false 跳过", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vmcp-srv-"));
+    const { client } = await setupServerAndClient(dir, {
+      windows: [
+        {
+          title: "Act Window",
+          process_name: "act.exe",
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      ],
+    });
+    await client.callTool({
+      name: "capsule.attach_window",
+      arguments: { app_id: "act", target_override: { process_name: "act.exe" } },
+    });
+
+    // mock 帧内容恒定 → 点击后画面无变化，反馈应明确说出来
+    const click = await client.callTool({
+      name: "vision_map.click_at",
+      arguments: { app_id: "act", point_norm: [0.5, 0.5], settle_ms: 0 },
+    });
+    expect(click.isError).toBeFalsy();
+    const c = click.structuredContent as {
+      content_changed?: boolean;
+      visual_similarity?: number;
+    };
+    expect(c.content_changed).toBe(false);
+    expect(c.visual_similarity).toBe(1);
+    expect(JSON.stringify(click.content)).toContain("画面无变化");
+
+    const scroll = await client.callTool({
+      name: "vision_map.scroll",
+      arguments: { app_id: "act", point_norm: [0.5, 0.5], dy_px: 240, settle_ms: 0 },
+    });
+    expect(scroll.isError).toBeFalsy();
+    expect((scroll.structuredContent as { content_changed?: boolean }).content_changed).toBe(false);
+
+    // feedback=false：不产生对比字段、无额外捕获
+    const fast = await client.callTool({
+      name: "vision_map.click_at",
+      arguments: { app_id: "act", point_norm: [0.5, 0.5], feedback: false },
+    });
+    expect(fast.isError).toBeFalsy();
+    const f = fast.structuredContent as { content_changed?: boolean };
+    expect(f.content_changed).toBeUndefined();
+
+    // press_key / type_text 同样带反馈字段
+    const key = await client.callTool({
+      name: "vision_map.press_key",
+      arguments: { app_id: "act", combo: "return", settle_ms: 0 },
+    });
+    expect((key.structuredContent as { content_changed?: boolean }).content_changed).toBe(false);
+    const type = await client.callTool({
+      name: "vision_map.type_text",
+      arguments: { app_id: "act", text: "hello", settle_ms: 0 },
+    });
+    expect((type.structuredContent as { content_changed?: boolean }).content_changed).toBe(false);
+  });
+
   it("perform_action 在没有可匹配 state 时返回 LOCATOR_FAILED 或 STATE_UNKNOWN", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vmcp-srv-"));
     const { client } = await setupServerAndClient(dir);

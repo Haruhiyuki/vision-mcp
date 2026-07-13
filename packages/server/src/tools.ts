@@ -122,6 +122,97 @@ function rememberFrameHash(
 
 /** dHash 汉明距离 ≤ 2/64 视为"内容未变"（容忍光标闪烁/亚像素噪声）。 */
 const UNCHANGED_HAMMING_MAX = 2;
+
+interface ActionFeedbackResult {
+  /** 动作前后整帧 dHash 是否有可感知变化。false = 动作大概率没生效/没滚动。 */
+  content_changed?: boolean;
+  /** 动作前后帧相似度 0–1（1 = 完全一致）。 */
+  visual_similarity?: number;
+  /** 反馈采集失败原因（动作本身已执行）。 */
+  feedback_error?: string;
+}
+
+/**
+ * raw 动作的执行 + 变化反馈：动作前后各捕获一帧做 dHash 对比。
+ * 这是把「每个动作后必须截图确认」变成可选的关键——反馈说没变化，agent
+ * 就不必再读一张整窗大图（~1k+ token）来发现"什么都没发生"。
+ * 反馈失败不影响动作本身（动作已派发），错误进 feedback_error。
+ */
+async function runWithChangeFeedback(
+  ctx: ServerContext,
+  appId: string,
+  capsule: { capture: (opts?: { source?: "display" | "window" }) => Promise<Frame> },
+  enabled: boolean,
+  settleMs: number,
+  act: () => Promise<void>,
+): Promise<ActionFeedbackResult> {
+  if (!enabled) {
+    await act();
+    return {};
+  }
+  let beforeHash: string | undefined;
+  try {
+    beforeHash = computeDHash(await capsule.capture());
+  } catch {
+    // before 帧拍不到也照常执行动作
+  }
+  await act();
+  if (beforeHash === undefined) {
+    return { feedback_error: "动作前捕获失败，无法对比变化" };
+  }
+  try {
+    await new Promise((r) => setTimeout(r, settleMs));
+    const afterHash = computeDHash(await capsule.capture());
+    rememberFrameHash(ctx, `${appId}:window`, afterHash);
+    const dist = hammingDistance(beforeHash, afterHash);
+    return {
+      content_changed: dist > UNCHANGED_HAMMING_MAX,
+      visual_similarity: Number((1 - dist / 64).toFixed(3)),
+    };
+  } catch (err) {
+    return { feedback_error: `动作后捕获失败：${(err as Error).message}` };
+  }
+}
+
+/**
+ * 找出点击落点的 AX 元素（可交互优先，其次面积最小），让 click 结果能回答
+ * "我点到了什么"。best-effort：无 AX / 超时 / 自绘 UI 时返回 undefined。
+ */
+async function describeTargetAt(
+  ctx: ServerContext,
+  windowHandle: string | undefined,
+  pointNorm: readonly [number, number],
+): Promise<{ role?: string; name?: string; description?: string } | undefined> {
+  const provider = ctx.providers.accessibility;
+  if (!provider || !windowHandle) return undefined;
+  try {
+    const nodes = await Promise.race([
+      provider.snapshot(windowHandle),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("ax snapshot timeout")), 800),
+      ),
+    ]);
+    const [px, py] = pointNorm;
+    const containing = nodes.filter((n) => {
+      const [x, y, w, h] = n.bbox_norm;
+      // 排除近乎整窗的容器节点，避免永远命中根节点
+      return px >= x && px <= x + w && py >= y && py <= y + h && w * h < 0.8;
+    });
+    if (containing.length === 0) return undefined;
+    const interactive = containing.filter((n) => isInteractiveCandidate(n));
+    const pool = interactive.length > 0 ? interactive : containing;
+    const best = [...pool].sort(
+      (a, b) => a.bbox_norm[2] * a.bbox_norm[3] - b.bbox_norm[2] * b.bbox_norm[3],
+    )[0];
+    return {
+      role: best.role,
+      name: best.name ?? undefined,
+      description: best.description ?? undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
 import type { ServerContext } from "./context.js";
 import {
   ensureBuilder,
@@ -689,17 +780,30 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "vision_map.click_at",
     {
-      title: "在 capsule 内按归一化坐标 click（探索原始动作）",
+      title: "在 capsule 内按归一化坐标 click（探索原始动作，带效果反馈）",
       description:
-        "Agent 看完 snapshot 后直接传 [x, y] norm 触发 click，不需要预先定义 control。",
+        "Agent 看完 snapshot 后直接传 [x, y] norm 触发 click，不需要预先定义 control。" +
+        "结果自带反馈：target=落点的 AX 元素（点到了什么）、content_changed=画面是否有变化——" +
+        "用它判断点击是否生效，不必每次点完都截图确认。",
       inputSchema: {
         app_id: z.string(),
         point_norm: z.tuple([z.number().min(0).max(1.5), z.number().min(0).max(1.5)]),
         button: z.enum(["left", "right", "middle"]).optional(),
         click_count: z.number().int().min(1).max(3).optional(),
+        feedback: z
+          .boolean()
+          .default(true)
+          .describe("动作前后对比整帧 dHash + 报告落点 AX 元素；false 跳过（省 ~0.5s 延迟）"),
+        settle_ms: z
+          .number()
+          .int()
+          .min(0)
+          .max(5000)
+          .default(350)
+          .describe("动作后等待 UI 稳定再采样的毫秒数（动画/弹层较慢的界面可调大）"),
       },
     },
-    async ({ app_id, point_norm, button, click_count }) => {
+    async ({ app_id, point_norm, button, click_count, feedback, settle_ms }) => {
       try {
         return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
@@ -709,11 +813,29 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             x: Math.round(cr.x + point_norm[0] * cr.width),
             y: Math.round(cr.y + point_norm[1] * cr.height),
           };
+          const windowHandle = geom.window?.native_handle;
+          // AX 落点元素在点击前解析（点击可能弹出新 UI 覆盖原元素）
+          const target = feedback
+            ? await describeTargetAt(ctx, windowHandle, point_norm)
+            : undefined;
           await capsule.raise().catch(() => {});
-          await capsule.adapter.click(pt, { button, click_count });
+          const fb = await runWithChangeFeedback(ctx, app_id, capsule, feedback, settle_ms, () =>
+            capsule.adapter.click(pt, { button, click_count }),
+          );
+          // 动作后 AX 树已变，废弃缓存，避免紧接的 snapshot 在 TTL 内读到旧树
+          if (windowHandle) ctx.providers.accessibility?.invalidate?.(windowHandle);
+          const targetDesc = target
+            ? ` on ${target.role ?? "?"}${target.name ? ` “${target.name}”` : target.description ? ` “${target.description}”` : ""}`
+            : "";
+          const changeDesc =
+            fb.content_changed === undefined
+              ? ""
+              : fb.content_changed
+                ? "；画面已变化"
+                : "；⚠️ 画面无变化（点击可能未生效/点空了）";
           return StructuredOk(
-            { point_screen: pt, point_norm },
-            `clicked ${button ?? "left"} x${click_count ?? 1} @ (${pt.x},${pt.y})`,
+            { point_screen: pt, point_norm, target, ...fb },
+            `clicked ${button ?? "left"} x${click_count ?? 1} @ (${pt.x},${pt.y})${targetDesc}${changeDesc}`,
           );
         });
       } catch (err) {
@@ -733,15 +855,25 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         app_id: z.string(),
         text: z.string(),
         clear_first: z.boolean().default(false),
+        feedback: z.boolean().default(true).describe("动作前后对比整帧变化；false 跳过"),
+        settle_ms: z.number().int().min(0).max(5000).default(250),
       },
     },
-    async ({ app_id, text, clear_first }) => {
+    async ({ app_id, text, clear_first, feedback, settle_ms }) => {
       try {
         return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           await capsule.raise().catch(() => {});
-          await capsule.adapter.typeText({ text, clear_first });
-          return StructuredOk({ ok: true, length: text.length });
+          const fb = await runWithChangeFeedback(ctx, app_id, capsule, feedback, settle_ms, () =>
+            capsule.adapter.typeText({ text, clear_first }),
+          );
+          const status = await capsule.status();
+          if (status.attached_window)
+            ctx.providers.accessibility?.invalidate?.(status.attached_window.native_handle);
+          return StructuredOk(
+            { ok: true, length: text.length, ...fb },
+            `typed ${text.length} chars${fb.content_changed === false ? "；⚠️ 画面无变化（焦点可能不在输入框）" : ""}`,
+          );
         });
       } catch (err) {
         return errorResult(err);
@@ -758,15 +890,28 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         + "单键 'return' / 'escape' / 'tab' / 'space' / 'f5' / 'pageup' 等；"
         + "组合 'cmd+s' (macOS) / 'ctrl+s' (Windows) / 'shift+tab' / 'alt+left'。"
         + "modifier 别名：cmd=win=meta / ctrl=control / alt=option。",
-      inputSchema: { app_id: z.string(), combo: z.string() },
+      inputSchema: {
+        app_id: z.string(),
+        combo: z.string(),
+        feedback: z.boolean().default(true).describe("动作前后对比整帧变化；false 跳过"),
+        settle_ms: z.number().int().min(0).max(5000).default(250),
+      },
     },
-    async ({ app_id, combo }) => {
+    async ({ app_id, combo, feedback, settle_ms }) => {
       try {
         return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           await capsule.raise().catch(() => {});
-          await capsule.adapter.pressKey({ combo });
-          return StructuredOk({ ok: true, combo });
+          const fb = await runWithChangeFeedback(ctx, app_id, capsule, feedback, settle_ms, () =>
+            capsule.adapter.pressKey({ combo }),
+          );
+          const status = await capsule.status();
+          if (status.attached_window)
+            ctx.providers.accessibility?.invalidate?.(status.attached_window.native_handle);
+          return StructuredOk(
+            { ok: true, combo, ...fb },
+            `pressed ${combo}${fb.content_changed === false ? "；⚠️ 画面无变化" : ""}`,
+          );
         });
       } catch (err) {
         return errorResult(err);
@@ -777,31 +922,47 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "vision_map.scroll",
     {
-      title: "在归一化点滚动",
+      title: "在归一化点滚动（带效果反馈）",
       description:
         "在 capsule 客户区 [nx, ny] 位置发滚轮事件。dy 正值=向下滚（屏幕内容上移），与 macOS 一致；一格 ≈ 120（Windows WHEEL_DELTA）。"
+        + "结果自带 content_changed：false 表示滚动没有产生任何画面变化（到底了/该控件不响应此方向滚轮），不必截图确认。"
         + "若要按 OCR 文本边滚边找停下来，用 scroll-until-text（CLI）/ recipe 而非这个 raw 工具。",
       inputSchema: {
         app_id: z.string(),
         point_norm: z.tuple([z.number().min(0).max(1.5), z.number().min(0).max(1.5)]),
         dx_px: z.number().default(0),
         dy_px: z.number().default(0),
+        feedback: z.boolean().default(true).describe("动作前后对比整帧变化；false 跳过"),
+        settle_ms: z.number().int().min(0).max(5000).default(200),
       },
     },
-    async ({ app_id, point_norm, dx_px, dy_px }) => {
+    async ({ app_id, point_norm, dx_px, dy_px, feedback, settle_ms }) => {
       try {
         return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const geom = await capsule.validateGeometry();
           const cr = geom.client_rect_px;
-          await capsule.adapter.scroll(
-            {
-              x: Math.round(cr.x + point_norm[0] * cr.width),
-              y: Math.round(cr.y + point_norm[1] * cr.height),
-            },
-            { dx_px, dy_px },
+          const fb = await runWithChangeFeedback(ctx, app_id, capsule, feedback, settle_ms, () =>
+            capsule.adapter.scroll(
+              {
+                x: Math.round(cr.x + point_norm[0] * cr.width),
+                y: Math.round(cr.y + point_norm[1] * cr.height),
+              },
+              { dx_px, dy_px },
+            ),
           );
-          return StructuredOk({ ok: true });
+          if (geom.window)
+            ctx.providers.accessibility?.invalidate?.(geom.window.native_handle);
+          return StructuredOk(
+            { ok: true, ...fb },
+            `scrolled (dx=${dx_px}, dy=${dy_px})${
+              fb.content_changed === false
+                ? "；⚠️ 画面无变化（已到边界或该位置不响应此方向滚动）"
+                : fb.content_changed
+                  ? "；画面已变化"
+                  : ""
+            }`,
+          );
         });
       } catch (err) {
         return errorResult(err);
