@@ -748,7 +748,7 @@ func ocrWindow(handle: String, regionNorm: [Double]?, languages: [String]) -> (t
     let pid = pid_t(handle.split(separator: ":").first.map(String.init) ?? "") ?? 0
     var pngData: Data?
     var via = "screencapture-rect"
-    if let wid = findWindowID(pid: pid, title: desc.title),
+    if let wid = findWindowID(pid: pid, title: desc.title, bounds: desc.bounds),
        let png = captureWindowByID(wid) {
         pngData = png
         via = "sckit"
@@ -807,9 +807,21 @@ func ocrCgImage(_ cgImage: CGImage, languages: [String]) -> [[String: Any]] {
     return out
 }
 
-/// 通过 pid + 标题找到对应 SCWindow 的 windowID（用于 capture.window）。
+/// 通过 pid + 标题 + AX bounds 找到对应 SCWindow 的 windowID（用于 capture.window）。
 /// 优先 SCKit（更准确，包含半屏外的窗口）；失败 fallback 到 CGWindowList。
-func findWindowID(pid: pid_t, title: String) -> CGWindowID? {
+///
+/// 匹配顺序（同 pid 候选内）：
+///   1. frame 与 AX bounds 接近（中心 + 尺寸差 ≤ 32pt）——最强证据；
+///   2. 标题相等；
+///   3. 兜底取面积最大。
+/// 早期实现只按 pid 取面积最大：TextEdit / Electron 这类多窗口进程会命中
+/// 隐藏辅助窗口（字体面板缓存、offscreen surface），SCKit 对它拍出一张与
+/// 目标窗口毫无关系的纯色图——上层拿到 1000x1000 空白帧还以为截图成功了。
+func findWindowID(pid: pid_t, title: String, bounds: CGRect? = nil) -> CGWindowID? {
+    func rectClose(_ a: CGRect, _ b: CGRect, tol: CGFloat = 32) -> Bool {
+        return abs(a.midX - b.midX) <= tol && abs(a.midY - b.midY) <= tol &&
+            abs(a.width - b.width) <= tol && abs(a.height - b.height) <= tol
+    }
     // 先尝试 SCKit
     let sem = DispatchSemaphore(value: 0)
     let result = SyncBox<CGWindowID?>(nil)
@@ -817,8 +829,23 @@ func findWindowID(pid: pid_t, title: String) -> CGWindowID? {
         defer { sem.signal() }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let mine = content.windows.filter { $0.owningApplication?.processID == pid }
+            // 1) AX bounds 匹配（标题可能为空/重复，几何是最稳的身份证据）
+            if let b = bounds, let hit = mine.first(where: { rectClose($0.frame, b) }) {
+                result.set(hit.windowID)
+                return
+            }
+            // 2) 标题匹配（同名多窗时取面积最大）
+            if !title.isEmpty {
+                let titled = mine.filter { ($0.title ?? "") == title }
+                if let hit = titled.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) {
+                    result.set(hit.windowID)
+                    return
+                }
+            }
+            // 3) 兜底：面积最大（原行为）
             var best: (id: CGWindowID, area: CGFloat) = (0, 0)
-            for w in content.windows where w.owningApplication?.processID == pid {
+            for w in mine {
                 let area = w.frame.width * w.frame.height
                 if area > best.area { best = (w.windowID, area) }
             }
@@ -833,20 +860,25 @@ func findWindowID(pid: pid_t, title: String) -> CGWindowID? {
     // fallback: CGWindowList
     let opts: CGWindowListOption = [.optionAll, .excludeDesktopElements]
     guard let info = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else { return nil }
-    var candidates: [(id: CGWindowID, layer: Int, area: Int)] = []
+    var candidates: [(id: CGWindowID, layer: Int, area: Int, boundsMatch: Bool)] = []
     for w in info {
         guard let p = (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, p == pid else { continue }
         let layer = (w[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
         let name = (w[kCGWindowName as String] as? String) ?? ""
         if !title.isEmpty && !name.isEmpty && name != title { continue }
-        guard let bounds = w[kCGWindowBounds as String] as? [String: Any] else { continue }
-        let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
-        let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
+        guard let wb = w[kCGWindowBounds as String] as? [String: Any] else { continue }
+        let width = (wb["Width"] as? NSNumber)?.intValue ?? 0
+        let height = (wb["Height"] as? NSNumber)?.intValue ?? 0
+        let wx = (wb["X"] as? NSNumber)?.intValue ?? 0
+        let wy = (wb["Y"] as? NSNumber)?.intValue ?? 0
         let id = (w[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
         if id == 0 { continue }
-        candidates.append((id, layer, width * height))
+        let rect = CGRect(x: wx, y: wy, width: width, height: height)
+        let boundsMatch = bounds.map { rectClose(rect, $0) } ?? false
+        candidates.append((id, layer, width * height, boundsMatch))
     }
     candidates.sort { (a, b) in
+        if a.boundsMatch != b.boundsMatch { return a.boundsMatch }
         if a.layer != b.layer { return a.layer < b.layer }
         return a.area > b.area
     }
@@ -1131,7 +1163,7 @@ func handle(method: String, params: [String: Any]) -> Any {
         guard let handle = params["handle"] as? String else { return ["error": "handle required"] }
         guard let (_, _, desc) = findWindow(handle: handle) else { return ["error": "window not found"] }
         let pid = pid_t(handle.split(separator: ":").first.map(String.init) ?? "") ?? 0
-        if let wid = findWindowID(pid: pid, title: desc.title),
+        if let wid = findWindowID(pid: pid, title: desc.title, bounds: desc.bounds),
            let png = captureWindowByID(wid) {
             // 用 NSBitmapImageRep 解析真实像素尺寸
             if let rep = NSBitmapImageRep(data: png) {
