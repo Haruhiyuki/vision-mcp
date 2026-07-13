@@ -254,7 +254,57 @@ export class Capsule implements ICapsule {
     if (!this.window) {
       throw new VisionMcpError("WINDOW_NOT_FOUND", "尚未 attach 窗口");
     }
-    return this.platform.captureWindow(this.window.native_handle);
+    // 捕获前刷新窗口信息：句柄失效（目标进程重启/窗口关闭）时在这里显式失败，
+    // 而不是让平台层对着幽灵句柄拍出一张纯色空图静默返回。
+    try {
+      this.window = await this.platform.getWindow(this.window.native_handle);
+    } catch (err) {
+      throw new VisionMcpError(
+        "WINDOW_NOT_FOUND",
+        `窗口句柄已失效（目标窗口可能已关闭或进程重启）：${(err as Error).message ?? err}`,
+        { cause: err, recoverable: true },
+      );
+    }
+    const frame = await this.platform.captureWindow(this.window.native_handle);
+    this.assertFrameMatchesWindow(frame, this.window);
+    return frame;
+  }
+
+  /**
+   * 帧尺寸与窗口几何一致性校验。窗口句柄指向隐藏/离屏 surface 时，平台层可能
+   * 返回一张尺寸完全对不上的图（实测案例：窗口 1240x860 却拿到 1000x1000 空白帧）。
+   * 帧宽高应接近 bounds/client_bounds 的 1x 或 display scale 倍（Retina/HiDPI）。
+   */
+  private assertFrameMatchesWindow(frame: Frame, win: WindowInfo): void {
+    // capsule 持有的 display 未必是窗口实际所在屏（ensureDisplay 可能选了别的），
+    // scale 用常见 HiDPI 候选集 + display.scale 兜底，两维同时命中任一候选才算合法。
+    const displayScale = this.display?.scale && this.display.scale > 0 ? this.display.scale : 1;
+    const scales = [...new Set([1, displayScale, 1.25, 1.5, 2, 3])];
+    const candidates: Array<{ w: number; h: number }> = [];
+    for (const rect of [win.bounds, win.client_bounds]) {
+      for (const s of scales) {
+        candidates.push({ w: rect.width * s, h: rect.height * s });
+      }
+    }
+    const tolerated = (actual: number, expected: number) =>
+      Math.abs(actual - expected) <= Math.max(64, expected * 0.15);
+    const ok = candidates.some(
+      (c) => tolerated(frame.width_px, c.w) && tolerated(frame.height_px, c.h),
+    );
+    if (!ok) {
+      throw new VisionMcpError(
+        "CAPTURE_INVALID",
+        `捕获帧 ${frame.width_px}x${frame.height_px} 与窗口几何不符（bounds ${win.bounds.width}x${win.bounds.height}, display scale ${displayScale}${frame.via ? `, via=${frame.via}` : ""}）——句柄可能指向隐藏/离屏窗口`,
+        {
+          recoverable: true,
+          details: {
+            frame: { width_px: frame.width_px, height_px: frame.height_px, via: frame.via },
+            window: { bounds: win.bounds, client_bounds: win.client_bounds, title: win.title },
+            display_scale: displayScale,
+          },
+        },
+      );
+    }
   }
 
   async validateGeometry(rules?: ContractRules): Promise<GeometryState> {

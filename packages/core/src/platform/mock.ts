@@ -125,6 +125,12 @@ export class MockPlatformAdapter implements PlatformAdapter {
     this.frameProvider = p;
   }
 
+  /** 模拟窗口被关闭/进程退出：句柄失效，后续 getWindow/capture 抛错。 */
+  removeWindow(handle: string): void {
+    this.windows.delete(handle);
+    this.windowListeners.delete(handle);
+  }
+
   scheduleVirtualDisplay(spec: MockDisplaySpec): void {
     this.nextVirtualDisplay = spec;
   }

@@ -84,6 +84,76 @@ describe("Capsule with mock adapter", () => {
     expect(status.attached_window).toBeUndefined();
   });
 
+  it("capture：窗口句柄失效 → 显式 WINDOW_NOT_FOUND（而非拍出幽灵空图）", async () => {
+    const adapter = new MockPlatformAdapter();
+    adapter.addWindow({
+      title: "Demo Window",
+      process_name: "demo.exe",
+      bounds: { x: 50, y: 50, width: 800, height: 600 },
+    });
+    const map = baseMap();
+    const cap = new Capsule(map.visual_box, adapter, map.input_lease_policy);
+    await cap.ensureDisplay({ geometry: map.visual_box.display, mode: map.visual_box.mode });
+    const win = await cap.attach({ target: map.visual_box.target_window! });
+    await expect(cap.capture()).resolves.toBeTruthy();
+    adapter.removeWindow(win.native_handle); // 模拟目标进程重启/窗口关闭
+    await expect(cap.capture()).rejects.toMatchObject({
+      code: "WINDOW_NOT_FOUND",
+      recoverable: true,
+    });
+  });
+
+  it("capture：帧尺寸与窗口几何不符 → CAPTURE_INVALID（隐藏/离屏 surface 的静默空图）", async () => {
+    const adapter = new MockPlatformAdapter();
+    adapter.addWindow({
+      title: "Demo Window",
+      process_name: "demo.exe",
+      bounds: { x: 50, y: 50, width: 800, height: 600 },
+    });
+    // 平台层对幽灵句柄返回 1000x1000 纯色帧（实测过的故障形态）
+    adapter.setFrameProvider(() => ({
+      width_px: 1000,
+      height_px: 1000,
+      pixels: new Uint8Array(1000 * 1000 * 4).fill(255),
+      captured_at: new Date().toISOString(),
+      source: "window" as const,
+      client_rect_in_frame: { x: 0, y: 0, width: 1000, height: 1000 },
+    }));
+    const map = baseMap();
+    const cap = new Capsule(map.visual_box, adapter, map.input_lease_policy);
+    await cap.ensureDisplay({ geometry: map.visual_box.display, mode: map.visual_box.mode });
+    await cap.attach({ target: map.visual_box.target_window! });
+    await expect(cap.capture()).rejects.toMatchObject({
+      code: "CAPTURE_INVALID",
+      recoverable: true,
+    });
+  });
+
+  it("capture：Retina 2x 帧（bounds×scale）通过几何校验", async () => {
+    const adapter = new MockPlatformAdapter({
+      displays: [{ bounds: { x: 0, y: 0, width: 1920, height: 1080 }, scale: 2, is_primary: true }],
+    });
+    adapter.addWindow({
+      title: "Demo Window",
+      process_name: "demo.exe",
+      bounds: { x: 50, y: 50, width: 800, height: 600 },
+    });
+    adapter.setFrameProvider((win) => ({
+      width_px: win.bounds.width * 2,
+      height_px: win.bounds.height * 2,
+      pixels: new Uint8Array(win.bounds.width * 2 * win.bounds.height * 2 * 4).fill(200),
+      captured_at: new Date().toISOString(),
+      source: "window" as const,
+      client_rect_in_frame: { x: 0, y: 0, width: win.bounds.width * 2, height: win.bounds.height * 2 },
+    }));
+    const map = baseMap();
+    const cap = new Capsule(map.visual_box, adapter, map.input_lease_policy);
+    await cap.ensureDisplay({ geometry: map.visual_box.display, mode: map.visual_box.mode });
+    await cap.attach({ target: map.visual_box.target_window! });
+    const frame = await cap.capture();
+    expect(frame.width_px).toBe(1600);
+  });
+
   it("attach 未匹配时错误信息列出可枚举的窗口进程（可诊断的 WINDOW_NOT_FOUND）", async () => {
     const adapter = new MockPlatformAdapter();
     adapter.addWindow({
