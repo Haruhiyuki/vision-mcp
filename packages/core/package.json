@@ -51,8 +51,9 @@
     "prepublishOnly": "node ./scripts/prepublish.mjs"
   },
   "dependencies": {
-    "zod": "^3.24.1",
+    "jpeg-js": "^0.4.4",
     "yaml": "^2.7.0",
+    "zod": "^3.24.1",
     "zod-to-json-schema": "^3.24.1"
   },
   "keywords": [
