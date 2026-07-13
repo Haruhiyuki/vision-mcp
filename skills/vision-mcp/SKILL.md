@@ -51,7 +51,7 @@ discovery_flow: |
 
 ## 1. 核心原则
 
-1. **视觉为主，AX/OCR 校准**：snapshot 拿 PNG，自己看图估归一化坐标；有 AX 的元素 candidates 给精确 bbox；CEF/游戏/自绘 UI 走 OCR + bbox。截图永远在。
+1. **文本观察优先，看图兜底**：一张整窗截图 ≈ 1k+ token 且**常驻上下文反复计费**；`snapshot(include_image=false)` 的 AX candidates + OCR token（文本+bbox）多数时候足以定位与确认，成本不到图的 1/10。真要看图：`region_norm` 只截要看的局部、确认类对比用 `capture(only_if_changed=true)`（内容没变不产新图）。动作工具自带 `content_changed` + 落点元素反馈——**动作后不要习惯性截图确认**。详见 [`references/token-economy.md`](references/token-economy.md)。
 2. **路径上沉淀 map**：用过的路径要 `commit_state` / `patch` 固化进 map，下次直接 `run_workflow` 命中。每次视觉成本都摊销到永久 map 资产上。**建 map 时按 [`references/map-design.md`](references/map-design.md) 的 13 项 checklist 走**——不只是 anchors+controls，还有 regions / kbd / collection / postcondition / risk_level / parent_state_id 等组合，漏一个 map 复用价值就少一截。
 3. **稳定窗口 + 归一化坐标**：目标窗口被迁到主屏 display 工作区中心，**完整可见**；所有动作用客户区归一化坐标。**不创建虚拟显示器**（macOS / Windows public API 都不可靠）。
 4. **失败先 repair 后 snapshot**：runtime 内置 L0–L3 修复 ladder；先调 `repair_minimal`，修不好才看图诊断。
@@ -87,7 +87,10 @@ discovery_flow: |
 |------|------|
 | 跑已建好的任务 | `run_workflow` / `perform_action` / `kbd.<action>` |
 | 任务起点确认 state | `detect_state`（轻量，无 PNG） |
-| 看截图 + AX 候选 | `snapshot`（base64 PNG + candidates） |
+| **读屏幕文字 / 确认状态（最省）** | `snapshot(include_image=false)` → candidates + ocr_tokens；局部加 `region_norm` |
+| 动作是否生效 | 看动作结果里的 `content_changed` / `target`，不必截图 |
+| 看截图 + AX 候选 | `snapshot`（PNG 落盘 + candidates）；只看局部用 `capture(region_norm=...)` |
+| 轮询等待画面变化 | `capture(only_if_changed=true)`：没变返回 unchanged，不产新图 |
 | 估完坐标点击 / 输入 | `click` / `click-text`（OCR）/ `type` / `key` |
 | macOS 零鼠标点击 | `ax-press`（UIA InvokePattern 等价） |
 | 在长列表里找特定项 | `scroll-until-text` |

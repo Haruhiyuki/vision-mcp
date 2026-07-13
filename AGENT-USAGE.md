@@ -8,6 +8,7 @@ agent 入口 / 唯一权威是 [`skills/vision-mcp/SKILL.md`](skills/vision-mcp/
 | ---- | ---- |
 | **核心原则 + 跨平台速查 + 工具入口** | [`skills/vision-mcp/SKILL.md`](skills/vision-mcp/SKILL.md)（agent 启动 invoke 时自动加载） |
 | **任务驱动 vs 探索决策树 + 4 时机 + 反模式** | [`references/workflow.md`](skills/vision-mcp/references/workflow.md) |
+| **Token 经济**（文本观察 / 区域截图 / 变化短路 / 动作反馈） | [`references/token-economy.md`](skills/vision-mcp/references/token-economy.md) ⭐ 新 |
 | **建 map 13 项 checklist + 何时用 collection/kbd/postcondition/risk_level** | [`references/map-design.md`](skills/vision-mcp/references/map-design.md) |
 | **vision-mcp.yaml 字段速查** | [`references/schema.md`](skills/vision-mcp/references/schema.md) |
 | **实战示例**（Apple Music / Steam / 纯视觉 / patch 实战） | [`references/examples.md`](skills/vision-mcp/references/examples.md) ⭐ 新 |

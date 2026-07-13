@@ -235,6 +235,40 @@ describe("MCP server end-to-end (mock platform)", () => {
     expect((scaled.structuredContent as { image_width_px: number }).image_width_px).toBe(200);
   });
 
+  it("snapshot region_norm：图像裁剪到指定区域", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vmcp-srv-"));
+    const { client } = await setupServerAndClient(dir, {
+      windows: [
+        {
+          title: "Snap Window",
+          process_name: "snap.exe",
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      ],
+    });
+    await client.callTool({
+      name: "capsule.attach_window",
+      arguments: { app_id: "snap", target_override: { process_name: "snap.exe" } },
+    });
+    const snap = await client.callTool({
+      name: "vision_map.snapshot",
+      arguments: {
+        app_id: "snap",
+        include_ocr: false,
+        region_norm: [0, 0, 0.25, 0.5],
+      },
+    });
+    expect(snap.isError).toBeFalsy();
+    const s = snap.structuredContent as {
+      image_width_px?: number;
+      image_height_px?: number;
+      region_norm?: number[];
+    };
+    expect(s.image_width_px).toBe(200);
+    expect(s.image_height_px).toBe(300);
+    expect(s.region_norm).toEqual([0, 0, 0.25, 0.5]);
+  });
+
   it("raw 动作反馈：click/scroll 返回 content_changed；feedback=false 跳过", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vmcp-srv-"));
     const { client } = await setupServerAndClient(dir, {

@@ -657,9 +657,22 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           .max(500)
           .default(50)
           .describe("OCR token 数量上限。confidence < 0.5 的自动过滤"),
+        region_norm: z
+          .tuple([
+            z.number().min(0).max(1),
+            z.number().min(0).max(1),
+            z.number().min(0).max(1),
+            z.number().min(0).max(1),
+          ])
+          .optional()
+          .describe(
+            "[x,y,w,h] 相对客户区的归一化区域：AX candidates / OCR / 图像都只看该区域。" +
+              "读局部状态文字（一行标签、一个徽标）时配 include_image=false 是最省 token 的观察方式。" +
+              "返回的 bbox_norm 已映射回整客户区坐标系，可直接传给 click_at",
+          ),
       },
     },
-    async ({ app_id, include_image, image_output, max_image_width, include_ax, include_ocr, max_candidates, max_ocr_tokens }) => {
+    async ({ app_id, include_image, image_output, max_image_width, include_ax, include_ocr, max_candidates, max_ocr_tokens, region_norm }) => {
       try {
         return await withAppQuickLook(ctx, app_id, async (app) => {
           const rt = await ensureRuntime(ctx, app);
@@ -680,16 +693,24 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             };
             let tokens: OcrTokens | undefined;
             const win = status.attached_window;
+            const cr = status.geometry.client_rect_px;
+            // 识别范围：客户区，或调用方指定的客户区子区域（region_norm）
+            const sub = region_norm;
+            const target = {
+              x: cr.x + (sub ? sub[0] * cr.width : 0),
+              y: cr.y + (sub ? sub[1] * cr.height : 0),
+              width: sub ? sub[2] * cr.width : cr.width,
+              height: sub ? sub[3] * cr.height : cr.height,
+            };
             if (ocrp.recognizeWindow && win) {
-              // 窗口帧含标题栏；用 region_norm 裁出客户区，让 bbox 与
-              // click_at 用的 client_rect_px 坐标系对齐
-              const cr = status.geometry.client_rect_px;
+              // 窗口帧含标题栏；把识别区域换算到窗口帧的归一化坐标，
+              // 让 bbox 与 click_at 用的 client_rect_px 坐标系对齐
               const wb = win.bounds;
               const regionNorm: [number, number, number, number] = [
-                (cr.x - wb.x) / wb.width,
-                (cr.y - wb.y) / wb.height,
-                cr.width / wb.width,
-                cr.height / wb.height,
+                (target.x - wb.x) / wb.width,
+                (target.y - wb.y) / wb.height,
+                target.width / wb.width,
+                target.height / wb.height,
               ];
               try {
                 tokens = await ocrp.recognizeWindow(win.native_handle, { regionNorm });
@@ -697,8 +718,25 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             }
             if (!tokens && ocrp.recognizeRect) {
               try {
-                tokens = await ocrp.recognizeRect(status.geometry.client_rect_px);
+                tokens = await ocrp.recognizeRect(target);
               } catch { /* OCR best-effort */ }
+            }
+            // token bbox 归一化到识别区域；指定了子区域时映射回整客户区坐标系，
+            // agent 拿到就能直接传 click_at
+            if (tokens && sub) {
+              tokens = tokens.map((t) =>
+                t.bbox_norm
+                  ? {
+                      ...t,
+                      bbox_norm: [
+                        sub[0] + t.bbox_norm[0] * sub[2],
+                        sub[1] + t.bbox_norm[1] * sub[3],
+                        t.bbox_norm[2] * sub[2],
+                        t.bbox_norm[3] * sub[3],
+                      ] as [number, number, number, number],
+                    }
+                  : t,
+              );
             }
             if (tokens) insights.ocr = tokens;
           }
@@ -708,13 +746,17 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           let image_height_px: number | undefined;
           if (include_image) {
             if (image_output === "inline") {
-              const encoded = encodeFrameImage(insights.frame, { maxWidth: max_image_width });
+              const encoded = encodeFrameImage(insights.frame, {
+                maxWidth: max_image_width,
+                regionNorm: region_norm,
+              });
               image_base64 = encoded.bytes.toString("base64");
               image_width_px = encoded.width;
               image_height_px = encoded.height;
             } else {
               const file = await writeFrameImage(ctx, app_id, insights.frame, {
                 maxWidth: max_image_width,
+                regionNorm: region_norm,
               });
               image_path = file.path;
               image_width_px = file.width;
@@ -723,9 +765,20 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           }
           // snapshot 也参与整帧 hash 记账，让后续 capture(only_if_changed) 能短路
           rememberFrameHash(ctx, `${app_id}:${insights.frame.source}`, computeDHash(insights.frame), image_path);
+          const centerInRegion = (bbox: readonly number[]) => {
+            if (!region_norm) return true;
+            const cx = bbox[0] + bbox[2] / 2;
+            const cy = bbox[1] + bbox[3] / 2;
+            return (
+              cx >= region_norm[0] &&
+              cx <= region_norm[0] + region_norm[2] &&
+              cy >= region_norm[1] &&
+              cy <= region_norm[1] + region_norm[3]
+            );
+          };
           const candidates = include_ax
             ? insights.accessibility
-                .filter((n) => isInteractiveCandidate(n))
+                .filter((n) => isInteractiveCandidate(n) && centerInRegion(n.bbox_norm))
                 .slice(0, max_candidates)
                 .map((n) => ({
                   role: n.role,
@@ -760,6 +813,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               candidates_total: insights.accessibility.length,
               ocr_tokens,
               ocr_tokens_total: insights.ocr.length,
+              region_norm,
               image_path,
               image_base64,
               image_mime: image_path || image_base64 ? "image/png" : undefined,
@@ -768,7 +822,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               capture_via: insights.frame.via,
               visual_hash: insights.visual_hash,
             },
-            `state=${state?.state_id ?? "none"} ax=${candidates.length}/${insights.accessibility.length} ocr=${ocr_tokens.length}/${insights.ocr.length}${insights.frame.via ? ` via=${insights.frame.via}` : ""}${image_path ? ` image=${image_path}` : ""}`,
+            `state=${state?.state_id ?? "none"} ax=${candidates.length}/${insights.accessibility.length} ocr=${ocr_tokens.length}/${insights.ocr.length}${region_norm ? ` region=[${region_norm.join(",")}]` : ""}${insights.frame.via ? ` via=${insights.frame.via}` : ""}${image_path ? ` image=${image_path}` : ""}`,
           );
         });
       } catch (err) {
