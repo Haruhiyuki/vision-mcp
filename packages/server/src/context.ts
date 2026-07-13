@@ -37,6 +37,12 @@ export interface ServerContext {
   platformOptions: CreatePlatformOptions;
   /** 已存在的审批通道（CLI/UI 可注入）。 */
   approvalCallback?: (req: import("@vision-mcp/core").ApprovalRequest) => Promise<"granted" | "denied" | "expired">;
+  /**
+   * 每个 app 最近一次整帧 dHash（key = `${app_id}:${source}`）。
+   * capture only_if_changed 短路 + 动作反馈 content_changed 共用同一 hash 空间：
+   * 动作说"内容变了"，紧接的 capture 就能给出与之一致的 changed_since_last。
+   */
+  lastCaptures: Map<string, { hash: string; image_path?: string; at: string }>;
 }
 
 /** Session 内 perform_action 调用历史，让 harvest_session 一键沉淀。 */
@@ -89,6 +95,7 @@ export async function createServerContext(opts: {
     traceDir: path.resolve(opts.traceDir ?? path.join(opts.appsRoot, ".traces")),
     providers: opts.providers ?? {},
     platformOptions: opts.platformOptions ?? { platform: "auto", fallbackToMock: false },
+    lastCaptures: new Map(),
   };
 }
 

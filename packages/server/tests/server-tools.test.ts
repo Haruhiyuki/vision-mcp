@@ -161,6 +161,80 @@ describe("MCP server end-to-end (mock platform)", () => {
     expect(act.isError).toBeTruthy();
   });
 
+  it("capsule.capture：region 裁剪 + jpeg 默认 + only_if_changed 短路 + uniform 提示", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vmcp-srv-"));
+    const { client } = await setupServerAndClient(dir, {
+      windows: [
+        {
+          title: "Cap Window",
+          process_name: "cap.exe",
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      ],
+    });
+    await client.callTool({
+      name: "capsule.attach_window",
+      arguments: { app_id: "cap", target_override: { process_name: "cap.exe" } },
+    });
+
+    // 1) 整帧捕获：默认 jpeg + visual_hash；mock 纯白帧 → frame_uniform 提示
+    const first = await client.callTool({
+      name: "capsule.capture",
+      arguments: { app_id: "cap" },
+    });
+    expect(first.isError).toBeFalsy();
+    const f = first.structuredContent as {
+      image_path: string;
+      image_mime: string;
+      image_width_px: number;
+      visual_hash: string;
+      frame_uniform?: boolean;
+      unchanged?: boolean;
+    };
+    expect(f.image_mime).toBe("image/jpeg");
+    expect(f.image_path.endsWith(".jpg")).toBe(true);
+    expect(f.image_width_px).toBe(800);
+    expect(f.visual_hash).toBeTruthy();
+    expect(f.frame_uniform).toBe(true); // mock 合成帧为纯色
+    expect(f.unchanged).toBeUndefined();
+
+    // 2) region_norm 裁剪：右下四分之一 → 400x300
+    const region = await client.callTool({
+      name: "capsule.capture",
+      arguments: { app_id: "cap", region_norm: [0.5, 0.5, 0.5, 0.5], format: "png" },
+    });
+    expect(region.isError).toBeFalsy();
+    const r = region.structuredContent as {
+      image_width_px: number;
+      image_height_px: number;
+      image_mime: string;
+      changed_since_last?: boolean;
+    };
+    expect(r.image_width_px).toBe(400);
+    expect(r.image_height_px).toBe(300);
+    expect(r.image_mime).toBe("image/png");
+    // mock 帧内容恒定 → 与上次一致
+    expect(r.changed_since_last).toBe(false);
+
+    // 3) only_if_changed：内容未变 → 不产新图
+    const skip = await client.callTool({
+      name: "capsule.capture",
+      arguments: { app_id: "cap", only_if_changed: true },
+    });
+    expect(skip.isError).toBeFalsy();
+    const s = skip.structuredContent as { unchanged?: boolean; last_image_path?: string; image_path?: string };
+    expect(s.unchanged).toBe(true);
+    expect(s.image_path).toBeUndefined();
+    expect(s.last_image_path).toBeTruthy();
+
+    // 4) max_image_width 降采样
+    const scaled = await client.callTool({
+      name: "capsule.capture",
+      arguments: { app_id: "cap", max_image_width: 200 },
+    });
+    expect((scaled.structuredContent as { image_width_px: number }).image_width_px).toBe(200);
+  });
+
   it("perform_action 在没有可匹配 state 时返回 LOCATOR_FAILED 或 STATE_UNKNOWN", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vmcp-srv-"));
     const { client } = await setupServerAndClient(dir);

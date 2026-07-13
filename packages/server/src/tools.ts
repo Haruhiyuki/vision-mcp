@@ -19,7 +19,16 @@ import {
   hasErrors,
 } from "@vision-mcp/core";
 import type { AccessibilityNode, Frame } from "@vision-mcp/core";
-import { downscaleRgba, encodeRgbaToPng } from "@vision-mcp/core";
+import {
+  computeDHash,
+  cropRgba,
+  downscaleRgba,
+  encodeRgbaToJpeg,
+  encodeRgbaToPng,
+  frameStats,
+  hammingDistance,
+  regionNormToPx,
+} from "@vision-mcp/core";
 
 function isInteractiveCandidate(n: AccessibilityNode): boolean {
   const r = n.role ?? "";
@@ -35,38 +44,84 @@ function isInteractiveCandidate(n: AccessibilityNode): boolean {
   return false;
 }
 
+interface EncodeImageOptions {
+  maxWidth?: number;
+  /** [x, y, w, h] 归一化区域（相对整帧），先裁剪再降采样。 */
+  regionNorm?: readonly [number, number, number, number];
+  format?: "png" | "jpeg";
+  jpegQuality?: number;
+}
+
 /**
- * 把 Frame 编成 PNG bytes；maxWidth > 0 且帧更宽时先等比降采样。
+ * 把 Frame 编成图像 bytes：可选先按归一化区域裁剪，再等比降采样，再编码。
+ * host 的图像 token 成本 ≈ 像素面积（约 w*h/750 token），裁剪 + 降采样才是
+ * 降 token 的手段；JPEG 只减小磁盘/传输体积。
  */
-function encodeFramePng(frame: Frame, maxWidth = 0): { png: Buffer; width: number; height: number } {
-  const scaled = downscaleRgba(frame.width_px, frame.height_px, frame.pixels, maxWidth);
-  return {
-    png: encodeRgbaToPng(scaled.width, scaled.height, scaled.pixels),
-    width: scaled.width,
-    height: scaled.height,
-  };
+function encodeFrameImage(
+  frame: Frame,
+  opts: EncodeImageOptions = {},
+): { bytes: Buffer; width: number; height: number; format: "png" | "jpeg" } {
+  let { width_px: width, height_px: height, pixels } = frame;
+  if (opts.regionNorm) {
+    const rect = regionNormToPx(opts.regionNorm, width, height);
+    ({ width, height, pixels } = cropRgba(width, height, pixels, rect));
+  }
+  const scaled = downscaleRgba(width, height, pixels, opts.maxWidth ?? 0);
+  const format = opts.format ?? "png";
+  const bytes =
+    format === "jpeg"
+      ? encodeRgbaToJpeg(scaled.width, scaled.height, scaled.pixels, opts.jpegQuality ?? 85)
+      : encodeRgbaToPng(scaled.width, scaled.height, scaled.pixels);
+  return { bytes, width: scaled.width, height: scaled.height, format };
 }
 
 /**
  * 截图落盘：写进 traceDir/<app_id>/captures/，返回绝对路径。
  * 截图动辄 300KB–数 MB，内联 base64 会把 host 的 token 上限打爆——默认全部走文件。
  */
-async function writeFramePng(
+async function writeFrameImage(
   ctx: ServerContext,
   appId: string,
   frame: Frame,
-  maxWidth = 0,
-): Promise<{ path: string; width: number; height: number; bytes: number }> {
+  opts: EncodeImageOptions = {},
+): Promise<{ path: string; width: number; height: number; bytes: number; mime: string }> {
   const fs = await import("node:fs/promises");
   const path = await import("node:path");
-  const { png, width, height } = encodeFramePng(frame, maxWidth);
+  const { bytes, width, height, format } = encodeFrameImage(frame, opts);
   const dir = path.join(ctx.traceDir, appId, "captures");
   await fs.mkdir(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const file = path.join(dir, `${stamp}-${frame.source}.png`);
-  await fs.writeFile(file, png);
-  return { path: file, width, height, bytes: png.length };
+  const ext = format === "jpeg" ? "jpg" : "png";
+  const file = path.join(dir, `${stamp}-${frame.source}.${ext}`);
+  await fs.writeFile(file, bytes);
+  return {
+    path: file,
+    width,
+    height,
+    bytes: bytes.length,
+    mime: format === "jpeg" ? "image/jpeg" : "image/png",
+  };
 }
+
+/** 整帧 dHash 记账：capture 的 only_if_changed 与动作反馈共用。 */
+function rememberFrameHash(
+  ctx: ServerContext,
+  key: string,
+  hash: string,
+  imagePath?: string,
+): { changed_since_last?: boolean; previous?: { hash: string; image_path?: string; at: string } } {
+  const previous = ctx.lastCaptures.get(key);
+  ctx.lastCaptures.set(key, {
+    hash,
+    image_path: imagePath ?? previous?.image_path,
+    at: new Date().toISOString(),
+  });
+  if (!previous) return {};
+  return { changed_since_last: hammingDistance(previous.hash, hash) > UNCHANGED_HAMMING_MAX, previous };
+}
+
+/** dHash 汉明距离 ≤ 2/64 视为"内容未变"（容忍光标闪烁/亚像素噪声）。 */
+const UNCHANGED_HAMMING_MAX = 2;
 import type { ServerContext } from "./context.js";
 import {
   ensureBuilder,
@@ -328,27 +383,82 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "capsule.capture",
     {
-      title: "截图当前 capsule 内容（PNG 落盘，返回文件路径）",
+      title: "截图当前 capsule 内容（落盘返回文件路径；支持区域裁剪/变化短路）",
       description:
-        "默认捕获目标窗口；source=display 则捕获整个 capsule 显示器。" +
-        "PNG 写入磁盘并返回 image_path——不内联 base64，避免大图打爆 host 的 token 上限。" +
-        "max_image_width > 0 时等比降采样到该宽度（0 = 保留原始分辨率）。",
+        "默认捕获目标窗口；source=display 则捕获整个 capsule 显示器。图像写盘返回 image_path，不内联 base64。" +
+        "省 token 要点：host 读图成本≈像素面积（约 w*h/750 token）——" +
+        "(1) region_norm=[x,y,w,h]（相对整帧归一化）只截要看的区域；" +
+        "(2) only_if_changed=true 时若整帧与上次几乎相同（dHash），不产新图直接返回 unchanged=true——确认类截图先走这个；" +
+        "(3) max_image_width 默认 1024（≈1k token/图），看细节才调大。" +
+        "只想读屏幕文字用 vision_map.snapshot(include_image=false) 的 ocr_tokens/candidates，零图像成本。",
       inputSchema: {
         app_id: z.string(),
         source: z.enum(["window", "display"]).optional(),
-        max_image_width: z.number().int().min(0).max(8192).default(0),
+        max_image_width: z
+          .number()
+          .int()
+          .min(0)
+          .max(8192)
+          .default(1024)
+          .describe("等比降采样宽度，0=原始分辨率。1024≈1k token，1568 以上按 host 上限截断"),
+        region_norm: z
+          .tuple([
+            z.number().min(0).max(1),
+            z.number().min(0).max(1),
+            z.number().min(0).max(1),
+            z.number().min(0).max(1),
+          ])
+          .optional()
+          .describe("[x,y,w,h] 相对整帧的归一化区域，先裁剪再降采样。确认局部 UI 时务必用它"),
+        only_if_changed: z
+          .boolean()
+          .default(false)
+          .describe("整帧内容与上次 capture/动作反馈几乎相同时返回 unchanged=true 而非新图"),
+        format: z.enum(["jpeg", "png"]).default("jpeg").describe("jpeg（默认，磁盘小 5-10×）/ png（无损）"),
+        jpeg_quality: z.number().int().min(1).max(100).default(85),
       },
     },
-    async ({ app_id, source, max_image_width }) => {
+    async ({ app_id, source, max_image_width, region_norm, only_if_changed, format, jpeg_quality }) => {
       try {
         return await withAppQuickLook(ctx, app_id, async (app) => {
           const capsule = await ensureCapsule(ctx, app);
           const frame = await capsule.capture({ source });
-          const file = await writeFramePng(ctx, app_id, frame, max_image_width);
+          const stats = frameStats(frame.width_px, frame.height_px, frame.pixels);
+          const hash = computeDHash(frame);
+          const hashKey = `${app_id}:${frame.source}`;
+          const previous = ctx.lastCaptures.get(hashKey);
+          if (
+            only_if_changed &&
+            previous &&
+            hammingDistance(previous.hash, hash) <= UNCHANGED_HAMMING_MAX
+          ) {
+            ctx.lastCaptures.set(hashKey, { ...previous, hash, at: new Date().toISOString() });
+            return StructuredOk(
+              {
+                unchanged: true,
+                visual_hash: hash,
+                last_image_path: previous.image_path,
+                last_captured_at: previous.at,
+                captured_at: frame.captured_at,
+                source: frame.source,
+              },
+              `unchanged（与上次内容一致，未产新图）${previous.image_path ? `；上次图像 ${previous.image_path}` : ""}`,
+            );
+          }
+          const file = await writeFrameImage(ctx, app_id, frame, {
+            maxWidth: max_image_width,
+            regionNorm: region_norm,
+            format,
+            jpegQuality: jpeg_quality,
+          });
+          const { changed_since_last } = rememberFrameHash(ctx, hashKey, hash, file.path);
+          const uniformWarning = stats.uniform
+            ? "⚠️ 整帧近乎纯色（可能未拍到目标内容：窗口被遮挡/最小化/尚未渲染）；建议 capsule.validate_geometry 或重新 attach_window。"
+            : "";
           return StructuredOk(
             {
               image_path: file.path,
-              image_mime: "image/png",
+              image_mime: file.mime,
               image_width_px: file.width,
               image_height_px: file.height,
               image_bytes: file.bytes,
@@ -357,9 +467,13 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
               captured_at: frame.captured_at,
               source: frame.source,
               capture_via: frame.via,
-              client_rect: frame.client_rect_in_frame,
+              region_norm,
+              visual_hash: hash,
+              changed_since_last,
+              frame_uniform: stats.uniform || undefined,
+              ...(region_norm ? {} : { client_rect: frame.client_rect_in_frame }),
             },
-            `${frame.source} ${frame.width_px}x${frame.height_px}${frame.via ? ` via=${frame.via}` : ""} → ${file.path} (${file.width}x${file.height}, ${Math.round(file.bytes / 1024)}KB)`,
+            `${uniformWarning}${frame.source} ${frame.width_px}x${frame.height_px}${region_norm ? ` region=[${region_norm.join(",")}]` : ""}${frame.via ? ` via=${frame.via}` : ""} → ${file.path} (${file.width}x${file.height}, ${Math.round(file.bytes / 1024)}KB)${changed_since_last === false ? "；内容与上次一致" : ""}`,
           );
         });
       } catch (err) {
@@ -437,8 +551,8 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           .int()
           .min(0)
           .max(8192)
-          .default(1280)
-          .describe("等比降采样到该宽度（Retina 原始帧常 >2500px 宽）；0 = 保留原始分辨率"),
+          .default(1024)
+          .describe("等比降采样到该宽度（Retina 原始帧常 >2500px 宽，1024≈1k token）；0 = 保留原始分辨率"),
         include_ax: z.boolean().default(true),
         include_ocr: z
           .boolean()
@@ -503,17 +617,21 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           let image_height_px: number | undefined;
           if (include_image) {
             if (image_output === "inline") {
-              const encoded = encodeFramePng(insights.frame, max_image_width);
-              image_base64 = encoded.png.toString("base64");
+              const encoded = encodeFrameImage(insights.frame, { maxWidth: max_image_width });
+              image_base64 = encoded.bytes.toString("base64");
               image_width_px = encoded.width;
               image_height_px = encoded.height;
             } else {
-              const file = await writeFramePng(ctx, app_id, insights.frame, max_image_width);
+              const file = await writeFrameImage(ctx, app_id, insights.frame, {
+                maxWidth: max_image_width,
+              });
               image_path = file.path;
               image_width_px = file.width;
               image_height_px = file.height;
             }
           }
+          // snapshot 也参与整帧 hash 记账，让后续 capture(only_if_changed) 能短路
+          rememberFrameHash(ctx, `${app_id}:${insights.frame.source}`, computeDHash(insights.frame), image_path);
           const candidates = include_ax
             ? insights.accessibility
                 .filter((n) => isInteractiveCandidate(n))
